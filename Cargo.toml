@@ -1,0 +1,9 @@
+[package]
+name = "argosy"
+license = "Apache-2.0"
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/craft-build/argosy"
+description = "Library and Binary for creating, consuming and using knowledge books for coding harnesses"
+
+[dependencies]
