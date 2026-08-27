@@ -69,7 +69,7 @@ impl Namespace {
 
     /// `index.md` or `log.md` — OKF listing/history files that never count as
     /// concepts (spec §4.4).
-    fn is_listing_file(name: &str) -> bool {
+    pub(crate) fn is_listing_file(name: &str) -> bool {
         name == "index.md" || name == "log.md"
     }
 }
@@ -216,7 +216,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(
+    pub(crate) fn new(
         severity: Severity,
         id: Option<&'static str>,
         path: Option<PathBuf>,
@@ -234,19 +234,21 @@ impl Finding {
 /// The outcome of structurally validating a bundle (spec §4, §11 step 2).
 ///
 /// Scope boundary: validation checks the argosy structural requirements
-/// (`STR-1`–`STR-11`) plus the generic OKF concept-level requirement that
+/// (`STR-1`–`STR-11`), the generic OKF concept-level requirement that
 /// every `.md` concept under the reserved namespaces carries a `type` (the
-/// generic half of `DOC-1`/`MEM-1`/`STG-1`). Deeper OKF conformance (link
-/// integrity, listing contents, and so on) is deliberately out of scope, as
-/// are namespace-specific contracts enforced by later layers (`SKL-*`,
-/// `STG-2`-`STG-6`).
+/// generic half of `DOC-1`/`MEM-1`/`STG-1`), and the `skill`/`styleguide`
+/// namespace contracts (composed from [`crate::skill::validate`] and
+/// [`crate::styleguide::validate`], also callable standalone via
+/// [`Argosy::validate_skills`]/[`Argosy::validate_styleguide`]). Deeper OKF
+/// conformance (link integrity, listing contents) is deliberately out of
+/// scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationReport {
     findings: Vec<Finding>,
 }
 
 impl ValidationReport {
-    fn push(&mut self, finding: Finding) {
+    pub(crate) fn push(&mut self, finding: Finding) {
         self.findings.push(finding);
     }
 
@@ -292,9 +294,9 @@ impl fmt::Display for ValidationReport {
 }
 
 /// A bundle's directory entry, with its bundle-root-relative path.
-struct WalkEntry {
-    rel: PathBuf,
-    is_dir: bool,
+pub(crate) struct WalkEntry {
+    pub(crate) rel: PathBuf,
+    pub(crate) is_dir: bool,
 }
 
 /// The outcome of a recursive walk: the entries found, plus every directory
@@ -302,18 +304,18 @@ struct WalkEntry {
 /// than aborting the walk, so validation can report them precisely (with the
 /// offending path) and still run its other checks.
 #[derive(Default)]
-struct WalkResult {
-    entries: Vec<WalkEntry>,
+pub(crate) struct WalkResult {
+    pub(crate) entries: Vec<WalkEntry>,
     /// `(relative path, source)` of failed reads. An empty relative path
     /// means the walk root itself could not be read.
-    unreadable: Vec<(PathBuf, std::io::Error)>,
+    pub(crate) unreadable: Vec<(PathBuf, std::io::Error)>,
 }
 
 /// Recursively collects every entry under `root.join(rel)`. `.argosy/` index
 /// directories are skipped entirely: the index is a derivative artifact, not
 /// bundle content (spec §3.1). Directory symlinks are not followed
 /// (`file_type`, not `metadata`), so cycles are impossible.
-fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
+pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
     let rd = match fs::read_dir(root.join(rel)) {
         Ok(rd) => rd,
         Err(e) => {
@@ -356,7 +358,7 @@ fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
 
 /// Walks `root.join(rel)`, returning entries and read failures both sorted
 /// deterministically by relative path.
-fn sorted_walk(root: &Path, rel: &Path) -> WalkResult {
+pub(crate) fn sorted_walk(root: &Path, rel: &Path) -> WalkResult {
     let mut walk = WalkResult::default();
     walk_bundle(root, rel, &mut walk);
     walk.entries.sort_by(|a, b| a.rel.cmp(&b.rel));
@@ -491,6 +493,14 @@ impl Argosy {
         Self::validate_manifest(root, &entries, &mut report);
         Self::validate_namespaces(&entries, &mut report);
         Self::validate_concepts(root, &entries, &mut report);
+        // Namespace contracts (spec §5.2, §5.4). Unreadable directories are
+        // already reported above as `STR-1`; these validators skip them.
+        for finding in crate::skill::validate(root) {
+            report.push(finding);
+        }
+        for finding in crate::styleguide::validate(root) {
+            report.push(finding);
+        }
         report
     }
 
@@ -665,7 +675,8 @@ impl Argosy {
     /// the four reserved namespaces — the generic half of `DOC-1`/`MEM-1`/
     /// `STG-1`. OKF listing/history files (`index.md`/`log.md`) and nested
     /// `argosy.md` (already reported under `STR-3`) are skipped; namespace
-    /// -specific contracts are enforced by later layers.
+    /// -specific contracts (`SKL-*`, `STG-2`–`STG-4`) come from
+    /// [`crate::skill::validate`]/[`crate::styleguide::validate`].
     fn validate_concepts(root: &Path, entries: &[WalkEntry], report: &mut ValidationReport) {
         for entry in entries {
             if entry.is_dir || entry.rel.extension() != Some(std::ffi::OsStr::new("md")) {

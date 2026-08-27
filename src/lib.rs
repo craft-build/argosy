@@ -8,7 +8,11 @@
 pub mod bundle;
 pub mod concept;
 pub mod error;
+pub mod skill;
+pub mod styleguide;
 
 pub use bundle::{Argosy, Finding, Manifest, Namespace, Severity, ValidationReport};
 pub use concept::{Concept, ConceptId};
 pub use error::{Error, Result};
+pub use skill::{Skill, SkillForm};
+pub use styleguide::StyleguideRule;
