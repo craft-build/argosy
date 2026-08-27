@@ -80,6 +80,24 @@ pub enum Error {
     /// concept at `argosy.md`).
     #[snafu(display("`{}` is not an openable argosy bundle: {reason}", path.display()))]
     NotAnArgosy { path: PathBuf, reason: String },
+
+    /// A project context activated two argosys with the same manifest name
+    /// (`MUL-5`: identity by name must be unambiguous). The colliding name is
+    /// included.
+    #[snafu(display(
+        "duplicate argosy name `{name}`: every active argosy must have a distinct manifest name (MUL-5)"
+    ))]
+    DuplicateArgosyName { name: String },
+
+    /// A qualified lookup named an argosy that is not active in the project
+    /// context (neither the local argosy nor any imported one).
+    #[snafu(display("no active argosy named `{name}`"))]
+    UnknownArgosy { name: String },
+
+    /// An `argosy://` URI failed strict parsing (wrong scheme, missing
+    /// segments, non-reserved namespace, or out-of-charset id).
+    #[snafu(display("invalid argosy URI `{uri}`: {reason}"))]
+    InvalidUri { uri: String, reason: String },
 }
 
 /// Convenient alias for `std::result::Result` with [`Error`].
