@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use snafu::Snafu;
 
+use crate::concept::ConceptId;
+
 /// All errors argosy can produce. Marked `#[non_exhaustive]`: later layers
 /// (bundles, indexing, packaging) add variants without breaking matches.
 #[non_exhaustive]
@@ -47,6 +49,31 @@ pub enum Error {
     /// Catch-all validation failure with a human-readable message.
     #[snafu(display("{reason}"))]
     Validation { reason: String },
+
+    /// A write or promotion targeted a concept id that already exists; the
+    /// library never overwrites silently except through the deliberate
+    /// `write_concept` edit path.
+    #[snafu(display("concept `{id}` already exists"))]
+    ConceptExists { id: ConceptId },
+
+    /// A read, delete, or promotion source named a concept id with no file.
+    #[snafu(display("concept `{id}` does not exist"))]
+    ConceptNotFound { id: ConceptId },
+
+    /// A write targeted a filename reserved by the bundle format (§4.4:
+    /// `argosy.md`, `index.md`, `log.md`).
+    #[snafu(display(
+        "`argosy.md`, `index.md`, and `log.md` are reserved filenames and cannot be write targets"
+    ))]
+    ReservedFilename,
+
+    /// A write violated the target namespace's hard contract (e.g. `STG-2`
+    /// when a `styleguide/` concept lacks `type: Styleguide Rule`).
+    #[snafu(display("namespace contract violation ({requirement}): {detail}"))]
+    NamespaceContractViolation {
+        requirement: &'static str,
+        detail: String,
+    },
 
     /// A path could not be opened as an argosy bundle root (`Argosy::open`'s
     /// hard failures: not a directory, or no parseable `Argosy Manifest`

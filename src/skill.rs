@@ -280,7 +280,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
 /// untyped concept is wholly the structural layer's generic `STR-1` finding,
 /// so all checks are skipped for it; `SKL-3` fires only on a
 /// present-but-wrong `type`.
-fn entry_point_findings(rel: &Path, concept: &Concept, findings: &mut Vec<Finding>) {
+pub(crate) fn entry_point_findings(rel: &Path, concept: &Concept, findings: &mut Vec<Finding>) {
     let Some(ty) = concept.concept_type() else {
         return;
     };

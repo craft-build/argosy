@@ -23,7 +23,7 @@ use crate::concept::{Concept, ConceptId};
 use crate::error::{Error, Result};
 
 /// The `type` every styleguide rule concept must carry (`STG-2`).
-const TYPE: &str = "Styleguide Rule";
+pub(crate) const TYPE: &str = "Styleguide Rule";
 
 /// A styleguide rule: an owning typed view over one `styleguide/` concept.
 ///
