@@ -1,14 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Argosy: libraries for creating, consuming, and using OKF knowledge bundles.
+//!
+//! This layer provides the foundation every later module builds on: the
+//! crate-wide [`Error`] type and [`Concept`], the markdown-plus-frontmatter
+//! document all parsing, validation, and indexing operate on.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod concept;
+pub mod error;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use concept::{Concept, ConceptId};
+pub use error::{Error, Result};
