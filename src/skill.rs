@@ -99,9 +99,17 @@ fn candidates(ns_dir: &Path) -> Result<Vec<Candidate>> {
     for entry in entries {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let ty = entry.file_type().context(IoSnafu {
-            path: ns_dir.join(name),
-        })?;
+        // The index is a derivative artifact, not bundle content — consistent
+        // with `walk_bundle` skipping `.argosy` at every depth.
+        if name == ".argosy" {
+            continue;
+        }
+        // Per-entry tolerance (a stat failure must not poison the whole
+        // listing); validation surfaces such entries via the structural
+        // layer's STR-1.
+        let Ok(ty) = entry.file_type() else {
+            continue;
+        };
         if ty.is_dir() {
             out.push(Candidate {
                 entry_rel: PathBuf::from("skill").join(name).join(format!("{name}.md")),
@@ -173,18 +181,14 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     for entry in entries {
         let name = entry.file_name();
         let name = name.to_string_lossy().into_owned();
+        if name == ".argosy" {
+            continue; // derivative index dir, consistent with `walk_bundle`
+        }
         let rel = PathBuf::from("skill").join(&name);
-        let ty = match entry.file_type() {
-            Ok(ty) => ty,
-            Err(e) => {
-                findings.push(Finding::new(
-                    Severity::Error,
-                    Some("SKL-1"),
-                    Some(rel),
-                    format!("`skill/` entry type could not be read: {e}"),
-                ));
-                continue;
-            }
+        // A per-entry stat failure is already the structural layer's STR-1;
+        // emitting SKL-1 here too would double-report one root cause.
+        let Ok(ty) = entry.file_type() else {
+            continue;
         };
 
         if ty.is_file() {
@@ -215,10 +219,15 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
                 dir_entries.filter_map(std::result::Result::ok).collect();
             let entry_name = format!("{name}.md");
             let entry_rel = rel.join(&entry_name);
-            if !dir_entries
-                .iter()
-                .any(|e| e.file_name() == *OsStr::new(&entry_name))
-            {
+            // The entry point must exist *as a file*: a directory named
+            // `deploy.md` does not satisfy SKL-2. An entry whose own
+            // metadata failed to stat falls to the structural layer's STR-1,
+            // so guessing SKL-2 here would only add noise — treat it as seen.
+            let entry_point_file = dir_entries.iter().any(|e| {
+                e.file_name() == *OsStr::new(&entry_name)
+                    && e.file_type().map_or(true, |t| t.is_file())
+            });
+            if !entry_point_file {
                 findings.push(Finding::new(
                     Severity::Error,
                     Some("SKL-2"),
@@ -238,7 +247,12 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             // would penalize legitimate layouts.
             let stray = dir_entries.iter().any(|e| {
                 let n = e.file_name();
-                n != *OsStr::new(&entry_name) && n != "references" && n != ".argosy"
+                let s = n.to_str().unwrap_or("");
+                n != *OsStr::new(&entry_name)
+                    && n != "references"
+                    && n != ".argosy"
+                    // OKF listing/history files are legitimate anywhere.
+                    && !Namespace::is_listing_file(s)
             });
             if stray {
                 findings.push(Finding::new(
@@ -270,6 +284,12 @@ fn entry_point_findings(rel: &Path, concept: &Concept, findings: &mut Vec<Findin
     let Some(ty) = concept.concept_type() else {
         return;
     };
+    // A present-but-empty `type` is "untyped" as far as OKF conformance is
+    // concerned (`is_okf_conformant`): the generic pass already reports it,
+    // so SKL-3 must not double-report.
+    if ty.trim().is_empty() {
+        return;
+    }
     if ty.trim() != TYPE {
         findings.push(Finding::new(
             Severity::Error,
@@ -409,7 +429,9 @@ mod tests {
         assert!(validate(&fixture("skill-untyped")).is_empty());
         let report = Argosy::validate(fixture("skill-untyped"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
-        assert_eq!(ids, vec![Some("STR-1")]);
+        // `skill/` has no generic concept-conformance ID of its own, so the
+        // finding carries none rather than the misleading bundle-level STR-1.
+        assert_eq!(ids, vec![None]);
     }
 
     #[test]
@@ -441,5 +463,70 @@ mod tests {
     fn validate_skills_stays_silent_on_valid_fixture() {
         let argosy = Argosy::open(fixture("valid-acme-billing")).unwrap();
         assert!(argosy.validate_skills().is_empty());
+    }
+
+    const MANIFEST: &str = "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+                            okf_version: \"0.2\"\ndescription: t\n---\n# t\n";
+    const VALID_SKILL: &str = "---\ntype: Skill\ndescription: does things\n---\ndo the things\n";
+
+    /// Builds a minimal argosy in a temp dir: a valid manifest plus the given
+    /// `(relative path, contents)` files.
+    fn temp_bundle(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("argosy.md"), MANIFEST).unwrap();
+        for (rel, contents) in files {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn dot_argosy_inside_skill_is_neither_skill_nor_finding() {
+        let bundle = temp_bundle(&[
+            ("skill/.argosy/index.db", "placeholder"),
+            ("skill/deploy.md", VALID_SKILL),
+        ]);
+        assert_eq!(validate(bundle.path()), vec![]);
+        let argosy = Argosy::open(bundle.path()).unwrap();
+        let skills = Skill::list(&argosy).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "deploy");
+    }
+
+    #[test]
+    fn skl3_empty_type_is_untyped_so_it_is_not_double_reported() {
+        let bundle = temp_bundle(&[(
+            "skill/deploy.md",
+            "---\ntype: \"\"\ndescription: d\n---\nbody\n",
+        )]);
+        assert_eq!(validate(bundle.path()), vec![]);
+        let report = Argosy::validate(bundle.path());
+        let errors: Vec<_> = report.errors().collect();
+        // The generic pass's untyped finding only — no SKL-3 on top.
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].path.as_deref(),
+            Some(Path::new("skill/deploy.md"))
+        );
+        assert!(errors[0].message.contains("type"));
+    }
+
+    #[test]
+    fn skl2_entry_point_must_be_a_file_not_a_directory() {
+        let bundle = temp_bundle(&[]);
+        fs::create_dir_all(bundle.path().join("skill/deploy/deploy.md")).unwrap();
+        let findings = validate(bundle.path());
+        assert_eq!(error_ids(&findings), vec![Some("SKL-2")]);
+    }
+
+    #[test]
+    fn skl6_listing_files_inside_a_skill_dir_are_legitimate() {
+        let bundle = temp_bundle(&[
+            ("skill/deploy/deploy.md", VALID_SKILL),
+            ("skill/deploy/index.md", "# skill index\n"),
+        ]);
+        assert_eq!(validate(bundle.path()), vec![]);
     }
 }

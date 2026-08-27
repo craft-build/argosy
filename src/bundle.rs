@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use yaml_serde::{Mapping, Value};
 
 use crate::concept::{Concept, ConceptId};
@@ -21,9 +21,13 @@ use crate::error::{Error, IoSnafu, MissingFieldSnafu, NotAnArgosySnafu, Result, 
 /// producer-defined custom one (spec §4.3, `STR-7`–`STR-11`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Namespace {
+    /// The `document/` namespace: prose knowledge and decisions (§5.1).
     Document,
+    /// The `skill/` namespace: on-demand instructions (§5.2, `SKL-1`–`SKL-7`).
     Skill,
+    /// The `memory/` namespace: session-derived learnings (§5.3).
     Memory,
+    /// The `styleguide/` namespace: typed linting rules (§5.4).
     Styleguide,
     /// Any other top-level directory (`STR-10`); the name is preserved.
     Custom(String),
@@ -65,6 +69,21 @@ impl Namespace {
             "styleguide" => Self::Styleguide,
             other => Self::Custom(other.to_string()),
         }
+    }
+
+    /// Builds a [`Namespace::Custom`] after validating the name is a single
+    /// safe path component — empty names, `.`/`..`, and separators are
+    /// rejected, since anything else could traverse out of the bundle root
+    /// when joined under it. (`from_dir_name` needs no check: it classifies
+    /// names from `read_dir`, which are single components by construction.)
+    pub fn custom(name: &str) -> Result<Self> {
+        ensure!(
+            is_safe_component(name),
+            ValidationSnafu {
+                reason: format!("invalid custom namespace name `{name}`")
+            }
+        );
+        Ok(Self::Custom(name.to_string()))
     }
 
     /// `index.md` or `log.md` — OKF listing/history files that never count as
@@ -172,6 +191,21 @@ impl Manifest {
     }
 }
 
+/// True iff `name` is a single safe path component — never empty, `.`/`..`,
+/// or containing separators — so joining it under the bundle root cannot
+/// traverse out of the bundle.
+fn is_safe_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
+}
+
+/// True iff `path` is a real directory. `symlink_metadata` (not `is_dir`) is
+/// used so a symlink pointing outside the bundle is refused — entering a
+/// namespace through a symlink would bypass the walk's no-follow policy and
+/// let bundle content live outside the bundle root.
+fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
 /// Extracts a string-ish scalar, tolerating unquoted YAML numbers/bools (an
 /// unquoted `okf_version: 0.2` parses as a number, yet is read as `"0.2"`).
 fn scalar_str(value: &Value) -> Option<String> {
@@ -207,11 +241,15 @@ impl fmt::Display for Severity {
 /// One issue found while validating a bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
+    /// How serious the issue is (drives [`ValidationReport::is_conformant`]).
     pub severity: Severity,
-    /// The spec requirement ID this finding evidences (e.g. `STR-4`), if any.
+    /// The spec requirement ID this finding evidences (e.g. `STR-4`); `§4.2`
+    /// names a spec section whose fields have no ID of their own. `None`
+    /// means no requirement maps to this finding.
     pub id: Option<&'static str>,
     /// Bundle-relative path concerned, when the finding is about a file.
     pub path: Option<PathBuf>,
+    /// What is wrong, in prose.
     pub message: String,
 }
 
@@ -370,14 +408,15 @@ pub(crate) fn sorted_walk(root: &Path, rel: &Path) -> WalkResult {
 /// reserved namespace is reported. `document`/`memory`/`styleguide` have a
 /// dedicated "must satisfy OKF concept conformance" requirement (`DOC-1`/
 /// `MEM-1`/`STG-1`); `skill/` has none of its own (its specific `type: Skill`
-/// contract is `SKL-3`, enforced by a later layer), so it falls back to the
-/// bundle-wide OKF conformance requirement `STR-1`.
-fn ns_conformance_id(ns: &str) -> &'static str {
+/// contract is `SKL-3`, enforced by the namespace validator), so findings
+/// there carry no ID rather than the misleading `STR-1`, which is about the
+/// root bundle structure.
+fn ns_conformance_id(ns: &str) -> Option<&'static str> {
     match ns {
-        "document" => "DOC-1",
-        "memory" => "MEM-1",
-        "styleguide" => "STG-1",
-        _ => "STR-1",
+        "document" => Some("DOC-1"),
+        "memory" => Some("MEM-1"),
+        "styleguide" => Some("STG-1"),
+        _ => None,
     }
 }
 
@@ -393,9 +432,11 @@ impl Argosy {
     /// Opens the bundle rooted at `path`. Errors only on hard failures: the
     /// root is not a readable directory, `argosy.md` is missing, or
     /// `argosy.md` is not a parseable `Argosy Manifest` concept (`STR-1`,
-    /// `STR-2`, `STR-4`, `STR-5`). Everything validation can additionally
-    /// surface comes back from [`Argosy::validate`], even for a bundle this
-    /// call accepted.
+    /// `STR-2`, `STR-4`, `STR-5`). Note, as a deliberate deviation from
+    /// doc 02 §2.3 (see the in-code comment), manifest-field errors
+    /// (missing `name`, malformed `argosy_version`) hard-fail here too.
+    /// Everything else validation surfaces comes back from
+    /// [`Argosy::validate`], even for a bundle this call accepted.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref();
 
@@ -441,8 +482,13 @@ impl Argosy {
             ));
         }
 
-        // Declare manifest-field hard failures as `NotAnArgosy` too, so a
-        // caller can classify "this path is not an argosy" by one variant.
+        // Deviation from doc 02 §2.3 (surfaced per docs/prompts/00-overview.md
+        // §2): manifest-field errors (missing `name`, malformed
+        // `argosy_version`) hard-fail here as `NotAnArgosy`, though §2.3
+        // scopes hard failures to a missing/unparseable manifest. Rationale:
+        // callers can then classify "this path is not an argosy" by one
+        // error variant, and the same problems still surface via
+        // `validate()` as `STR-5` findings.
         let manifest = Manifest::parse(&concept).map_err(|e| {
             NotAnArgosySnafu {
                 path: root.to_path_buf(),
@@ -602,10 +648,12 @@ impl Argosy {
             }
             Some(_) => {}
         }
+        // §4.2 SHOULDs have no `STR-*` ID of their own; the finding labels
+        // the spec section so ID-matching consumers can still trace them.
         if concept.get("okf_version").is_none() {
             report.push(Finding::new(
                 Severity::Warning,
-                None,
+                Some("§4.2"),
                 Some(manifest_rel.clone()),
                 "manifest SHOULD declare the `okf_version` it targets (§4.2)",
             ));
@@ -613,7 +661,7 @@ impl Argosy {
         if concept.get_str("description").is_none_or(str::is_empty) {
             report.push(Finding::new(
                 Severity::Warning,
-                None,
+                Some("§4.2"),
                 Some(manifest_rel),
                 "manifest SHOULD declare a `description` (§4.2)",
             ));
@@ -697,13 +745,13 @@ impl Argosy {
             match Concept::from_file(root.join(&entry.rel)) {
                 Err(e) => report.push(Finding::new(
                     Severity::Error,
-                    Some(id),
+                    id,
                     Some(entry.rel.clone()),
                     format!("concept failed to parse: {e}"),
                 )),
                 Ok(concept) if !concept.is_okf_conformant() => report.push(Finding::new(
                     Severity::Error,
-                    Some(id),
+                    id,
                     Some(entry.rel.clone()),
                     "concept has no frontmatter `type` (OKF concept conformance)",
                 )),
@@ -723,10 +771,18 @@ impl Argosy {
     }
 
     /// The directory of `namespace`, if it exists (`STR-8`: absent namespaces
-    /// are fine).
+    /// are fine). Only real directories count: a symlinked namespace would
+    /// let reads escape the bundle root, and a [`Namespace::Custom`] name
+    /// that is not a single safe path component is refused rather than
+    /// joined.
     pub fn namespace_dir(&self, namespace: &Namespace) -> Option<PathBuf> {
+        if let Namespace::Custom(name) = namespace
+            && !is_safe_component(name)
+        {
+            return None;
+        }
         let dir = self.root.join(namespace.as_dir_name());
-        dir.is_dir().then_some(dir)
+        is_real_dir(&dir).then_some(dir)
     }
 
     /// All namespaces actually present: reserved first (in [`Namespace::RESERVED`]
@@ -734,7 +790,7 @@ impl Argosy {
     pub fn namespaces_present(&self) -> Vec<Namespace> {
         let mut present: Vec<Namespace> = Namespace::RESERVED
             .iter()
-            .filter(|name| self.root.join(name).is_dir())
+            .filter(|name| is_real_dir(&self.root.join(name)))
             .map(|name| Namespace::from_dir_name(name))
             .collect();
 
@@ -942,6 +998,8 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert!(warnings.iter().any(|f| f.message.contains("okf_version")));
         assert!(warnings.iter().any(|f| f.message.contains("description")));
+        // The §4.2 SHOULDs are traceable by ID like every other finding.
+        assert!(warnings.iter().all(|f| f.id == Some("§4.2")));
     }
 
     #[test]
@@ -1027,6 +1085,55 @@ mod tests {
             "unexpected rendering: {line}"
         );
         assert_eq!(rendered.lines().count(), 1);
+    }
+
+    #[test]
+    fn custom_namespace_rejects_path_traversal() {
+        assert!(Namespace::custom("roadmap").is_ok());
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", "a:b"] {
+            assert!(Namespace::custom(bad).is_err(), "{bad:?} must be rejected");
+        }
+        // Even a directly constructed `Custom` cannot make `namespace_dir`
+        // or `concepts` escape the bundle root.
+        let argosy = Argosy::open(fixture("valid-acme-billing")).unwrap();
+        assert!(
+            argosy
+                .namespace_dir(&Namespace::Custom("..".into()))
+                .is_none()
+        );
+        assert!(
+            argosy
+                .concepts(&Namespace::Custom("../../etc".into()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A symlinked namespace directory must not be entered: listing
+    /// pretends it does not exist rather than walking outside the bundle.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_namespace_is_not_entered() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secret.md"),
+            "---\ntype: Secret\n---\nbody\n",
+        )
+        .unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        std::fs::write(
+            root.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+             okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("skill")).unwrap();
+
+        let argosy = Argosy::open(root).unwrap();
+        assert!(argosy.namespace_dir(&Namespace::Skill).is_none());
+        assert!(!argosy.namespaces_present().contains(&Namespace::Skill));
+        assert!(argosy.concepts(&Namespace::Skill).unwrap().is_empty());
     }
 
     #[test]

@@ -13,11 +13,20 @@ use crate::error::{Error, IoSnafu, MissingFrontmatterSnafu, Result, ValidationSn
 const MAX_FRONTMATTER_DEPTH: usize = 100;
 
 fn yaml_depth(value: &Value) -> usize {
-    match value {
-        Value::Mapping(m) => 1 + m.values().map(yaml_depth).max().unwrap_or(0),
-        Value::Sequence(s) => 1 + s.iter().map(yaml_depth).max().unwrap_or(0),
-        _ => 1,
+    /// Recursion is bounded so adversarially deep YAML cannot overflow the
+    /// stack here (the YAML parser has its own limit, but this stays safe
+    /// regardless); anything at or past the cap reads as the cap.
+    fn go(value: &Value, remaining: usize) -> usize {
+        if remaining == 0 {
+            return MAX_FRONTMATTER_DEPTH + 1;
+        }
+        match value {
+            Value::Mapping(m) => 1 + m.values().map(|v| go(v, remaining - 1)).max().unwrap_or(0),
+            Value::Sequence(s) => 1 + s.iter().map(|v| go(v, remaining - 1)).max().unwrap_or(0),
+            _ => 1,
+        }
     }
+    go(value, MAX_FRONTMATTER_DEPTH + 1)
 }
 
 /// One markdown-plus-frontmatter document.
@@ -114,7 +123,10 @@ impl Concept {
                         _ => return MissingFrontmatterSnafu { path }.fail(),
                     }
                 };
-                return Ok(Self { frontmatter, body });
+                // Route through `new` so parsed concepts get the same
+                // frontmatter depth guard as constructed ones — `to_string`'s
+                // infallible contract depends on it.
+                return Self::new(frontmatter, body);
             }
             offset += line.len();
         }
@@ -131,8 +143,8 @@ impl Concept {
         if self.frontmatter.is_empty() {
             return self.body.clone();
         }
-        // Cannot fail for parsed concepts (yaml_serde round-trips its own output)
-        // or ones built via `Concept::new` (depth-checked at construction).
+        // Cannot fail: every construction path (`new`, `parse`) depth-checks
+        // the frontmatter against the emitter's recursion limit.
         let yaml = yaml_serde::to_string(&self.frontmatter)
             .expect("frontmatter depth is validated at construction");
         format!("---\n{yaml}---\n{}", self.body)
@@ -455,5 +467,29 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(Concept::new(deep, String::new()).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_infeasibly_deep_frontmatter_so_serialization_cannot_panic() {
+        // The same guard `Concept::new` enforces must apply to parsed input —
+        // otherwise `to_string` would panic on a bundle-provided file.
+        let mut yaml = "v".to_string();
+        for _ in 0..(MAX_FRONTMATTER_DEPTH + 10) {
+            yaml = format!("{{a: {yaml}}}");
+        }
+        let input = format!("---\nk: {yaml}\n---\nbody\n");
+        let err = Concept::from_str(&input).unwrap_err();
+        assert!(
+            matches!(err, Error::Validation { .. }),
+            "expected a validation error, got {err}"
+        );
+
+        // Just under the limit still parses and serializes fine.
+        let mut yaml = "v".to_string();
+        for _ in 0..50 {
+            yaml = format!("{{a: {yaml}}}");
+        }
+        let concept = Concept::from_str(&format!("---\nk: {yaml}\n---\nbody\n")).unwrap();
+        assert!(concept.to_string().contains("body"));
     }
 }

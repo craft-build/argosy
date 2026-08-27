@@ -154,28 +154,36 @@ impl StyleguideRule {
         self.section("Bad")
     }
 
-    /// Extracts the text between an exact `## <name>` heading and the next
-    /// heading of any level (or end of body), trimmed. Headings inside fenced
-    /// code blocks don't count (`#`-starting comment lines are idiomatic in
+    /// Extracts the text between a `## <name>` heading and the next heading
+    /// of any level (or end of body), trimmed. Headings inside fenced code
+    /// blocks don't count (`#`-starting comment lines are idiomatic in
     /// example code); a present-but-empty section yields `None`.
     fn section(&self, name: &str) -> Option<&str> {
         let body = self.concept.body();
-        let heading = format!("## {name}");
         let mut started: Option<usize> = None;
         let mut in_fence = false;
         let mut byte = 0;
         for line in body.split_inclusive('\n') {
-            let trimmed = line.trim();
-            if trimmed.starts_with("```") {
-                in_fence = !in_fence;
-            }
-            match started {
-                None if !in_fence && trimmed == heading => started = Some(byte + line.len()),
-                Some(start) if !in_fence && trimmed.starts_with('#') => {
-                    let text = body[start..byte].trim();
-                    return (!text.is_empty()).then_some(text);
+            // CommonMark tolerates up to three leading spaces on headings and
+            // fences; deeper indentation is a code block and invisible here.
+            let indent = line.bytes().take_while(|b| *b == b' ').count();
+            if indent <= 3 {
+                let content = line[indent..].trim_end();
+                if content.starts_with("```") || content.starts_with("~~~") {
+                    in_fence = !in_fence;
                 }
-                _ => {}
+                if !in_fence {
+                    match started {
+                        None if is_target_heading(content, name) => {
+                            started = Some(byte + line.len())
+                        }
+                        Some(start) if is_any_heading(content) => {
+                            let text = body[start..byte].trim();
+                            return (!text.is_empty()).then_some(text);
+                        }
+                        _ => {}
+                    }
+                }
             }
             byte += line.len();
         }
@@ -184,6 +192,32 @@ impl StyleguideRule {
             (!text.is_empty()).then_some(text)
         })
     }
+}
+
+/// True iff `line` is exactly the level-2 ATX heading `## <name>`, tolerating
+/// a CommonMark closing sequence (`## Good ##`); `## Gooder` does not match
+/// `Good`.
+fn is_target_heading(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix("## ") else {
+        return false;
+    };
+    let Some(rest) = rest.trim().strip_prefix(name) else {
+        return false;
+    };
+    // After the name: nothing, or a CommonMark closing sequence (spaces,
+    // one or more `#`s, optional trailing spaces).
+    let rest = rest.trim();
+    rest.is_empty()
+        || rest
+            .strip_prefix('#')
+            .is_some_and(|r| r.trim_matches(['#', ' ']).is_empty())
+}
+
+/// True iff `line` is an ATX heading of any level: leading `#`s followed by a
+/// space or end of line (so `#hashtag` and `#5 items` are prose, not headings).
+fn is_any_heading(line: &str) -> bool {
+    let hashes = line.bytes().take_while(|b| *b == b'#').count();
+    hashes > 0 && (line.len() == hashes || line.as_bytes()[hashes] == b' ')
 }
 
 /// Validates the `styleguide/` namespace contract of the bundle at `root`
@@ -210,11 +244,15 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         let Ok(concept) = Concept::from_file(root.join(&entry.rel)) else {
             continue;
         };
-        // An untyped concept is wholly the generic pass's `STG-1` finding;
-        // running rule-contract checks on it would only produce noise.
+        // An untyped concept — including a present-but-empty `type` — is
+        // wholly the generic pass's `STG-1` finding; running rule-contract
+        // checks on it would only double-report one root cause.
         let Some(ty) = concept.concept_type() else {
             continue;
         };
+        if ty.trim().is_empty() {
+            continue;
+        }
         if ty.trim() != TYPE {
             findings.push(Finding::new(
                 Severity::Error,
@@ -358,6 +396,32 @@ mod tests {
     }
 
     #[test]
+    fn examples_sections_handle_closers_tilde_fences_and_prose_hashes() {
+        let concept = Concept::from_str(
+            "---\ntype: Styleguide Rule\ndescription: d\n---\n\
+             ## Good ##\n\nok();\n\n~~~\n## Bad\nfence content, not a heading\n~~~\n\n\
+             ## Bad\n\n    ## Good\n#5 indented-code and hashtag lines are prose\nbad();\n\n\
+             ## Notes\n\nn\n",
+        )
+        .unwrap();
+        let rule = StyleguideRule {
+            id: ConceptId::from_str("styleguide/x").unwrap(),
+            concept,
+        };
+        // ATX closing sequence tolerated; tilde fence contents don't terminate.
+        assert_eq!(
+            rule.good_examples(),
+            Some("ok();\n\n~~~\n## Bad\nfence content, not a heading\n~~~")
+        );
+        // Neither the 4-space-indented code line nor `#5`/`#hashtag` prose
+        // counts as a heading, so the section runs to `## Notes`.
+        assert_eq!(
+            rule.bad_examples(),
+            Some("## Good\n#5 indented-code and hashtag lines are prose\nbad();")
+        );
+    }
+
+    #[test]
     fn filter_narrows_by_language_and_category_exactly() {
         let mk = |id: &str, language: Option<&str>, category: Option<&str>| {
             let mut fm = yaml_serde::Mapping::new();
@@ -460,6 +524,30 @@ mod tests {
             .collect();
         // One warning per missing facet.
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn stg2_empty_type_is_untyped_so_it_is_not_double_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+             okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("styleguide")).unwrap();
+        std::fs::write(
+            root.join("styleguide/x.md"),
+            "---\ntype: \"\"\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        assert_eq!(validate(root), vec![]);
+        let report = Argosy::validate(root);
+        let errors: Vec<_> = report.errors().collect();
+        // The generic pass's STG-1 only — no STG-2 on top.
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].id, Some("STG-1"));
     }
 
     #[test]
