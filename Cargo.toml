@@ -7,6 +7,7 @@ repository = "https://github.com/craft-build/argosy"
 description = "Library and Binary for creating, consuming and using knowledge books for coding harnesses"
 
 [dependencies]
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 snafu = "0.8"
 yaml_serde = "0.10"

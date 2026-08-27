@@ -47,6 +47,12 @@ pub enum Error {
     /// Catch-all validation failure with a human-readable message.
     #[snafu(display("{reason}"))]
     Validation { reason: String },
+
+    /// A path could not be opened as an argosy bundle root (`Argosy::open`'s
+    /// hard failures: not a directory, or no parseable `Argosy Manifest`
+    /// concept at `argosy.md`).
+    #[snafu(display("`{}` is not an openable argosy bundle: {reason}", path.display()))]
+    NotAnArgosy { path: PathBuf, reason: String },
 }
 
 /// Convenient alias for `std::result::Result` with [`Error`].
