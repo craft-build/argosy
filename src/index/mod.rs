@@ -610,7 +610,7 @@ fn concept_id(id: &str) -> crate::concept::ConceptId {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::fs;
@@ -707,7 +707,7 @@ mod tests {
     /// HashMap-backed store with brute-force cosine search honoring every
     /// `Filter` field. Also records bookkeeping (`clears`, `removals`) so
     /// tests can assert reconcile's calls.
-    struct MemStore {
+    pub(crate) struct MemStore {
         model_id: Option<String>,
         units: HashMap<QualifiedConceptId, EmbeddingUnit>,
         clears: usize,
@@ -715,7 +715,7 @@ mod tests {
     }
 
     impl MemStore {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 model_id: None,
                 units: HashMap::new(),

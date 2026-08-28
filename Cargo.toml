@@ -49,10 +49,40 @@ fastembed = { version = "5", default-features = false, features = [
   "ort-download-binaries-native-tls",
 ], optional = true }
 
+# --- Optional `mcp` server deps (doc 10) ------------------------------------
+# rmcp is the official Rust MCP SDK. Features are the minimal set: `server`
+# (handler + schemars for tool schemas), `transport-io` (stdio, the default
+# transport), `transport-streamable-http-server` (the secondary HTTP mode).
+# `base64`/`macros`/`auth` stay off; tool wiring is hand-rolled for clarity.
+rmcp = { version = "3.1", default-features = false, features = [
+  "server",
+  "transport-io",
+  "transport-streamable-http-server",
+], optional = true }
+# The async runtime the `mcp` verb serves under. Deviation from doc 10 §2.1's
+# "binary only": the library's `ArgosyMcpServer` uses `tokio::sync::Mutex`
+# (Send-able guards for non-Sync backends), so the `mcp` feature carries
+# tokio in the library too. Booting a runtime is still binary-only.
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+  "net",
+  "time",
+  "sync",
+], optional = true }
+# Serves rmcp's `StreamableHttpService` (a tower service) for the secondary
+# HTTP transport. `http1`+`tokio` only; JSON layer unused (MCP frames are
+# handled by rmcp).
+axum = { version = "0.8", default-features = false, features = [
+  "http1",
+  "tokio",
+], optional = true }
+
 [features]
 # The backend is on by default (doc 00 §3: the binary and MCP server run it);
 # `cargo build --no-default-features` yields the dependency-free trait layer.
-default = ["default-index"]
+default = ["default-index", "mcp"]
 # The default vector-store/embedding backend (sqlite-vec + fastembed). The
 # trait layer in `src/index` needs no dependencies; this feature carries the
 # whole backend so library consumers with their own stack pay nothing.
@@ -61,6 +91,9 @@ default-index = [
   "dep:sqlite-vec",
   "dep:fastembed",
 ]
+# The MCP server (doc 10): `src/mcp.rs` in the library plus the `argosy mcp`
+# verb. `--no-default-features` library builds stay rmcp-free (doc 00 §4).
+mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -70,3 +103,17 @@ predicates = "3"
 # Also listed in `[dependencies]`; the CLI integration tests parse the
 # binary's `--json` stdout with it.
 serde_json = "1"
+# The `client` half of rmcp for the in-process MCP end-to-end test
+# (tests/mcp.rs). Optional in `[dependencies]`; features unify for test
+# builds, so library consumers never compile the client.
+rmcp = { version = "3.1", default-features = false, features = [
+  "server",
+  "client",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+] }

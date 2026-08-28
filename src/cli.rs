@@ -52,6 +52,47 @@ enum Command {
     Pull(PullArgs),
     Index(IndexArgs),
     Convert(ConvertArgs),
+    Mcp(McpArgs),
+}
+
+/// Serve this project over the Model Context Protocol (doc 10) so any
+/// MCP-compatible harness can search and read its argosys and write to the
+/// local one. Lifecycle steps 1–4 run at startup: the project opens,
+/// validates, and reconciles its index before the transport starts —
+/// reconcile-on-start is the freshness model; there are no live change
+/// notifications, so restart the server after external edits.
+///
+/// The default transport speaks JSON-RPC over stdio: **stdout is the
+/// protocol channel** — all diagnostics go to stderr. The HTTP transport is
+/// unauthenticated: only bind it on trusted networks (spec §15).
+#[derive(Args)]
+struct McpArgs {
+    /// Directory containing the LOCAL (writable) argosy — the one holding
+    /// its own `argosy.md`. Memory/rule writes and promotions land here;
+    /// imported argosys are always read-only (MUL-3).
+    #[arg(long)]
+    project_root: PathBuf,
+
+    /// Root of an argosy to import read-only (its manifest name becomes its
+    /// `argosy://` name); repeat for multiple imports.
+    #[arg(long)]
+    import: Vec<PathBuf>,
+
+    /// Transport to serve: `stdio` (the default, for editor/CLI harnesses
+    /// that spawn this process) or `http` (streamable HTTP, unauthenticated,
+    /// trusted networks only).
+    #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
+    transport: McpTransport,
+
+    /// Address the HTTP transport binds (`--transport http` only).
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    bind: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum McpTransport {
+    Stdio,
+    Http,
 }
 
 /// Clone an external argosy into this project's `.argosy/<name>` checkout
@@ -317,6 +358,7 @@ fn cmd_result(out: &Output, command: &Command) -> Result<ExitCode> {
         Command::Pull(args) => cmd_pull(out, args),
         Command::Index(args) => cmd_index(out, args),
         Command::Convert(args) => cmd_convert(out, args),
+        Command::Mcp(args) => cmd_mcp(out, args),
     }
 }
 
@@ -679,6 +721,99 @@ fn cmd_index(_out: &Output, _args: &IndexArgs) -> Result<ExitCode> {
     Ok(ExitCode::FAILURE)
 }
 
+#[cfg(all(feature = "mcp", feature = "default-index"))]
+fn cmd_mcp(_out: &Output, args: &McpArgs) -> Result<ExitCode> {
+    use argosy::context::ProjectContext;
+    use argosy::error::Error;
+    use argosy::index::Index;
+    use argosy::index::fastembed::FastembedProvider;
+    use argosy::index::sqlite::SqliteVecStore;
+    use argosy::mcp::{ArgosyMcpServer, McpState};
+    use rmcp::ServiceExt;
+
+    // Lifecycle steps 1–4 run to completion before the transport starts: any
+    // startup failure prints via `run`'s `error:` mapping and exits 1 —
+    // never serve a half-broken context.
+    let context = ProjectContext::open(&args.project_root, args.import.iter().cloned())?;
+    let db = args.project_root.join(".argosy/index.db");
+    let store = SqliteVecStore::open(&db)?;
+    let provider = FastembedProvider::new_default()?;
+    let mut index = Index::new(provider, store);
+    let report = index.reconcile(&context)?;
+    // stdout is the stdio protocol channel: every diagnostic is stderr.
+    eprintln!(
+        "argosy mcp: index reconciled ({} upserted, {} removed, {} unchanged)",
+        report.upserted, report.removed, report.unchanged
+    );
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Validation {
+            reason: format!("failed to start the tokio runtime: {e}"),
+        })?
+        .block_on(async move {
+        let state = McpState::new(context, index);
+        match args.transport {
+            McpTransport::Stdio => {
+                eprintln!("argosy mcp: serving on stdio");
+                let service = ArgosyMcpServer::new(state)
+                    .serve(rmcp::transport::stdio())
+                    .await
+                    .map_err(|e| Error::Validation {
+                        reason: format!("MCP stdio handshake failed: {e}"),
+                    })?;
+                // `cancel()` would shut the server down immediately; wait for
+                // the natural end (stdin EOF / client disconnect) instead.
+                service.waiting().await.map_err(|e| Error::Validation {
+                    reason: format!("MCP server task failed: {e}"),
+                })?;
+            }
+            McpTransport::Http => {
+                use rmcp::transport::streamable_http_server::{
+                    StreamableHttpServerConfig, StreamableHttpService,
+                    session::local::LocalSessionManager,
+                };
+                let server = ArgosyMcpServer::new(state);
+                let service = StreamableHttpService::new(
+                    move || Ok(server.clone()),
+                    std::sync::Arc::new(LocalSessionManager::default()),
+                    StreamableHttpServerConfig::default(),
+                );
+                let router = axum::Router::new().nest_service("/mcp", service);
+                let listener =
+                    tokio::net::TcpListener::bind(&args.bind)
+                        .await
+                        .map_err(|e| Error::Validation {
+                            reason: format!("failed to bind `{}`: {e}", args.bind),
+                        })?;
+                eprintln!(
+                    "argosy mcp: serving HTTP at http://{}/mcp (unauthenticated — trusted networks only)",
+                    listener.local_addr().map_err(|e| Error::Validation {
+                        reason: format!("bound address unreadable: {e}"),
+                    })?
+                );
+                axum::serve(listener, router)
+                    .await
+                    .map_err(|e| Error::Validation {
+                        reason: format!("HTTP server failed: {e}"),
+                    })?;
+            }
+        }
+        Ok::<(), Error>(())
+    })?;
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(not(all(feature = "mcp", feature = "default-index")))]
+fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
+    eprintln!(
+        "error: this `argosy` binary was built without the `mcp` feature; \
+         rebuild with default features to use the mcp subcommand"
+    );
+    Ok(ExitCode::FAILURE)
+}
+
 /// Maps query flags 1:1 onto the library's [`Filter`] (doc 06).
 #[cfg(feature = "default-index")]
 fn build_filter(q: &QueryArgs) -> Filter {
@@ -775,5 +910,49 @@ mod tests {
         assert!(filter.tags.is_none());
         assert!(filter.language.is_none());
         assert!(filter.category.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mcp_parse_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_flags_parse_and_stdio_is_the_default_transport() {
+        let cli = Cli::try_parse_from([
+            "argosy",
+            "mcp",
+            "--project-root",
+            "proj",
+            "--import",
+            "a",
+            "--import",
+            "b",
+            "--transport",
+            "http",
+            "--bind",
+            "0.0.0.0:9000",
+        ])
+        .expect("argv parses");
+        let Command::Mcp(args) = cli.command else {
+            panic!("expected mcp argv");
+        };
+        assert_eq!(args.project_root, PathBuf::from("proj"));
+        assert_eq!(
+            args.import,
+            vec![PathBuf::from("a"), PathBuf::from("b")],
+            "repeatable --import"
+        );
+        assert!(matches!(args.transport, McpTransport::Http));
+        assert_eq!(args.bind, "0.0.0.0:9000");
+
+        let cli =
+            Cli::try_parse_from(["argosy", "mcp", "--project-root", "proj"]).expect("argv parses");
+        let Command::Mcp(args) = cli.command else {
+            panic!("expected mcp argv");
+        };
+        assert!(matches!(args.transport, McpTransport::Stdio));
+        assert!(args.import.is_empty());
+        assert_eq!(args.bind, "127.0.0.1:8787");
     }
 }

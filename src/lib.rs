@@ -11,6 +11,8 @@ pub mod context;
 pub mod error;
 pub mod index;
 pub mod local;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod package;
 pub mod pull;
 pub mod skill;
