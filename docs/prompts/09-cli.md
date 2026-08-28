@@ -41,8 +41,8 @@ Design pressure to respect: output must serve two audiences — humans in a term
 | `status` | Read-only: report store `model_id`, unit counts per argosy/namespace, and a **staleness preview** — the diff reconcile *would* apply, computed without writing (embed only when content hashes differ? No: preview compares hashes only, zero embed calls). |
 | `query "<text>" [-k N] [--namespace NS] [--argosy NAME] [--language L] [--category C] [--tag T] [--type T]` | Reconcile if stale (same path as `build`), then `Index::search` with a `Filter` built from flags; print one hit per line: `score  argosy://<name>/<ns>/<id>  —  description`. Flags map 1:1 onto doc 06's `Filter`; unknown argosy names must error (doc 06 already enforces). |
 
-**`argosy convert styleguide <yaml-dir> <argosy-path>`**
-- Opens `<argosy-path>` as `LocalArgosy`, runs `import_styleguide_yaml`, prints written/skipped counts plus each `Finding`; exit `1` if any findings.
+**`argosy convert styleguide <yaml-dir> [<argosy-path>]`**
+- Opens `<argosy-path>` as `LocalArgosy` (default: the current project's `.argosy/default`), runs `import_styleguide_yaml`, prints written/skipped counts plus each `Finding`; exit `1` if any findings.
 
 ### 2.3 Integration testing (`tests/cli.rs`)
 

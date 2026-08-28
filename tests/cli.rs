@@ -457,6 +457,52 @@ fn convert_styleguide_fails_with_findings_on_malformed_rules() {
         .stdout(predicate::str::contains("bad-priority"));
 }
 
+#[test]
+fn convert_styleguide_defaults_to_project_argosy() {
+    let scratch = TempDir::new().unwrap();
+    // A project in the standard layout: rules land in `.argosy/default`
+    // when no argosy path is passed.
+    let project = scratch.path().join("project");
+    let target = project.join(".argosy/default");
+    copy_dir(&fixture("valid-acme-billing"), &target);
+    let cache = target.join(".argosy");
+    if cache.exists() {
+        fs::remove_dir_all(&cache).unwrap();
+    }
+    let yaml_dir = scratch.path().join("yaml");
+    fs::create_dir_all(&yaml_dir).unwrap();
+    fs::write(yaml_dir.join("rust.yaml"), GOOD_RULES).unwrap();
+
+    argosy_bin()
+        .args(["convert", "styleguide", yaml_dir.to_str().unwrap()])
+        .current_dir(&project)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("written: 2 rule(s)"));
+
+    assert!(
+        target
+            .join("styleguide/rust/error-handling/no-unwrap-in-prod.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn convert_styleguide_without_project_argosy_fails() {
+    let scratch = TempDir::new().unwrap();
+    let yaml_dir = scratch.path().join("yaml");
+    fs::create_dir_all(&yaml_dir).unwrap();
+    fs::write(yaml_dir.join("rust.yaml"), GOOD_RULES).unwrap();
+
+    argosy_bin()
+        .args(["convert", "styleguide", yaml_dir.to_str().unwrap()])
+        .current_dir(scratch.path())
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(".argosy/default"));
+}
+
 // -------------------------------------------------------------------- pull
 
 #[test]

@@ -233,7 +233,8 @@ struct ConvertStyleguideArgs {
     yaml_dir: PathBuf,
 
     /// The local argosy that receives the rules (under `styleguide/`).
-    argosy_path: PathBuf,
+    /// Defaults to the current project's `.argosy/default`.
+    argosy_path: Option<PathBuf>,
 }
 
 /// CLI-only selector for the four reserved namespaces (clap-parseable;
@@ -488,7 +489,12 @@ fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> {
 fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> {
     match &args.format {
         ConvertFormat::Styleguide(imp) => {
-            let local = LocalArgosy::open(&imp.argosy_path)?;
+            // Implicit target is the current project's `.argosy/default`,
+            // the same path `argosy init` creates when none is given.
+            let argosy_path = imp.argosy_path.clone().unwrap_or_else(|| {
+                Path::new(argosy::pull::PROJECT_ARGOSY_DIR).join(argosy::pull::LOCAL_ARGOSY_NAME)
+            });
+            let local = LocalArgosy::open(&argosy_path)?;
             let report: ImportReport =
                 argosy::package::import_styleguide_yaml(&local, &imp.yaml_dir)?;
             if out.json {
