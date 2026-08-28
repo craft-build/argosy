@@ -56,7 +56,7 @@ enum Command {
 
 /// Clone an external argosy into this project's `.argosy/<name>` checkout
 /// — the standard way a project consumes shared bundles (`argosy pull`
-/// then `argosy index . build`; no `--import` bookkeeping). The clone must
+/// then `argosy index build`; no `--import` bookkeeping). The clone must
 /// itself be a bundle with a manifest; anything else leaves no checkout.
 #[derive(Args)]
 struct PullArgs {
@@ -140,18 +140,15 @@ struct PackageArgs {
     include_index: bool,
 }
 
-/// Operate on the semantic index of a project. `<path>` is the project
-/// root: the local bundle is `<path>/.argosy/default` (see `init`),
-/// pulled checkouts are `<path>/.argosy/<name>` (see `pull`), all global
-/// checkouts from the user store are included too, and the derived index
-/// lives at `<path>/.argosy/index.db` — deleting it costs one `build`
-/// (`IDX-16`). There is no `--import`: membership comes from checkout
-/// locations, in that precedence order.
+/// Operate on the semantic index of the current project (the working
+/// directory): the local bundle is `.argosy/default` (see `init`), pulled
+/// checkouts are `.argosy/<name>` (see `pull`), all global checkouts from
+/// the user store are included too, and the derived index lives at
+/// `.argosy/index.db` — deleting it costs one `build` (`IDX-16`). There is
+/// no `--import`: membership comes from checkout locations, in that
+/// precedence order.
 #[derive(Args)]
 struct IndexArgs {
-    /// Project root (containing `.argosy/default`).
-    path: PathBuf,
-
     #[command(subcommand)]
     verb: IndexVerb,
 }
@@ -528,18 +525,23 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::{Index, VectorStore, staleness_report};
 
-    let db = args.path.join(".argosy/index.db");
+    // The project root is the working directory: discovery walks
+    // `.argosy/<dirs>` plus the global user store from there.
+    let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
+        path: ".".into(),
+        source,
+    })?;
+    let db = root.join(".argosy/index.db");
 
     match &args.verb {
         IndexVerb::Status => {
             // The path must be a project before any rest answer makes
             // sense — otherwise "no index" would mask "not a project".
-            let context = ProjectContext::open_project(&args.path)?;
+            let context = ProjectContext::open_project(&root)?;
             if !db.is_file() {
                 out.note(&format!(
-                    "no index at {} — run `argosy index {} build`",
-                    db.display(),
-                    args.path.display()
+                    "no index at {} — run `argosy index build`",
+                    db.display()
                 ));
                 if out.json {
                     out.json(&serde_json::json!({"index": null, "db": db}));
@@ -616,7 +618,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         IndexVerb::Build | IndexVerb::Query(_) => {
-            let context = ProjectContext::open_project(&args.path)?;
+            let context = ProjectContext::open_project(&root)?;
             let store = SqliteVecStore::open(&db)?;
             let provider = FastembedProvider::new_default()?;
             let mut index = Index::new(provider, store);
@@ -706,7 +708,6 @@ mod tests {
         let q = parse_query(&[
             "argosy",
             "index",
-            "root",
             "query",
             "oauth refresh tokens",
             "-k",
@@ -758,7 +759,7 @@ mod tests {
 
     #[test]
     fn unscoped_query_leaves_every_filter_field_none() {
-        let q = parse_query(&["argosy", "index", "root", "query", "anything"]);
+        let q = parse_query(&["argosy", "index", "query", "anything"]);
         assert_eq!(q.k, 5, "default k");
         let filter = build_filter(&q);
         // 1:1 flag mapping: no flags means no constraints anywhere.

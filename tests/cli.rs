@@ -537,7 +537,8 @@ fn index_status_reports_a_missing_index_without_creating_one() {
     let scratch = TempDir::new().unwrap();
     let project = fixture_project(&scratch);
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "status"])
+        .args(["index", "status"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("no index at"));
@@ -554,7 +555,8 @@ fn index_on_a_project_without_a_local_bundle_points_at_init() {
     let project = scratch.path().join("empty-project");
     fs::create_dir_all(&project).unwrap();
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "status"])
+        .args(["index", "status"])
+        .current_dir(&project)
         .assert()
         .failure()
         .code(1)
@@ -582,7 +584,7 @@ fn help_documents_the_index_default_location_and_model_download() {
         .stdout(predicate::str::contains(".argosy/index.db"));
 
     argosy_bin()
-        .args(["index", "some-root", "build", "--help"])
+        .args(["index", "build", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("90 MB"))
@@ -601,14 +603,16 @@ fn index_build_status_query_round_trip() {
     let project = fixture_project(&scratch);
 
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "build"])
+        .args(["index", "build"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("index"))
         .stdout(predicate::str::contains("fastembed/"));
 
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "status"])
+        .args(["index", "status"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("model: fastembed/"))
@@ -617,7 +621,8 @@ fn index_build_status_query_round_trip() {
 
     // A second build is incremental: everything unchanged.
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "build"])
+        .args(["index", "build"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("0 upserted, 0 removed"));
@@ -637,26 +642,21 @@ fn index_build_status_query_round_trip() {
     )
     .unwrap();
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "build"])
+        .args(["index", "build"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("1 upserted, 0 removed"));
     argosy_bin()
-        .args(["index", project.to_str().unwrap(), "status"])
+        .args(["index", "status"])
+        .current_dir(&project)
         .assert()
         .success()
         .stdout(predicate::str::contains("vendor-b/document: 1"));
 
     let output = argosy_bin()
-        .args([
-            "--json",
-            "index",
-            project.to_str().unwrap(),
-            "query",
-            "caching decisions",
-            "-k",
-            "3",
-        ])
+        .args(["--json", "index", "query", "caching decisions", "-k", "3"])
+        .current_dir(&project)
         .assert()
         .success()
         .get_output()
@@ -669,14 +669,8 @@ fn index_build_status_query_round_trip() {
 
     // Unknown argosy names are an error (`QRY-2`), not silent emptiness.
     argosy_bin()
-        .args([
-            "index",
-            project.to_str().unwrap(),
-            "query",
-            "caching",
-            "--argosy",
-            "no-such-argosy",
-        ])
+        .args(["index", "query", "caching", "--argosy", "no-such-argosy"])
+        .current_dir(&project)
         .assert()
         .failure()
         .code(1);
