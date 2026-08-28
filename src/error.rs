@@ -111,6 +111,21 @@ pub enum Error {
     #[snafu(display("fastembed embedding failed: {source}"))]
     Embedding { source: fastembed::Error },
 
+    /// A bundle file was a symlink whose resolved target escapes the bundle
+    /// root. Packaging refuses to follow it (`DIST-3`'s same root-containment
+    /// rule as the readers): materializing it would smuggle outside content
+    /// into the distributed artifact.
+    #[snafu(display(
+        "symlink `{}` escapes the bundle root and cannot be packaged",
+        path.display()
+    ))]
+    SymlinkEscape { path: PathBuf },
+
+    /// Recomputing a bundle's `DIST-6` integrity sidecar disagreed with what
+    /// is on disk (missing sidecar, missing file, or hash mismatch).
+    #[snafu(display("integrity check failed for `{}`: {reason}", path.display()))]
+    IntegrityMismatch { path: PathBuf, reason: String },
+
     /// The sqlite-vec index store failed on a database operation.
     #[cfg(feature = "default-index")]
     #[snafu(display("SQLite index operation failed: {source}"))]

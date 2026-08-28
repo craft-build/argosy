@@ -12,6 +12,16 @@ serde = { version = "1", features = ["derive"] }
 snafu = "0.8"
 yaml_serde = "0.10"
 
+# --- Distribution packaging deps (doc 08) -----------------------------------
+# `sha2` is the conventional pure-Rust SHA-256: `DIST-6` needs a standard hash
+# for the integrity sidecar and `bundle_content_hash` change detector.
+sha2 = "0.10"
+# `tar` streams the `TarGz` format without materializing a staging copy.
+tar = "0.4"
+# `flate2` (default rust_backend/miniz_oxide — pure Rust, no C toolchain)
+# compresses the tar stream.
+flate2 = "1"
+
 # --- Optional `default-index` backend deps (doc 07) -------------------------
 # `bundled` is the upstream-recommended pairing with sqlite-vec's static C
 # build: one toolchain compiles both SQLite and the vec0 extension.

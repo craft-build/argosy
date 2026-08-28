@@ -11,6 +11,7 @@ pub mod context;
 pub mod error;
 pub mod index;
 pub mod local;
+pub mod package;
 pub mod skill;
 pub mod styleguide;
 
@@ -18,5 +19,6 @@ pub use bundle::{Argosy, Finding, Manifest, Namespace, Severity, ValidationRepor
 pub use concept::{Concept, ConceptId};
 pub use error::{Error, Result};
 pub use local::{LocalArgosy, Promotion, PromotionTarget};
+pub use package::{ImportReport, PackageFormat, PackageOptions, PackageReport};
 pub use skill::{Skill, SkillForm};
 pub use styleguide::StyleguideRule;
