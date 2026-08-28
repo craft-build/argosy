@@ -98,6 +98,12 @@ pub enum Error {
     /// segments, non-reserved namespace, or out-of-charset id).
     #[snafu(display("invalid argosy URI `{uri}`: {reason}"))]
     InvalidUri { uri: String, reason: String },
+
+    /// An embedding provider or vector store could not carry out an index
+    /// operation (embed, upsert, search, ...); the reason names the failing
+    /// backend and operation.
+    #[snafu(display("index operation failed: {reason}"))]
+    Index { reason: String },
 }
 
 /// Convenient alias for `std::result::Result` with [`Error`].

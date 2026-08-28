@@ -12,5 +12,11 @@ serde = { version = "1", features = ["derive"] }
 snafu = "0.8"
 yaml_serde = "0.10"
 
+[features]
+# The default vector-store/embedding backend (sqlite-vec + fastembed). The
+# trait layer in `src/index` needs no dependencies; the concrete backend's
+# dependencies land here in a later chunk.
+default-index = []
+
 [dev-dependencies]
 tempfile = "3"

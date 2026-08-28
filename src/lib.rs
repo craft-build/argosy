@@ -9,6 +9,7 @@ pub mod bundle;
 pub mod concept;
 pub mod context;
 pub mod error;
+pub mod index;
 pub mod local;
 pub mod skill;
 pub mod styleguide;
