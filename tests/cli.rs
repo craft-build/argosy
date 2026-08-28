@@ -48,6 +48,116 @@ fn fixture_copy(name: &str, scratch: &TempDir) -> PathBuf {
     dest
 }
 
+/// A project in the standard layout: `<root>/.argosy/default` holding a
+/// copy of the valid fixture (sans its bundled `.argosy/` placeholder).
+#[cfg(feature = "default-index")] // only the gated index tests build projects
+fn fixture_project(scratch: &TempDir) -> PathBuf {
+    let project = scratch.path().join("project");
+    let local = project.join(".argosy/default");
+    copy_dir(&fixture("valid-acme-billing"), &local);
+    let cache = local.join(".argosy");
+    if cache.exists() {
+        fs::remove_dir_all(&cache).unwrap();
+    }
+    project
+}
+
+/// Initializes `dir` as a git repo with one commit (for `pull` tests; git
+/// needs no network for local clones).
+fn git_commit_all(dir: &Path) {
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"],
+        vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "x",
+        ],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+}
+
+// -------------------------------------------------------------------- init
+
+#[test]
+fn init_creates_a_bundle_that_validates_clean() {
+    let scratch = TempDir::new().unwrap();
+    let target = scratch.path().join("fresh-bundle");
+    argosy_bin()
+        .args(["init", target.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created fresh-bundle 0.1.0"));
+
+    assert!(target.join("argosy.md").is_file());
+    for ns in ["document", "skill", "memory", "styleguide"] {
+        assert!(target.join(ns).is_dir());
+    }
+    let manifest = fs::read_to_string(target.join("argosy.md")).unwrap();
+    assert!(manifest.contains("name: fresh-bundle"));
+
+    // The created bundle passes its own validator.
+    argosy_bin()
+        .args(["validate", target.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK: fresh-bundle 0.1.0"));
+}
+
+#[test]
+fn init_current_directory_and_json_output() {
+    // No path: the project-local bundle at `.argosy/default`, named after
+    // the project directory.
+    let scratch = TempDir::new().unwrap();
+    let target = scratch.path().join("cwd-test");
+    fs::create_dir_all(&target).unwrap();
+    let output = argosy_bin()
+        .args(["--json", "init"])
+        .current_dir(&target)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(created["name"], "cwd-test");
+    assert_eq!(created["argosy_version"], "0.1.0");
+    assert!(target.join(".argosy/default/argosy.md").is_file());
+
+    // And the project is then indexable in exactly that layout.
+    argosy_bin()
+        .args(["validate", target.join(".argosy/default").to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK: cwd-test 0.1.0"));
+}
+
+#[test]
+fn init_refuses_to_overwrite_an_existing_bundle() {
+    let scratch = TempDir::new().unwrap();
+    let target = scratch.path().join("twice");
+    argosy_bin()
+        .args(["init", target.to_str().unwrap()])
+        .assert()
+        .success();
+    argosy_bin()
+        .args(["init", target.to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("already contains an argosy"));
+}
+
 // ---------------------------------------------------------------- validate
 
 #[test]
@@ -347,6 +457,76 @@ fn convert_styleguide_fails_with_findings_on_malformed_rules() {
         .stdout(predicate::str::contains("bad-priority"));
 }
 
+// -------------------------------------------------------------------- pull
+
+#[test]
+fn pull_clones_a_remote_bundle_into_the_project() {
+    let scratch = TempDir::new().unwrap();
+    let repo = fixture_copy("valid-acme-billing", &scratch);
+    git_commit_all(&repo);
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    argosy_bin()
+        .args(["pull", repo.to_str().unwrap(), "company-rules"])
+        .current_dir(&project)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "pulled acme-billing 0.3.1 into .argosy/company-rules",
+        ));
+    assert!(project.join(".argosy/company-rules/argosy.md").is_file());
+
+    // A checkout is never overwritten.
+    argosy_bin()
+        .args(["pull", repo.to_str().unwrap(), "company-rules"])
+        .current_dir(&project)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("refusing to overwrite"));
+}
+
+#[test]
+fn pull_of_a_non_argosy_repo_leaves_no_checkout() {
+    let scratch = TempDir::new().unwrap();
+    let repo = scratch.path().join("plain-repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("README.md"), "not a bundle").unwrap();
+    git_commit_all(&repo);
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    argosy_bin()
+        .args(["pull", repo.to_str().unwrap(), "notargosy"])
+        .current_dir(&project)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("not an argosy"));
+    assert!(!project.join(".argosy/notargosy").exists());
+}
+
+#[test]
+fn pull_global_installs_into_the_user_store() {
+    let scratch = TempDir::new().unwrap();
+    let repo = fixture_copy("valid-acme-billing", &scratch);
+    git_commit_all(&repo);
+    let fake_home = scratch.path().join("home");
+
+    argosy_bin()
+        .args(["pull", "--global", repo.to_str().unwrap(), "shared-rules"])
+        .current_dir(scratch.path())
+        .env("HOME", &fake_home)
+        .assert()
+        .success();
+    assert!(
+        fake_home
+            .join(".local/state/argosy/shared-rules/argosy.md")
+            .is_file()
+    );
+}
+
 // ------------------------------------------------------------------- index
 // All index tests are gated like doc 07: without the `default-index`
 // feature the binary refuses the subcommand entirely.
@@ -355,13 +535,31 @@ fn convert_styleguide_fails_with_findings_on_malformed_rules() {
 #[test]
 fn index_status_reports_a_missing_index_without_creating_one() {
     let scratch = TempDir::new().unwrap();
-    let project = fixture_copy("valid-acme-billing", &scratch);
+    let project = fixture_project(&scratch);
     argosy_bin()
         .args(["index", project.to_str().unwrap(), "status"])
         .assert()
         .success()
         .stdout(predicate::str::contains("no index at"));
-    assert!(!project.join(".argosy").exists(), "status never writes");
+    assert!(
+        !project.join(".argosy/index.db").exists(),
+        "status never writes"
+    );
+}
+
+#[cfg(feature = "default-index")]
+#[test]
+fn index_on_a_project_without_a_local_bundle_points_at_init() {
+    let scratch = TempDir::new().unwrap();
+    let project = scratch.path().join("empty-project");
+    fs::create_dir_all(&project).unwrap();
+    argosy_bin()
+        .args(["index", project.to_str().unwrap(), "status"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(".argosy/default"))
+        .stderr(predicate::str::contains("argosy init"));
 }
 
 #[test]
@@ -400,7 +598,7 @@ fn help_documents_the_index_default_location_and_model_download() {
 #[ignore = "downloads the fastembed model (needs network on first run)"]
 fn index_build_status_query_round_trip() {
     let scratch = TempDir::new().unwrap();
-    let project = fixture_copy("valid-acme-billing", &scratch);
+    let project = fixture_project(&scratch);
 
     argosy_bin()
         .args(["index", project.to_str().unwrap(), "build"])
@@ -423,6 +621,31 @@ fn index_build_status_query_round_trip() {
         .assert()
         .success()
         .stdout(predicate::str::contains("0 upserted, 0 removed"));
+
+    // A second checkout in `.argosy/` joins the index automatically (no
+    // --import): rebuilding discovers it.
+    let vendor = project.join(".argosy/vendor-b");
+    fs::create_dir_all(vendor.join("document")).unwrap();
+    fs::write(
+        vendor.join("argosy.md"),
+        "---\ntype: Argosy Manifest\nname: vendor-b\nargosy_version: \"1.0.0\"\n---\n# vendor-b\n",
+    )
+    .unwrap();
+    fs::write(
+        vendor.join("document/spec.md"),
+        "---\ntype: Note\ndescription: Vendored spec.\n---\nSpec content.\n",
+    )
+    .unwrap();
+    argosy_bin()
+        .args(["index", project.to_str().unwrap(), "build"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 upserted, 0 removed"));
+    argosy_bin()
+        .args(["index", project.to_str().unwrap(), "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vendor-b/document: 1"));
 
     let output = argosy_bin()
         .args([

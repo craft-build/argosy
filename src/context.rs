@@ -29,7 +29,8 @@ use snafu::ensure;
 use crate::bundle::{Argosy, Namespace};
 use crate::concept::{Concept, ConceptId};
 use crate::error::{
-    DuplicateArgosyNameSnafu, InvalidUriSnafu, Result, UnknownArgosySnafu, ValidationSnafu,
+    DuplicateArgosyNameSnafu, InvalidUriSnafu, NotAnArgosySnafu, Result, UnknownArgosySnafu,
+    ValidationSnafu,
 };
 use crate::local::LocalArgosy;
 use crate::skill::Skill;
@@ -234,6 +235,47 @@ impl ProjectContext {
         &self.local
     }
 
+    /// Opens the standard argosy set of a project: the local bundle at
+    /// `<project>/.argosy/default`, every other checkout in
+    /// `<project>/.argosy/`, then every argosy in the global store
+    /// ([`crate::pull::global_argosy_dir`]) — in that precedence order.
+    /// Directories without a manifest and the derived `index.db` are
+    /// skipped; duplicate manifest names across any tier hard-fail via
+    /// [`ProjectContext::open`]. A project without `.argosy/default` is not
+    /// a project yet: the error points at `argosy init`.
+    pub fn open_project(project_root: impl AsRef<Path>) -> Result<Self> {
+        let globals = crate::pull::global_argosy_dir()?;
+        Self::open_project_with_globals(project_root, &globals)
+    }
+
+    /// [`Self::open_project`] with an explicit globals tier (tests inject a
+    /// tempdir instead of touching `~/.local/state`).
+    pub(crate) fn open_project_with_globals(
+        project_root: impl AsRef<Path>,
+        globals_root: &Path,
+    ) -> Result<Self> {
+        let project_dir = project_root.as_ref().join(crate::pull::PROJECT_ARGOSY_DIR);
+        // Everything under the project dir that is a bundle (a directory
+        // holding `argosy.md`), in sorted order, minus the local checkout.
+        let mut imported = Vec::new();
+        collect_checkouts(
+            &project_dir,
+            Some(crate::pull::LOCAL_ARGOSY_NAME),
+            &mut imported,
+        );
+        collect_checkouts(globals_root, None, &mut imported);
+
+        let local = project_dir.join(crate::pull::LOCAL_ARGOSY_NAME);
+        ensure!(
+            local.join("argosy.md").is_file(),
+            NotAnArgosySnafu {
+                path: project_dir.clone(),
+                reason: "no `.argosy/default` bundle for this project (run `argosy init`)"
+            }
+        );
+        Self::open(local, imported)
+    }
+
     /// The imported argosys, read-only, in registration (precedence) order.
     pub fn imported(&self) -> impl Iterator<Item = &Argosy> {
         self.imported.iter()
@@ -396,6 +438,32 @@ impl ProjectContext {
     }
 }
 
+/// Appends the bundle checkouts directly under `dir`: every subdirectory
+/// holding `argosy.md`, in sorted order for a deterministic precedence, not
+/// following symlinks (consistent with the bundle walk's policy). `skip`
+/// excludes one checkout name (the local `default`, visited separately).
+/// Missing or unreadable `dir` means "no argosies here", not an error.
+fn collect_checkouts(dir: &Path, skip: Option<&str>, out: &mut Vec<PathBuf>) {
+    let Ok(mut entries) = std::fs::read_dir(dir).map(|rd| rd.flatten().collect::<Vec<_>>()) else {
+        return;
+    };
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        if skip.is_some_and(|skip| name == skip) {
+            continue;
+        }
+        let Ok(ty) = entry.file_type() else { continue };
+        if !ty.is_dir() {
+            continue; // e.g. the derived `index.db` — never a checkout
+        }
+        let path = entry.path();
+        if path.join("argosy.md").is_file() {
+            out.push(path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -431,6 +499,84 @@ mod tests {
             namespace,
             id: id.parse().unwrap(),
         }
+    }
+
+    // --- open_project discovery ---
+
+    /// A project layout: `.argosy/<names>` (the local one must be named
+    /// `default`), plus a separate globals root with its own argosies.
+    fn project_layout(names: &[&str], globals: &[&str]) -> (TempDir, TempDir) {
+        let project = TempDir::new().unwrap();
+        let project_dir = project.path().join(crate::pull::PROJECT_ARGOSY_DIR);
+        for name in names {
+            let manifest = format!(
+                "---\ntype: Argosy Manifest\nname: proj-{name}\nargosy_version: \"1.0.0\"\n---\n# proj-{name}\n"
+            );
+            write_file(&project_dir.join(name), "argosy.md", &manifest);
+        }
+        let globals_root = TempDir::new().unwrap();
+        for name in globals {
+            let manifest = format!(
+                "---\ntype: Argosy Manifest\nname: global-{name}\nargosy_version: \"1.0.0\"\n---\n# global-{name}\n"
+            );
+            write_file(&globals_root.path().join(name), "argosy.md", &manifest);
+        }
+        (project, globals_root)
+    }
+
+    #[test]
+    fn open_project_loads_default_children_and_globals_in_precedence_order() {
+        let (project, globals) = project_layout(&["default", "beta", "alpha"], &["extra"]);
+        // Non-checkout noise that discovery must ignore.
+        write_file(
+            &project.path().join(crate::pull::PROJECT_ARGOSY_DIR),
+            "index.db",
+            "not a directory",
+        );
+        write_file(
+            &project
+                .path()
+                .join(crate::pull::PROJECT_ARGOSY_DIR)
+                .join("notado"),
+            "argosy.notmd",
+            "x",
+        );
+
+        let ctx =
+            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap();
+
+        assert_eq!(ctx.local().manifest().name(), "proj-default");
+        let imported: Vec<&str> = ctx.imported().map(|a| a.manifest().name()).collect();
+        assert_eq!(
+            imported,
+            vec!["proj-alpha", "proj-beta", "global-extra"],
+            "project checkouts sorted, globals last"
+        );
+    }
+
+    #[test]
+    fn open_project_without_default_points_at_init() {
+        let (project, globals) = project_layout(&["beta"], &[]);
+        let err =
+            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap_err();
+        assert!(
+            err.to_string().contains(".argosy/default") && err.to_string().contains("argosy init"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_project_rejects_duplicate_manifest_names_across_tiers() {
+        let (project, globals) = project_layout(&["default"], &[]);
+        // A global with the same manifest name as the local default.
+        write_file(
+            &globals.path().join("rogue"),
+            "argosy.md",
+            "---\ntype: Argosy Manifest\nname: proj-default\nargosy_version: \"1.0.0\"\n---\n# rogue\n",
+        );
+        let err =
+            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap_err();
+        assert!(err.to_string().contains("proj-default"), "{err}");
     }
 
     const SKILL_DEPLOY: &str =

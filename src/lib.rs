@@ -12,6 +12,7 @@ pub mod error;
 pub mod index;
 pub mod local;
 pub mod package;
+pub mod pull;
 pub mod skill;
 pub mod styleguide;
 

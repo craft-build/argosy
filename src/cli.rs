@@ -46,10 +46,58 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Init(InitArgs),
     Validate(ValidateArgs),
     Package(PackageArgs),
+    Pull(PullArgs),
     Index(IndexArgs),
     Convert(ConvertArgs),
+}
+
+/// Clone an external argosy into this project's `.argosy/<name>` checkout
+/// — the standard way a project consumes shared bundles (`argosy pull`
+/// then `argosy index . build`; no `--import` bookkeeping). The clone must
+/// itself be a bundle with a manifest; anything else leaves no checkout.
+#[derive(Args)]
+struct PullArgs {
+    /// Git URL or local path of the argosy repository.
+    url: String,
+
+    /// Checkout name (`.argosy/<name>`): `[A-Za-z0-9._-]` only. A checkout
+    /// with this name must not already exist.
+    name: String,
+
+    /// Install into the user-wide argosy store
+    /// (`$XDG_STATE_HOME/argosy/<name>`, falling back to
+    /// `~/.local/state/argosy/<name>`) instead of this project's `.argosy/`
+    /// — shared by every project, automatically included in every index.
+    #[arg(long)]
+    global: bool,
+}
+
+/// Create a new, empty argosy in `<path>`: the root `argosy.md` manifest
+/// (version `0.1.0`) plus the four reserved namespace directories
+/// (`document/`, `skill/`, `memory/`, `styleguide/`). Without `<path>`,
+/// initializes this project's LOCAL bundle at `.argosy/default` — the
+/// writable argosy every `index` verb picks up automatically. Fails if the
+/// target directory already contains a manifest — a bundle is initialized
+/// exactly once.
+#[derive(Args)]
+struct InitArgs {
+    /// Directory to initialize. Defaults to `<cwd>/.argosy/default`, the
+    /// project-local bundle location.
+    path: Option<PathBuf>,
+
+    /// The manifest `name`. Defaults to the target directory's basename
+    /// (with the implicit `.argosy/default` target: this directory's
+    /// basename). Only `[A-Za-z0-9._-]` are allowed — the name appears in
+    /// `argosy://` URIs.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Initial manifest `description`.
+    #[arg(long)]
+    description: Option<String>,
 }
 
 /// Validate a bundle on disk — lifecycle step 2 made scriptable. Works on
@@ -93,18 +141,16 @@ struct PackageArgs {
 }
 
 /// Operate on the semantic index of a project. `<path>` is the project
-/// root (the local argosy's bundle root); the index lives at
-/// `<path>/.argosy/index.db` and is derived data — deleting it costs one
-/// `build` (`IDX-16`).
+/// root: the local bundle is `<path>/.argosy/default` (see `init`),
+/// pulled checkouts are `<path>/.argosy/<name>` (see `pull`), all global
+/// checkouts from the user store are included too, and the derived index
+/// lives at `<path>/.argosy/index.db` — deleting it costs one `build`
+/// (`IDX-16`). There is no `--import`: membership comes from checkout
+/// locations, in that precedence order.
 #[derive(Args)]
 struct IndexArgs {
-    /// Project root / local argosy root.
+    /// Project root (containing `.argosy/default`).
     path: PathBuf,
-
-    /// Import an additional argosy (repeatable). The local argosy precedes
-    /// every import in precedence (`MUL-2`).
-    #[arg(long)]
-    import: Vec<PathBuf>,
 
     #[command(subcommand)]
     verb: IndexVerb,
@@ -267,8 +313,10 @@ impl Output {
 /// (non-conformant bundle, import findings) are the returned `ExitCode`.
 fn cmd_result(out: &Output, command: &Command) -> Result<ExitCode> {
     match command {
+        Command::Init(args) => cmd_init(out, args),
         Command::Validate(args) => cmd_validate(out, args),
         Command::Package(args) => cmd_package(out, args),
+        Command::Pull(args) => cmd_pull(out, args),
         Command::Index(args) => cmd_index(out, args),
         Command::Convert(args) => cmd_convert(out, args),
     }
@@ -288,6 +336,66 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
+    let default_project_path = args.path.is_none();
+    let path = args.path.clone().unwrap_or_else(|| {
+        Path::new(argosy::pull::PROJECT_ARGOSY_DIR).join(argosy::pull::LOCAL_ARGOSY_NAME)
+    });
+    // With the implicit `.argosy/default` target, the bundle is named after
+    // the project directory, not literally "default".
+    let name = args.name.clone().or_else(|| {
+        default_project_path.then(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+        })?
+    });
+    let local = LocalArgosy::init(&path, name.as_deref(), args.description.as_deref())?;
+    if out.json {
+        let manifest = local.manifest();
+        out.json(&serde_json::json!({
+            "name": manifest.name(),
+            "argosy_version": manifest.argosy_version(),
+            "path": path,
+        }));
+    } else {
+        let manifest = local.manifest();
+        out.note(&format!(
+            "created {} {} at {}",
+            manifest.name(),
+            manifest.argosy_version(),
+            path.display()
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_pull(out: &Output, args: &PullArgs) -> Result<ExitCode> {
+    let root = if args.global {
+        argosy::pull::global_argosy_dir()?
+    } else {
+        PathBuf::from(argosy::pull::PROJECT_ARGOSY_DIR)
+    };
+    let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
+    let dest = root.join(&args.name);
+    if out.json {
+        out.json(&serde_json::json!({
+            "name": argosy.manifest().name(),
+            "argosy_version": argosy.manifest().argosy_version(),
+            "path": dest,
+            "global": args.global,
+        }));
+    } else {
+        out.note(&format!(
+            "pulled {} {} into {}",
+            argosy.manifest().name(),
+            argosy.manifest().argosy_version(),
+            dest.display()
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode> {
@@ -424,6 +532,9 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
 
     match &args.verb {
         IndexVerb::Status => {
+            // The path must be a project before any rest answer makes
+            // sense — otherwise "no index" would mask "not a project".
+            let context = ProjectContext::open_project(&args.path)?;
             if !db.is_file() {
                 out.note(&format!(
                     "no index at {} — run `argosy index {} build`",
@@ -435,7 +546,6 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            let context = ProjectContext::open(&args.path, args.import.iter().cloned())?;
             // `status` is a read-only verb: it must work on a read-only
             // index and must never write (no directory creation, no pragma,
             // no DDL).
@@ -506,7 +616,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         IndexVerb::Build | IndexVerb::Query(_) => {
-            let context = ProjectContext::open(&args.path, args.import.iter().cloned())?;
+            let context = ProjectContext::open_project(&args.path)?;
             let store = SqliteVecStore::open(&db)?;
             let provider = FastembedProvider::new_default()?;
             let mut index = Index::new(provider, store);

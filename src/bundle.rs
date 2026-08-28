@@ -210,6 +210,18 @@ fn is_safe_component(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
 }
 
+/// True iff `name` is a usable manifest/checkout name: the URI charset
+/// `[A-Za-z0-9._-]` (the manifest name appears in `argosy://` URIs), never
+/// empty or a `.`/`..` component.
+pub(crate) fn is_safe_bundle_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// True iff `path` is a real directory. `symlink_metadata` (not `is_dir`) is
 /// used so a symlink pointing outside the bundle is refused — entering a
 /// namespace through a symlink would bypass the walk's no-follow policy and

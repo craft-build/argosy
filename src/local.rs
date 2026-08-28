@@ -39,10 +39,10 @@ use std::fs;
 use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use yaml_serde::{Mapping, Value};
 
-use crate::bundle::{Argosy, Namespace, Severity};
+use crate::bundle::{Argosy, Manifest, Namespace, Severity};
 use crate::concept::{Concept, ConceptId};
 use crate::error::{
     ConceptExistsSnafu, ConceptNotFoundSnafu, IoSnafu, NamespaceContractViolationSnafu,
@@ -192,6 +192,80 @@ impl LocalArgosy {
     /// Same hard-failure semantics as [`Argosy::open`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self(Argosy::open(path)?))
+    }
+
+    /// Creates a new, empty argosy at `path` — the root `argosy.md`
+    /// manifest (version `0.1.0`) plus the four reserved namespace
+    /// directories — and opens it. When `name` is `None`, the directory's
+    /// basename is used.
+    ///
+    /// Fails when a manifest already exists at `path` (a bundle is
+    /// initialized exactly once), when the name cannot be derived (no
+    /// final directory component), or when it contains characters outside
+    /// the URI charset `[A-Za-z0-9._-]` — the manifest name appears in
+    /// `argosy://` URIs.
+    pub fn init(
+        path: impl AsRef<Path>,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Self> {
+        let root = path.as_ref();
+        let owned_name;
+        let name = match name {
+            Some(name) => name,
+            None => {
+                let resolved = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+                owned_name = resolved
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                    .with_context(|| ValidationSnafu {
+                        reason: format!(
+                            "cannot derive a bundle name from `{}` (no final directory component); pass an explicit name",
+                            root.display()
+                        ),
+                    })?;
+                &owned_name
+            }
+        };
+        ensure!(
+            crate::bundle::is_safe_bundle_name(name),
+            ValidationSnafu {
+                reason: format!(
+                    "invalid bundle name `{name}`: only [A-Za-z0-9._-] are allowed (the name appears in `argosy://` URIs)"
+                )
+            }
+        );
+        ensure!(
+            !root.join("argosy.md").exists(),
+            ValidationSnafu {
+                reason: format!(
+                    "`{}` already contains an argosy (an `argosy.md` manifest exists)",
+                    root.display()
+                )
+            }
+        );
+        for namespace in Namespace::RESERVED {
+            fs::create_dir_all(root.join(namespace)).context(IoSnafu {
+                path: root.join(namespace),
+            })?;
+        }
+        let mut frontmatter = Mapping::new();
+        let mut field = |key: &str, value: &str| {
+            frontmatter.insert(
+                Value::String(key.to_string()),
+                Value::String(value.to_string()),
+            );
+        };
+        field("type", Manifest::TYPE);
+        field("name", name);
+        field("argosy_version", "0.1.0");
+        if let Some(description) = description {
+            field("description", description);
+        }
+        let concept = Concept::new(frontmatter, format!("# {name}\n"))?;
+        concept.to_file(root.join("argosy.md"))?;
+        Self::open(root)
     }
 
     /// Resolves `id` against `namespace`, returning the bundle-relative path
@@ -512,9 +586,75 @@ mod tests {
         copy_dir_all(&src, dst.path());
         dst
     }
-
     fn note_concept() -> Concept {
         Concept::from_str("---\ntype: Session Note\n---\n# Note\n\nContent.\n").unwrap()
+    }
+
+    // --- init ---
+
+    #[test]
+    fn init_creates_a_conformant_bundle_and_derives_the_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("my-bundle");
+
+        let local = LocalArgosy::init(&root, None, Some("What this bundle knows.")).unwrap();
+
+        assert_eq!(local.manifest().name(), "my-bundle");
+        assert_eq!(local.manifest().argosy_version().to_string(), "0.1.0");
+        for namespace in Namespace::RESERVED {
+            assert!(root.join(namespace).is_dir(), "missing {namespace}/");
+        }
+        assert!(root.join("argosy.md").is_file());
+        let report = Argosy::validate(&root);
+        assert!(
+            report.is_conformant(),
+            "a freshly initialized bundle opens and validates: {report}"
+        );
+    }
+
+    #[test]
+    fn init_second_run_fails_and_changes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("bundle");
+        LocalArgosy::init(&root, None, None).unwrap();
+        let manifest_before = fs::read_to_string(root.join("argosy.md")).unwrap();
+
+        let err = LocalArgosy::init(&root, Some("other"), None).unwrap_err();
+        assert!(
+            err.to_string().contains("already contains an argosy"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("argosy.md")).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn init_rejects_names_outside_the_uri_charset() {
+        let tmp = TempDir::new().unwrap();
+        for bad in [
+            "has spaces",
+            "has/slash",
+            "ünicode",
+            "..",
+            "",
+            "trailing:colon",
+        ] {
+            let err = LocalArgosy::init(tmp.path().join("fresh"), Some(bad), None).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid bundle name"),
+                "`{bad}`: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_honors_an_explicit_name_over_the_directory_basename() {
+        let tmp = TempDir::new().unwrap();
+        let local =
+            LocalArgosy::init(tmp.path().join("wrong-name"), Some("right-name"), None).unwrap();
+        assert_eq!(local.manifest().name(), "right-name");
     }
 
     fn rule_concept() -> Concept {
