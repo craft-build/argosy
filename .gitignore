@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# fastembed model cache: populated by the gated smoke test
+# (`cargo test -- --ignored`); never commit model weights.
+/.fastembed_cache

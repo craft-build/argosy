@@ -12,11 +12,41 @@ serde = { version = "1", features = ["derive"] }
 snafu = "0.8"
 yaml_serde = "0.10"
 
+# --- Optional `default-index` backend deps (doc 07) -------------------------
+# `bundled` is the upstream-recommended pairing with sqlite-vec's static C
+# build: one toolchain compiles both SQLite and the vec0 extension.
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+# Statically compiles and links sqlite-vec's C source; we register
+# `sqlite3_vec_init` as an auto-extension ourselves.
+sqlite-vec = { version = "0.1", optional = true }
+# The `units.tags` column is a JSON array, filtered via `json_each`.
+serde_json = { version = "1", optional = true }
+# fastembed: local ONNX text embeddings. `version = "5"` pins the v5 API
+# (`TextEmbedding::try_new` / `TextInitOptions`); 6.0 landed too recently to
+# adopt blindly. Features are the minimal set for dense text embedding:
+#  - `hf-hub-native-tls`: pulls `hf-hub`, the only path that fetches models
+#    (argosy's sole tolerated network access — see `index::fastembed` docs).
+#  - `ort-download-binaries-native-tls`: the ONNX runtime binary for `ort`.
+# Everything else (`image-models`, candle/llm backends, GPU providers) is off
+# to keep the dependency tree and compile time down.
+fastembed = { version = "5", default-features = false, features = [
+  "hf-hub-native-tls",
+  "ort-download-binaries-native-tls",
+], optional = true }
+
 [features]
+# The backend is on by default (doc 00 §3: the binary and MCP server run it);
+# `cargo build --no-default-features` yields the dependency-free trait layer.
+default = ["default-index"]
 # The default vector-store/embedding backend (sqlite-vec + fastembed). The
-# trait layer in `src/index` needs no dependencies; the concrete backend's
-# dependencies land here in a later chunk.
-default-index = []
+# trait layer in `src/index` needs no dependencies; this feature carries the
+# whole backend so library consumers with their own stack pay nothing.
+default-index = [
+  "dep:rusqlite",
+  "dep:sqlite-vec",
+  "dep:serde_json",
+  "dep:fastembed",
+]
 
 [dev-dependencies]
 tempfile = "3"

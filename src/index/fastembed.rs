@@ -1,0 +1,135 @@
+//! The fastembed-backed default [`EmbeddingProvider`] (spec §7.3, `IDX-5`),
+//! gated behind the `default-index` Cargo feature.
+//!
+//! fastembed runs ONNX embeddings locally, so argosy needs no live network
+//! to be useful out of the box (reference doc §2.1) — **with one tolerance**:
+//! the first [`FastembedProvider`] construction downloads the model weights
+//! (~90 MB for the default `all-MiniLM-L6-v2`) into fastembed's model cache
+//! (`$FASTEMBED_CACHE` or the platform cache dir). That download is the only
+//! network access in this crate; every later run loads from the cache offline.
+
+use std::sync::Mutex;
+
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use snafu::ResultExt;
+
+use crate::error::{EmbeddingSnafu, IndexSnafu, Result};
+
+use super::EmbeddingProvider;
+
+/// The version token carried in `model_id()`. Mirrors the `fastembed = "5"`
+/// pin in `Cargo.toml` — bump them together.
+///
+/// Known limitation: weights pinned within the `5.x` line are reported
+/// identically; should fastembed re-publish changed weights under the same
+/// major, the mismatch would not be detected (`IDX-5` is honored at
+/// backend-major granularity).
+const FASTEMBED_BACKEND_VERSION: &str = "5";
+
+/// A local fastembed [`EmbeddingProvider`]: ONNX text embeddings with no
+/// remote service (see module docs for the first-run-download tolerance).
+///
+/// The default model is `all-MiniLM-L6-v2` (384-dim) — small enough to keep
+/// indexing interactive on the corpora argosy targets.
+pub struct FastembedProvider {
+    // `Mutex` makes the provider usable through `&self` regardless of
+    // whether fastembed's `embed` wants `&self` or `&mut self`.
+    model: Mutex<TextEmbedding>,
+    model_id: String,
+    dimensions: usize,
+}
+
+impl FastembedProvider {
+    /// The prescribed default model (`all-MiniLM-L6-v2`, 384-dim).
+    pub const DEFAULT_MODEL: EmbeddingModel = EmbeddingModel::AllMiniLML6V2;
+
+    /// Creates a provider over [`Self::DEFAULT_MODEL`]. Downloads the model
+    /// on first use (module docs).
+    pub fn new_default() -> Result<Self> {
+        Self::with_model(Self::DEFAULT_MODEL)
+    }
+
+    /// Creates a provider over any fastembed [`EmbeddingModel`]. Downloads
+    /// the model on first use (module docs).
+    pub fn with_model(model: EmbeddingModel) -> Result<Self> {
+        let info = TextEmbedding::get_model_info(&model).context(EmbeddingSnafu)?;
+        // `IDX-5`: stable across runs (derived from the model's static
+        // metadata) and changes when the model changes (the model code
+        // identifies the weights, the suffix the backend's major).
+        let model_id = format!(
+            "fastembed/{}@fastembed-{FASTEMBED_BACKEND_VERSION}",
+            info.model_code
+        );
+        let dimensions = info.dim;
+        let model = TextEmbedding::try_new(TextInitOptions::new(model)).context(EmbeddingSnafu)?;
+        Ok(Self {
+            model: Mutex::new(model),
+            model_id,
+            dimensions,
+        })
+    }
+}
+
+impl EmbeddingProvider for FastembedProvider {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut model = self.model.lock().map_err(|_| -> crate::error::Error {
+            IndexSnafu {
+                reason: "fastembed model mutex poisoned by a panicking caller".to_string(),
+            }
+            .build()
+        })?;
+        model
+            .embed(
+                texts.iter().map(String::as_str).collect::<Vec<&str>>(),
+                None,
+            )
+            .context(EmbeddingSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The single fastembed test: needs network on a cold model cache, so it
+    /// never runs in default `cargo test`.
+    #[test]
+    #[ignore = "downloads ONNX model; run with --ignored"]
+    fn default_model_embeds_384_dims_and_reports_a_stable_identity() {
+        let a = FastembedProvider::new_default().unwrap();
+        let b = FastembedProvider::new_default().unwrap();
+        assert_eq!(
+            a.model_id(),
+            b.model_id(),
+            "IDX-5: two instances of the same model report identical ids"
+        );
+        assert!(
+            a.model_id().starts_with("fastembed/")
+                && a.model_id().contains("all-MiniLM-L6-v2")
+                && a.model_id().contains("@fastembed-"),
+            "model_id() follows fastembed/<model>@<version>: {}",
+            a.model_id()
+        );
+        assert_eq!(a.dimensions(), 384);
+
+        let vectors = a.embed(&["borrow checker basics".to_string()]).unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 384);
+
+        // `with_model` over the same model agrees with `new_default`.
+        assert_eq!(
+            FastembedProvider::with_model(FastembedProvider::DEFAULT_MODEL)
+                .unwrap()
+                .model_id(),
+            a.model_id()
+        );
+    }
+}

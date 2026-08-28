@@ -9,7 +9,10 @@
 //! and [`VectorStore`], plus an [`Index`] engine written against them, and a
 //! consumer (e.g. Craft) may supply its own embedding stack by implementing
 //! the two traits and ignoring the default backend entirely. The default
-//! backend (sqlite-vec + fastembed) fills these traits in a later chunk.
+//! backend (sqlite-vec + fastembed) fills these traits behind the
+//! `default-index` Cargo feature: [`sqlite::SqliteVecStore`] and
+//! [`fastembed::FastembedProvider`]. With the feature off this module is
+//! dependency-free and the traits stand alone.
 //!
 //! **Chunking decision (locked per doc 06 §1).** One embedding unit per
 //! concept; the unit text is the concept's `description` (when present) plus
@@ -26,6 +29,11 @@
 //! currency, so any hit can be resolved to the full concept.
 
 mod sha256;
+
+#[cfg(feature = "default-index")]
+pub mod fastembed;
+#[cfg(feature = "default-index")]
+pub mod sqlite;
 
 use std::collections::HashMap;
 
@@ -536,20 +544,22 @@ mod tests {
     /// Deterministic provider: every text maps to a normalized 128-dim
     /// vector by hashing its tokens into dims, so identical texts always
     /// score 1.0 against each other and overlapping texts score positively.
-    struct MockEmbedder {
+    // `pub(crate)` so the default backend's tests (`sqlite.rs`) can use
+    // the same double against a real store.
+    pub(crate) struct MockEmbedder {
         model_id: String,
         dimension: usize,
         embed_calls: Cell<usize>,
     }
 
     impl MockEmbedder {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self::with_model_id("mock-embedder@1")
         }
 
         /// A provider with a different identity, to simulate model flips
         /// (`IDX-12`).
-        fn with_model_id(model_id: &str) -> Self {
+        pub(crate) fn with_model_id(model_id: &str) -> Self {
             Self {
                 model_id: model_id.to_string(),
                 dimension: 128,
@@ -557,7 +567,7 @@ mod tests {
             }
         }
 
-        fn embed_calls(&self) -> usize {
+        pub(crate) fn embed_calls(&self) -> usize {
             self.embed_calls.get()
         }
     }
@@ -742,7 +752,7 @@ mod tests {
 
     /// Writes a minimal openable argosy (manifest + the given files) into a
     /// fresh tempdir. `files` are `(bundle-relative path, file content)`.
-    fn make_argosy(name: &str, files: &[(&str, &str)]) -> TempDir {
+    pub(crate) fn make_argosy(name: &str, files: &[(&str, &str)]) -> TempDir {
         let dir = TempDir::new().unwrap();
         let manifest = format!(
             "---\ntype: Argosy Manifest\nname: {name}\nargosy_version: \"0.3.1\"\n---\n# {name}\n"
@@ -754,7 +764,7 @@ mod tests {
         dir
     }
 
-    fn write_file(root: &Path, rel: &str, content: &str) {
+    pub(crate) fn write_file(root: &Path, rel: &str, content: &str) {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
@@ -770,7 +780,7 @@ mod tests {
     /// The standard fixture: a local argosy with one concept per default
     /// namespace, plus an imported one adding a document and — deliberately —
     /// a `memory/` entry that the default walk must skip.
-    fn fixture() -> (TempDir, TempDir, ProjectContext) {
+    pub(crate) fn fixture() -> (TempDir, TempDir, ProjectContext) {
         let local = make_argosy(
             "local",
             &[

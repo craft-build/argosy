@@ -104,6 +104,17 @@ pub enum Error {
     /// backend and operation.
     #[snafu(display("index operation failed: {reason}"))]
     Index { reason: String },
+
+    /// The fastembed embedding provider failed to initialize the ONNX model
+    /// (including the first-run download) or to embed a batch.
+    #[cfg(feature = "default-index")]
+    #[snafu(display("fastembed embedding failed: {source}"))]
+    Embedding { source: fastembed::Error },
+
+    /// The sqlite-vec index store failed on a database operation.
+    #[cfg(feature = "default-index")]
+    #[snafu(display("SQLite index operation failed: {source}"))]
+    Sqlite { source: rusqlite::Error },
 }
 
 /// Convenient alias for `std::result::Result` with [`Error`].
