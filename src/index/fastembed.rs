@@ -49,18 +49,33 @@ impl FastembedProvider {
         Self::with_model(Self::DEFAULT_MODEL)
     }
 
+    /// The model identity [`FastembedProvider::new_default`] will report,
+    /// without constructing (or downloading) the model — the model identity
+    /// derives from static metadata (`TextEmbedding::get_model_info`), so
+    /// read-only callers like the CLI's `index status` can compare a store's
+    /// recorded identity against the current default offline.
+    pub fn default_model_id() -> Result<String> {
+        Self::model_id_for(&Self::DEFAULT_MODEL)
+    }
+
+    /// `IDX-5`: stable across runs (derived from the model's static metadata)
+    /// and changes when the model changes (the model code identifies the
+    /// weights, the suffix the backend's major).
+    fn model_id_for(model: &EmbeddingModel) -> Result<String> {
+        let info = TextEmbedding::get_model_info(model).context(EmbeddingSnafu)?;
+        Ok(format!(
+            "fastembed/{}@fastembed-{FASTEMBED_BACKEND_VERSION}",
+            info.model_code
+        ))
+    }
+
     /// Creates a provider over any fastembed [`EmbeddingModel`]. Downloads
     /// the model on first use (module docs).
     pub fn with_model(model: EmbeddingModel) -> Result<Self> {
-        let info = TextEmbedding::get_model_info(&model).context(EmbeddingSnafu)?;
-        // `IDX-5`: stable across runs (derived from the model's static
-        // metadata) and changes when the model changes (the model code
-        // identifies the weights, the suffix the backend's major).
-        let model_id = format!(
-            "fastembed/{}@fastembed-{FASTEMBED_BACKEND_VERSION}",
-            info.model_code
-        );
-        let dimensions = info.dim;
+        let model_id = Self::model_id_for(&model)?;
+        let dimensions = TextEmbedding::get_model_info(&model)
+            .context(EmbeddingSnafu)?
+            .dim;
         let model = TextEmbedding::try_new(TextInitOptions::new(model)).context(EmbeddingSnafu)?;
         Ok(Self {
             model: Mutex::new(model),

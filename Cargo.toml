@@ -7,10 +7,17 @@ repository = "https://github.com/craft-build/argosy"
 description = "Library and Binary for creating, consuming and using knowledge books for coding harnesses"
 
 [dependencies]
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 snafu = "0.8"
 yaml_serde = "0.10"
+
+# --- CLI deps (doc 09) ------------------------------------------------------
+# The binary is argument parsing + library calls + output formatting.
+clap = { version = "4", features = ["derive"] }
+# `serde_json` backs `--json` on every subcommand; also the `units.tags`
+# column encoding of the sqlite backend below.
+serde_json = "1"
 
 # --- Distribution packaging deps (doc 08) -----------------------------------
 # `sha2` is the conventional pure-Rust SHA-256: `DIST-6` needs a standard hash
@@ -29,8 +36,6 @@ rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 # Statically compiles and links sqlite-vec's C source; we register
 # `sqlite3_vec_init` as an auto-extension ourselves.
 sqlite-vec = { version = "0.1", optional = true }
-# The `units.tags` column is a JSON array, filtered via `json_each`.
-serde_json = { version = "1", optional = true }
 # fastembed: local ONNX text embeddings. `version = "5"` pins the v5 API
 # (`TextEmbedding::try_new` / `TextInitOptions`); 6.0 landed too recently to
 # adopt blindly. Features are the minimal set for dense text embedding:
@@ -54,9 +59,14 @@ default = ["default-index"]
 default-index = [
   "dep:rusqlite",
   "dep:sqlite-vec",
-  "dep:serde_json",
   "dep:fastembed",
 ]
 
 [dev-dependencies]
 tempfile = "3"
+# Drive the compiled binary in `tests/cli.rs` (doc 09).
+assert_cmd = "2"
+predicates = "3"
+# Also listed in `[dependencies]`; the CLI integration tests parse the
+# binary's `--json` stdout with it.
+serde_json = "1"

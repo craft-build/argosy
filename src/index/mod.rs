@@ -68,7 +68,7 @@ pub trait EmbeddingProvider {
 /// the OKF frontmatter fields, flattened and nullable to mirror the optional
 /// accessors on [`Concept`]. A `None` field means the source concept did not
 /// declare it, and such a unit cannot match a filter constraining that field.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct UnitMeta {
     /// The frontmatter `type` (e.g. `Skill`, `Styleguide Rule`).
     pub concept_type: Option<String>,
@@ -139,7 +139,7 @@ pub struct Filter {
 }
 
 /// One ranked search result (`IDX-7`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
     /// The retrieved concept's qualified identity — origin argosy visible
     /// (`QRY-6`).
@@ -214,7 +214,7 @@ pub trait VectorStore {
 
 /// The report of one [`Index::reconcile`] run, for observability (printed by
 /// the CLI's `index` subcommand).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexReport {
     /// True iff the store was cleared and fully re-embedded (`IDX-12`).
     pub rebuilt: bool,
@@ -227,6 +227,123 @@ pub struct IndexReport {
     pub unchanged: usize,
     /// The model identity the store now records (`IDX-5`).
     pub model_id: String,
+}
+
+/// The default namespace set an [`Index::new`] index walks (and the set
+/// [`staleness_report`] diffs against): `document`, `skill`, and
+/// `styleguide` of every active argosy, plus `memory`.
+fn default_namespaces() -> Vec<Namespace> {
+    vec![
+        Namespace::Document,
+        Namespace::Skill,
+        Namespace::Styleguide,
+        Namespace::Memory,
+    ]
+}
+
+/// Walks `namespaces` of every active argosy in `context` and hashes each
+/// concept's would-be embedded text. Sorted by URI so downstream embedding
+/// batches are deterministic. `memory` of *imported* argosies is skipped
+/// unless `include_imported_memory` (the default-local-memory rule from
+/// [`Index::new`]). Shared by [`Index::reconcile`] and
+/// [`staleness_report`], which must never drift apart.
+fn gather_concepts(
+    context: &ProjectContext,
+    namespaces: &[Namespace],
+    include_imported_memory: bool,
+) -> Result<Vec<GatheredConcept>> {
+    let mut out = Vec::new();
+    let mut visit = |name: &str, argosy: &Argosy, is_local: bool| -> Result<()> {
+        for namespace in namespaces {
+            if !is_local && !include_imported_memory && *namespace == Namespace::Memory {
+                continue;
+            }
+            for (id, concept) in argosy.concepts(namespace)? {
+                let text = embed_text(&concept);
+                out.push(GatheredConcept {
+                    qid: QualifiedConceptId {
+                        argosy: name.to_string(),
+                        namespace: namespace.clone(),
+                        id,
+                    },
+                    hash: sha256::sha256_hex(text.as_bytes()),
+                    text,
+                    meta: UnitMeta::from_concept(&concept),
+                });
+            }
+        }
+        Ok(())
+    };
+    let local: &Argosy = context.local();
+    visit(local.manifest().name(), local, true)?;
+    for argosy in context.imported() {
+        visit(argosy.manifest().name(), argosy, false)?;
+    }
+    out.sort_by_key(|a| a.qid.to_uri());
+    Ok(out)
+}
+
+/// The diff [`staleness_report`] computes: what [`Index::reconcile`] would
+/// do, by category.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StalenessReport {
+    /// Concepts on disk the store does not hold.
+    pub added: usize,
+    /// Concepts whose content hash changed since they were embedded.
+    pub changed: usize,
+    /// Concepts the store holds that no longer exist on disk.
+    pub removed: usize,
+    /// Concepts whose content hash is unchanged.
+    pub unchanged: usize,
+    /// True iff the store's recorded model identity differs from
+    /// `expected_model_id`, OR the store holds data with no recorded
+    /// identity — either way a full rebuild, not an incremental diff
+    /// (`IDX-12`, mirroring [`Index::reconcile`]'s guard).
+    pub model_mismatch: bool,
+}
+
+/// A read-only, embed-free preview of what [`Index::reconcile`] would apply
+/// (the CLI's `index status`, doc 09): gathers the default namespace
+/// selection from disk, hashes each concept, and diffs against
+/// [`VectorStore::unit_hashes`]. Makes no embed calls and no writes.
+pub fn staleness_report(
+    context: &ProjectContext,
+    store: &impl VectorStore,
+    expected_model_id: &str,
+) -> Result<StalenessReport> {
+    let current = gather_concepts(context, &default_namespaces(), false)?;
+    let stored = store.unit_hashes()?;
+
+    // Mirrors reconcile's identity check exactly (IDX-12): a store holding
+    // data with no recorded identity is a full rebuild, not a diff — the
+    // preview must never claim "up to date" when the next build re-embeds
+    // everything.
+    let model_mismatch = match store.model_id() {
+        Some(recorded) => recorded != expected_model_id,
+        None => !stored.is_empty(),
+    };
+    let mut report = StalenessReport {
+        added: 0,
+        changed: 0,
+        removed: 0,
+        unchanged: 0,
+        model_mismatch,
+    };
+    let on_disk: std::collections::HashSet<&QualifiedConceptId> =
+        current.iter().map(|c| &c.qid).collect();
+    for qid in stored.keys() {
+        if !on_disk.contains(qid) {
+            report.removed += 1;
+        }
+    }
+    for gathered in &current {
+        match stored.get(&gathered.qid) {
+            Some(hash) if *hash == gathered.hash => report.unchanged += 1,
+            Some(_) => report.changed += 1,
+            None => report.added += 1,
+        }
+    }
+    Ok(report)
 }
 
 /// A concept gathered from disk, pre-hash, on its way through reconcile.
@@ -258,12 +375,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         Self {
             provider,
             store,
-            namespaces: vec![
-                Namespace::Document,
-                Namespace::Skill,
-                Namespace::Styleguide,
-                Namespace::Memory,
-            ],
+            namespaces: default_namespaces(),
             include_imported_memory: false,
         }
     }
@@ -316,35 +428,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// each concept's would-be embedded text. Sorted by URI so downstream
     /// embedding batches are deterministic.
     fn gather(&self, context: &ProjectContext) -> Result<Vec<GatheredConcept>> {
-        let mut out = Vec::new();
-        let mut visit = |name: &str, argosy: &Argosy, is_local: bool| -> Result<()> {
-            for namespace in &self.namespaces {
-                if !is_local && !self.include_imported_memory && *namespace == Namespace::Memory {
-                    continue;
-                }
-                for (id, concept) in argosy.concepts(namespace)? {
-                    let text = embed_text(&concept);
-                    out.push(GatheredConcept {
-                        qid: QualifiedConceptId {
-                            argosy: name.to_string(),
-                            namespace: namespace.clone(),
-                            id,
-                        },
-                        hash: sha256::sha256_hex(text.as_bytes()),
-                        text,
-                        meta: UnitMeta::from_concept(&concept),
-                    });
-                }
-            }
-            Ok(())
-        };
-        let local: &Argosy = context.local();
-        visit(local.manifest().name(), local, true)?;
-        for argosy in context.imported() {
-            visit(argosy.manifest().name(), argosy, false)?;
-        }
-        out.sort_by_key(|a| a.qid.to_uri());
-        Ok(out)
+        gather_concepts(context, &self.namespaces, self.include_imported_memory)
     }
 
     /// Brings the store in line with the disk: the incremental maintenance
@@ -803,6 +887,76 @@ mod tests {
 
     fn fresh_index() -> Index<MockEmbedder, MemStore> {
         Index::new(MockEmbedder::new(), MemStore::new())
+    }
+
+    // --- staleness_report: the read-only preview must mirror reconcile ---
+
+    #[test]
+    fn staleness_after_reconcile_is_all_unchanged() {
+        let (_local, _imported, ctx) = fixture();
+        let mut index = fresh_index();
+        index.reconcile(&ctx).unwrap();
+
+        let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+
+        assert_eq!(report.added, 0);
+        assert_eq!(report.changed, 0);
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.unchanged, 5);
+        assert!(!report.model_mismatch);
+    }
+
+    #[test]
+    fn staleness_preview_matches_the_diff_reconcile_applies() {
+        let (local, _imported, ctx) = fixture();
+        let mut index = fresh_index();
+        index.reconcile(&ctx).unwrap();
+
+        // Edit one concept, delete one, add one.
+        write_file(local.path(), "memory/gotchas.md", "Edited build notes.\n");
+        fs::remove_file(local.path().join("skill/deploy.md")).unwrap();
+        write_file(
+            local.path(),
+            "document/new-note.md",
+            "---\ntype: Note\n---\nA new note.\n",
+        );
+
+        let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+
+        assert_eq!(report.added, 1, "the new document counts as added");
+        assert_eq!(report.changed, 1, "the edited memory counts as changed");
+        assert_eq!(report.removed, 1, "the deleted skill counts as removed");
+        assert_eq!(report.unchanged, 3);
+        assert!(!report.model_mismatch);
+    }
+
+    #[test]
+    fn staleness_agrees_with_reconcile_on_identity_states() {
+        let (_local, _imported, ctx) = fixture();
+        let mut index = fresh_index();
+        index.reconcile(&ctx).unwrap();
+
+        // A recorded identity differing from the expected model ⇒ mismatch
+        // (reconcile would rebuild, IDX-12).
+        let report = staleness_report(&ctx, index.store(), "other-model@2").unwrap();
+        assert!(report.model_mismatch);
+
+        // Data present with NO recorded identity: reconcile's `None =>
+        // !stored.is_empty()` guard rebuilds, so the preview must not claim
+        // "up to date".
+        index.store_mut().model_id = None;
+        let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+        assert!(
+            report.model_mismatch,
+            "data without a recorded identity is a rebuild, never \"up to date\""
+        );
+
+        // An empty store with no recorded identity announces nothing; the
+        // added counts carry the whole story.
+        index.store_mut().clear().unwrap();
+        let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+        assert!(!report.model_mismatch);
+        assert_eq!(report.added, 5);
     }
 
     // --- First reconcile, IDX-1/IDX-2 ---

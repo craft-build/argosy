@@ -125,17 +125,7 @@ impl SqliteVecStore {
         // Stamp the schema version on fresh databases only; refuse dbs from a
         // newer argosy rather than silently misreading their layout (and
         // never clobber a higher version, so a future migration can notice).
-        let existing_version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .context(SqliteSnafu)?;
-        if existing_version > SCHEMA_VERSION as i64 {
-            return IndexSnafu {
-                reason: format!(
-                    "index schema version {existing_version} is newer than this build's {SCHEMA_VERSION}; upgrade argosy"
-                ),
-            }
-            .fail();
-        }
+        let existing_version = Self::check_schema_version(&conn)?;
         if existing_version == 0 {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .context(SqliteSnafu)?;
@@ -165,20 +155,7 @@ impl SqliteVecStore {
         )
         .context(SqliteSnafu)?;
 
-        let (model_id, dimensions): (Option<String>, Option<usize>) = conn
-            .query_row(
-                "SELECT model_id, dimensions FROM meta WHERE id = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<i64>>(1)?.map(|d| d as usize),
-                    ))
-                },
-            )
-            .optional()
-            .context(SqliteSnafu)?
-            .unwrap_or_default();
+        let (model_id, dimensions) = Self::read_meta(&conn)?;
         if let Some(dims) = dimensions {
             ensure_vec_table(&conn, dims)?;
         }
@@ -187,6 +164,60 @@ impl SqliteVecStore {
             model_id,
             dimensions,
         })
+    }
+
+    /// Opens the store strictly read-only (the CLI's `index status`): no
+    /// parent-directory creation, no WAL pragma, no schema DDL — the
+    /// database must already exist and remain untouched. This is what lets
+    /// `status` answer on a mounted-read-only or permission-locked index
+    /// where [`Self::open`] would fail before reading a single row.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        register_extension();
+        let conn =
+            Connection::open_with_flags(path.as_ref(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .context(SqliteSnafu)?;
+        Self::check_schema_version(&conn)?;
+        let (model_id, dimensions) = Self::read_meta(&conn)?;
+        Ok(Self {
+            conn,
+            model_id,
+            dimensions,
+        })
+    }
+
+    /// Refuses databases stamped with a newer schema than this build; returns
+    /// the on-disk `user_version` otherwise (read-only).
+    fn check_schema_version(conn: &Connection) -> Result<i64> {
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .context(SqliteSnafu)?;
+        if version > SCHEMA_VERSION as i64 {
+            return IndexSnafu {
+                reason: format!(
+                    "index schema version {version} is newer than this build's {SCHEMA_VERSION}; upgrade argosy"
+                ),
+            }
+            .fail();
+        }
+        Ok(version)
+    }
+
+    /// Reads the recorded model identity and vector dimensionality from
+    /// `meta` (read-only).
+    fn read_meta(conn: &Connection) -> Result<(Option<String>, Option<usize>)> {
+        conn.query_row(
+            "SELECT model_id, dimensions FROM meta WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?.map(|d| d as usize),
+                ))
+            },
+        )
+        .optional()
+        .context(SqliteSnafu)
+        .map(|row| row.unwrap_or_default())
     }
 }
 
@@ -205,6 +236,46 @@ fn ensure_vec_table(conn: &Connection, dims: usize) -> Result<()> {
             "CREATE VIRTUAL TABLE unit_vectors USING vec0(vector float[{dims}])"
         ))
         .context(SqliteSnafu)?;
+    }
+    Ok(())
+}
+
+/// Forces a complete `TRUNCATE` WAL checkpoint on the store file at
+/// `path`, so a subsequent raw file copy (`package --include-index`)
+/// snapshots the full state instead of a pre-checkpoint main file plus
+/// torn sidecars. A no-op where `path` is missing or not a sqlite database
+/// (magic-checked, so non-database placeholders are left untouched).
+/// Errors when the checkpoint cannot complete (another process holds the
+/// index): since the WAL sidecars are excluded from the copy, an
+/// incomplete checkpoint would silently package a main file missing
+/// committed data — far worse than a failed run the caller can retry.
+pub fn checkpoint_wal(path: &Path) -> Result<()> {
+    use std::io::Read as _;
+
+    const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+    let Ok(mut file) = fs::File::open(path) else {
+        return Ok(());
+    };
+    let mut magic = [0u8; 16];
+    if file.read_exact(&mut magic).is_err() || &magic != SQLITE_MAGIC {
+        return Ok(());
+    }
+    let conn = Connection::open(path).context(SqliteSnafu)?;
+    // `(busy, wal frames, checkpointed frames)`; `-1` log/ckpt = not a WAL
+    // database (nothing to move, the copy is complete by definition).
+    let (busy, log, checkpointed): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .context(SqliteSnafu)?;
+    if busy != 0 || (log >= 0 && log != checkpointed) {
+        return IndexSnafu {
+            reason: format!(
+                "cannot snapshot `{}` for packaging: the index's WAL checkpoint is incomplete ({checkpointed}/{log} frames checkpointed, busy={busy}); another process holds the index — close it or retry",
+                path.display()
+            ),
+        }
+        .fail();
     }
     Ok(())
 }
@@ -583,6 +654,82 @@ mod tests {
         let path = dir.path().join(".argosy/index.db");
         let store = SqliteVecStore::open(&path).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn open_read_only_reads_meta_after_a_writable_open_recorded_it() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("index.db");
+        let mut store = SqliteVecStore::open(&db).unwrap();
+        store.set_model_id("mock-embedder@1").unwrap();
+        drop(store);
+
+        let store = SqliteVecStore::open_read_only(&db).unwrap();
+
+        assert_eq!(store.model_id(), Some("mock-embedder@1"));
+        assert_eq!(store.unit_hashes().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_read_only_succeeds_where_open_fails_on_a_readonly_database() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, store) = open_in_tmp();
+        let db = dir.path().join(".argosy/index.db");
+        drop(store);
+        // A checkout/artifact with locked permissions (the doc 09 `index
+        // status` guarantee: read-only really means read-only).
+        let mut perms = std::fs::metadata(&db).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&db, perms).unwrap();
+
+        assert!(
+            SqliteVecStore::open(&db).is_err(),
+            "the writable open must fail on a read-only file (its pragma/DDL writes)"
+        );
+        assert!(
+            SqliteVecStore::open_read_only(&db).is_ok(),
+            "the read-only open reads it"
+        );
+    }
+
+    #[test]
+    fn open_read_only_on_a_missing_file_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope/index.db");
+        assert!(SqliteVecStore::open_read_only(&missing).is_err());
+    }
+
+    #[test]
+    fn checkpoint_wal_fails_when_a_reader_reaches_into_the_wal() {
+        use rusqlite::Connection;
+
+        let (dir, mut store) = open_in_tmp();
+        let db = dir.path().join(".argosy/index.db");
+        store.set_model_id("mock-embedder@1").unwrap();
+
+        // A reader pins an early WAL snapshot: the checkpoint can move
+        // frames but cannot fully reset the WAL past this read-mark, so the
+        // truncate must be reported incomplete rather than packaging a copy
+        // that misses the second commit.
+        let mut reader = Connection::open(&db).unwrap();
+        let tx = reader.transaction().unwrap();
+        let _: Option<String> = tx
+            .query_row("SELECT model_id FROM meta WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        store.set_model_id("mock-embedder@2").unwrap();
+
+        let err = checkpoint_wal(&db).unwrap_err();
+        assert!(
+            err.to_string().contains("checkpoint is incomplete"),
+            "unexpected error: {err}"
+        );
+        drop(tx);
+        drop(reader);
+
+        // Once the reader is gone, the same checkpoint completes.
+        checkpoint_wal(&db).unwrap();
     }
 
     /// Embeds `text` and wraps it into a unit with the given identity/facets.

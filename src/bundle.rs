@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
+use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
 use yaml_serde::{Mapping, Value};
 
@@ -90,6 +91,17 @@ impl Namespace {
     /// concepts (spec §4.4).
     pub(crate) fn is_listing_file(name: &str) -> bool {
         name == "index.md" || name == "log.md"
+    }
+}
+
+impl serde::Serialize for Namespace {
+    /// Serializes as the directory name (`document`, `custom-name`, ...) so
+    /// machine consumers see the spelling used on disk and in URIs.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_dir_name())
     }
 }
 
@@ -218,7 +230,8 @@ fn scalar_str(value: &Value) -> Option<String> {
 }
 
 /// How serious a validation issue is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Worth surfacing; has no bearing on conformance (e.g. `STR-9`).
     Info,
@@ -239,7 +252,7 @@ impl fmt::Display for Severity {
 }
 
 /// One issue found while validating a bundle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
     /// How serious the issue is (drives [`ValidationReport::is_conformant`]).
     pub severity: Severity,
@@ -280,12 +293,20 @@ impl Finding {
 /// [`Argosy::validate_skills`]/[`Argosy::validate_styleguide`]). Deeper OKF
 /// conformance (link integrity, listing contents) is deliberately out of
 /// scope.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ValidationReport {
     findings: Vec<Finding>,
 }
 
 impl ValidationReport {
+    /// Builds a report directly from findings — how callers holding a
+    /// `Vec<Finding>` ([`Argosy::validate_skills`],
+    /// [`Argosy::validate_styleguide`]) produce the same report shape as
+    /// [`Argosy::validate`] for JSON output and exit-code logic.
+    pub fn from_findings(findings: Vec<Finding>) -> Self {
+        Self { findings }
+    }
+
     pub(crate) fn push(&mut self, finding: Finding) {
         self.findings.push(finding);
     }

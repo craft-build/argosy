@@ -210,6 +210,16 @@ impl FromStr for Concept {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConceptId(String);
 
+impl serde::Serialize for ConceptId {
+    /// Serializes as the slash-separated id string.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl ConceptId {
     /// The slash-separated id.
     pub fn as_str(&self) -> &str {

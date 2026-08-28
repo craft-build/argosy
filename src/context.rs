@@ -45,7 +45,7 @@ const URI_CHARSET: &str = "[A-Za-z0-9._-/]";
 /// The `id` is bundle-relative and *includes* the namespace prefix
 /// (e.g. `document/decisions/2026-05-caching`), matching the codebase-wide
 /// [`ConceptId`] convention; `namespace` is derived from its first segment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct QualifiedConceptId {
     /// The owning argosy's manifest name (e.g. `acme-billing`).
     pub argosy: String,

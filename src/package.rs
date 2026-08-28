@@ -85,7 +85,7 @@ pub struct PackageOptions {
 }
 
 /// The outcome of a [`package`] run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PackageReport {
     /// Manifest name of the packaged argosy (`DIST-5`: the CLI prints
     /// "packaged <name> <version>").
@@ -103,7 +103,7 @@ pub struct PackageReport {
 }
 
 /// The outcome of an [`import_styleguide_yaml`] run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ImportReport {
     /// Rule concepts successfully written this run.
     pub written: usize,
@@ -174,6 +174,16 @@ fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> 
         if ty.is_dir() {
             collect_files(&entry.path(), &rel, out)?;
         } else if ty.is_file() || ty.is_symlink() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // SQLite WAL/SHM sidecars never enter the payload: `package`
+            // checkpoints the live index first, so the main file alone
+            // carries the full state and a torn sidecar copy would be
+            // strictly worse than none (also keeps the content hash stable
+            // across live-write activity, DIST-6).
+            if name.ends_with("-wal") || name.ends_with("-shm") {
+                continue;
+            }
             out.push(rel);
         }
     }
@@ -343,6 +353,11 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
     // Probe before copying: DIST-4 wants the exclusion *visible* whenever
     // memory/ existed at packaging time, even though it always works.
     let memory_excluded = fs::symlink_metadata(root.join(MEMORY_DIR)).is_ok();
+    #[cfg(feature = "default-index")]
+    if options.include_index {
+        crate::index::sqlite::checkpoint_wal(&root.join(INDEX_DIR).join("index.db"))?;
+    }
+
     let payload = collect_payload(root, options.include_index)?;
     let integrity = integrity_text(&payload);
 
@@ -990,6 +1005,42 @@ mod tests {
         assert!(dest.join(".argosy/index.db").is_file());
         assert!(!dest.join("memory").exists());
         assert_eq!(report.files_copied, 5);
+    }
+
+    #[cfg(feature = "default-index")]
+    #[test]
+    fn include_index_packages_a_checkpointed_snapshot_of_a_live_database() {
+        use crate::index::VectorStore;
+        use crate::index::sqlite::SqliteVecStore;
+
+        let dir = TempDir::new().unwrap();
+        let root = fixture_argosy(&dir);
+        // A live writer holds the index open with committed-but-uncheckpointed
+        // WAL content — the state an MCP server leaves the store in. (The
+        // bundle fixture's placeholder file is not a real database; start
+        // from a fresh one the store creates.)
+        fs::remove_file(root.join(".argosy/index.db")).unwrap();
+        let mut store = SqliteVecStore::open(root.join(".argosy/index.db")).unwrap();
+        store.set_model_id("mock-embedder@1").unwrap();
+        assert!(root.join(".argosy/index.db-wal").exists());
+
+        let dest = dir.path().join("out");
+        let argosy = Argosy::open(&root).unwrap();
+        let opts = PackageOptions {
+            include_index: true,
+            format: PackageFormat::Directory,
+        };
+        package(&argosy, &dest, &opts).unwrap();
+        drop(store);
+
+        // The sidecars are excluded...
+        assert!(dest.join(".argosy/index.db").is_file());
+        assert!(!dest.join(".argosy/index.db-wal").exists());
+        assert!(!dest.join(".argosy/index.db-shm").exists());
+        // ...because the main file alone carries the checkpointed state.
+        let copied = SqliteVecStore::open_read_only(dest.join(".argosy/index.db")).unwrap();
+        assert_eq!(copied.model_id(), Some("mock-embedder@1"));
+        validate_integrity(&dest).unwrap();
     }
 
     #[test]
