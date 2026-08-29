@@ -56,7 +56,8 @@ enum Command {
 /// directory — what `argosy index build` indexes. **stdout is the
 /// protocol channel**: diagnostics go to stderr. The embedding model
 /// loads only when something needs embedding — a FIRST RUN downloads it
-/// (~90 MB) into the fastembed cache; if the model is unavailable
+/// (~90 MB) into the user-level fastembed cache (`~/.cache/argosy/`
+/// under XDG, shared by every project); if the model is unavailable
 /// (offline), the server still serves every non-search tool, and writes
 /// report `indexed: false` until the model can load.
 #[derive(Args)]
@@ -164,7 +165,9 @@ enum IndexVerb {
     /// Bring the index in line with the bundles (reconcile: embed new or
     /// changed concepts, drop removed ones; O(hashes) when nothing
     /// changed). FIRST RUN downloads the embedding model (~90 MB) into the
-    /// fastembed cache; later runs are offline.
+    /// user-level fastembed cache (`$FASTEMBED_CACHE_DIR`, else
+    /// `$XDG_CACHE_HOME/argosy/fastembed`, else
+    /// `~/.cache/argosy/fastembed`); later runs are offline.
     Build,
 
     /// Read-only status: the store's recorded model identity, unit counts

@@ -25,8 +25,10 @@ target
 
 /target
 
-# fastembed model cache: populated by the gated smoke test
-# (`cargo test -- --ignored`); never commit model weights.
+# fastembed model cache leftovers from before the XDG fix: the model now
+# downloads to `$XDG_CACHE_HOME/argosy/fastembed` (or `~/.cache/argosy/
+# fastembed`), never the CWD. An old repo-root `.fastembed_cache/` is safe
+# to delete; kept ignored so it never shows as untracked.
 /.fastembed_cache
 
 # Project-local argosy state: the .argosy/default bundle and the index

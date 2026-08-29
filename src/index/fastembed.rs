@@ -1,15 +1,19 @@
 //! The fastembed-backed default [`EmbeddingProvider`], gated behind the
 //! `default-index` Cargo feature. fastembed runs ONNX locally — no live
 //! network needed except the first construction, which downloads the model
-//! weights (~90 MB) into fastembed's cache (`$FASTEMBED_CACHE` or the
-//! platform cache dir); later runs load from the cache offline.
+//! weights (~90 MB) into a user-level cache ([`model_cache_dir`]:
+//! `$FASTEMBED_CACHE_DIR` or the XDG cache dir); later runs load from the
+//! cache offline.
 
+use std::ffi::OsString;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{EmbeddingSnafu, IndexSnafu, Result};
+use crate::error::{EmbeddingSnafu, IndexSnafu, IoSnafu, Result};
 
 use super::EmbeddingProvider;
 
@@ -63,19 +67,70 @@ impl FastembedProvider {
     }
 
     /// Creates a provider over any fastembed [`EmbeddingModel`]. Downloads
-    /// the model on first use (module docs).
+    /// the model on first use into [`model_cache_dir`] (module docs).
     pub fn with_model(model: EmbeddingModel) -> Result<Self> {
         let model_id = Self::model_id_for(&model)?;
         let dimensions = TextEmbedding::get_model_info(&model)
             .context(EmbeddingSnafu)?
             .dim;
-        let model = TextEmbedding::try_new(TextInitOptions::new(model)).context(EmbeddingSnafu)?;
+        let cache = model_cache_dir()?;
+        // Create before fastembed touches it: a clear, early error for an
+        // unwritable cache location instead of a mid-download failure.
+        fs::create_dir_all(&cache).context(IoSnafu {
+            path: cache.clone(),
+        })?;
+        let model = TextEmbedding::try_new(TextInitOptions::new(model).with_cache_dir(cache))
+            .context(EmbeddingSnafu)?;
         Ok(Self {
             model: Mutex::new(model),
             model_id,
             dimensions,
         })
     }
+}
+
+/// Where the ONNX model weights are cached. fastembed's own default is
+/// `.fastembed_cache/` **relative to the current directory** — a fresh copy
+/// in every project where argosy first embeds (an MCP server runs with each
+/// project as its CWD). Instead, one shared user-level cache:
+///
+/// - `$FASTEMBED_CACHE_DIR` when set (fastembed's own escape hatch, honored
+///   verbatim), else
+/// - `$XDG_CACHE_HOME/argosy/fastembed`, falling back to
+///   `~/.cache/argosy/fastembed`.
+///
+/// `$HF_HOME`, when set, overrides all of the above inside fastembed itself
+/// (hf-hub's convention) and is honored unchanged.
+pub fn model_cache_dir() -> Result<PathBuf> {
+    cache_dir_from(
+        std::env::var_os("FASTEMBED_CACHE_DIR"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Pure core of [`model_cache_dir`], env reads factored out for tests.
+fn cache_dir_from(
+    fastembed_cache: Option<OsString>,
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(dir) = fastembed_cache
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        return Ok(dir);
+    }
+    let base = xdg_cache_home
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".cache")))
+        .context(IndexSnafu {
+            reason: "cannot locate the embedding-model cache: set FASTEMBED_CACHE_DIR, \
+                     XDG_CACHE_HOME, or HOME"
+                .to_string(),
+        })?;
+    Ok(base.join("argosy").join("fastembed"))
 }
 
 /// A [`FastembedProvider`] that defers model construction — and the
@@ -166,6 +221,42 @@ impl EmbeddingProvider for FastembedProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_dir_precedence_and_fallbacks() {
+        // An explicit `$FASTEMBED_CACHE_DIR` wins and is honored verbatim.
+        assert_eq!(
+            cache_dir_from(
+                Some("/fe".into()),
+                Some("/xdg".into()),
+                Some("/home".into())
+            )
+            .unwrap(),
+            PathBuf::from("/fe")
+        );
+        // XDG next, namespaced under argosy/fastembed.
+        assert_eq!(
+            cache_dir_from(None, Some("/xdg".into()), Some("/home".into())).unwrap(),
+            PathBuf::from("/xdg/argosy/fastembed")
+        );
+        // HOME fallback when XDG_CACHE_HOME is unset.
+        assert_eq!(
+            cache_dir_from(None, None, Some("/home".into())).unwrap(),
+            PathBuf::from("/home/.cache/argosy/fastembed")
+        );
+        // Empty strings count as unset (mirrors `global_argosy_dir`).
+        assert_eq!(
+            cache_dir_from(None, Some("".into()), Some("/home".into())).unwrap(),
+            PathBuf::from("/home/.cache/argosy/fastembed")
+        );
+        assert_eq!(
+            cache_dir_from(Some("".into()), None, Some("/home".into())).unwrap(),
+            PathBuf::from("/home/.cache/argosy/fastembed")
+        );
+        // Nothing to derive from: an actionable error, never a CWD-relative
+        // `.fastembed_cache/`.
+        assert!(cache_dir_from(None, None, None).is_err());
+    }
 
     /// The single fastembed test: needs network on a cold model cache, so it
     /// never runs in default `cargo test`.
