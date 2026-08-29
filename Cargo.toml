@@ -9,60 +9,24 @@ description = "Library and Binary for creating, consuming and using knowledge bo
 [dependencies]
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-snafu = "0.8"
+snafu = "0.9"
 yaml_serde = "0.10"
-
-# --- CLI deps (doc 09) ------------------------------------------------------
-# The binary is argument parsing + library calls + output formatting.
 clap = { version = "4", features = ["derive"] }
-# `serde_json` backs `--json` on every subcommand; also the `units.tags`
-# column encoding of the sqlite backend below.
 serde_json = "1"
-
-# --- Distribution packaging deps (doc 08) -----------------------------------
-# `sha2` is the conventional pure-Rust SHA-256: `DIST-6` needs a standard hash
-# for the integrity sidecar and `bundle_content_hash` change detector.
-sha2 = "0.10"
-# `tar` streams the `TarGz` format without materializing a staging copy.
+sha2 = "0.11"
 tar = "0.4"
-# `flate2` (default rust_backend/miniz_oxide — pure Rust, no C toolchain)
-# compresses the tar stream.
 flate2 = "1"
-
-# --- Optional `default-index` backend deps (doc 07) -------------------------
-# `bundled` is the upstream-recommended pairing with sqlite-vec's static C
-# build: one toolchain compiles both SQLite and the vec0 extension.
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
-# Statically compiles and links sqlite-vec's C source; we register
-# `sqlite3_vec_init` as an auto-extension ourselves.
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 sqlite-vec = { version = "0.1", optional = true }
-# fastembed: local ONNX text embeddings. `version = "5"` pins the v5 API
-# (`TextEmbedding::try_new` / `TextInitOptions`); 6.0 landed too recently to
-# adopt blindly. Features are the minimal set for dense text embedding:
-#  - `hf-hub-native-tls`: pulls `hf-hub`, the only path that fetches models
-#    (argosy's sole tolerated network access — see `index::fastembed` docs).
-#  - `ort-download-binaries-native-tls`: the ONNX runtime binary for `ort`.
-# Everything else (`image-models`, candle/llm backends, GPU providers) is off
-# to keep the dependency tree and compile time down.
-fastembed = { version = "5", default-features = false, features = [
+fastembed = { version = "6", default-features = false, features = [
   "hf-hub-native-tls",
   "ort-download-binaries-native-tls",
 ], optional = true }
-
-# --- Optional `mcp` server deps (doc 10) ------------------------------------
-# rmcp is the official Rust MCP SDK. Features are the minimal set: `server`
-# (handler + schemars for tool schemas), `transport-io` (stdio, the default
-# transport), `transport-streamable-http-server` (the secondary HTTP mode).
-# `base64`/`macros`/`auth` stay off; tool wiring is hand-rolled for clarity.
 rmcp = { version = "3.1", default-features = false, features = [
   "server",
   "transport-io",
   "transport-streamable-http-server",
 ], optional = true }
-# The async runtime the `mcp` verb serves under. Deviation from doc 10 §2.1's
-# "binary only": the library's `ArgosyMcpServer` uses `tokio::sync::Mutex`
-# (Send-able guards for non-Sync backends), so the `mcp` feature carries
-# tokio in the library too. Booting a runtime is still binary-only.
 tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",
   "macros",
@@ -71,41 +35,25 @@ tokio = { version = "1", default-features = false, features = [
   "time",
   "sync",
 ], optional = true }
-# Serves rmcp's `StreamableHttpService` (a tower service) for the secondary
-# HTTP transport. `http1`+`tokio` only; JSON layer unused (MCP frames are
-# handled by rmcp).
 axum = { version = "0.8", default-features = false, features = [
   "http1",
   "tokio",
 ], optional = true }
 
 [features]
-# The backend is on by default (doc 00 §3: the binary and MCP server run it);
-# `cargo build --no-default-features` yields the dependency-free trait layer.
 default = ["default-index", "mcp"]
-# The default vector-store/embedding backend (sqlite-vec + fastembed). The
-# trait layer in `src/index` needs no dependencies; this feature carries the
-# whole backend so library consumers with their own stack pay nothing.
 default-index = [
   "dep:rusqlite",
   "dep:sqlite-vec",
   "dep:fastembed",
 ]
-# The MCP server (doc 10): `src/mcp.rs` in the library plus the `argosy mcp`
-# verb. `--no-default-features` library builds stay rmcp-free (doc 00 §4).
 mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
 
 [dev-dependencies]
 tempfile = "3"
-# Drive the compiled binary in `tests/cli.rs` (doc 09).
 assert_cmd = "2"
 predicates = "3"
-# Also listed in `[dependencies]`; the CLI integration tests parse the
-# binary's `--json` stdout with it.
 serde_json = "1"
-# The `client` half of rmcp for the in-process MCP end-to-end test
-# (tests/mcp.rs). Optional in `[dependencies]`; features unify for test
-# builds, so library consumers never compile the client.
 rmcp = { version = "3.1", default-features = false, features = [
   "server",
   "client",

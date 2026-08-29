@@ -1,12 +1,8 @@
-//! The fastembed-backed default [`EmbeddingProvider`] (spec §7.3, `IDX-5`),
-//! gated behind the `default-index` Cargo feature.
-//!
-//! fastembed runs ONNX embeddings locally, so argosy needs no live network
-//! to be useful out of the box (reference doc §2.1) — **with one tolerance**:
-//! the first [`FastembedProvider`] construction downloads the model weights
-//! (~90 MB for the default `all-MiniLM-L6-v2`) into fastembed's model cache
-//! (`$FASTEMBED_CACHE` or the platform cache dir). That download is the only
-//! network access in this crate; every later run loads from the cache offline.
+//! The fastembed-backed default [`EmbeddingProvider`], gated behind the
+//! `default-index` Cargo feature. fastembed runs ONNX locally — no live
+//! network needed except the first construction, which downloads the model
+//! weights (~90 MB) into fastembed's cache (`$FASTEMBED_CACHE` or the
+//! platform cache dir); later runs load from the cache offline.
 
 use std::sync::Mutex;
 
@@ -17,14 +13,11 @@ use crate::error::{EmbeddingSnafu, IndexSnafu, Result};
 
 use super::EmbeddingProvider;
 
-/// The version token carried in `model_id()`. Mirrors the `fastembed = "5"`
-/// pin in `Cargo.toml` — bump them together.
-///
-/// Known limitation: weights pinned within the `5.x` line are reported
-/// identically; should fastembed re-publish changed weights under the same
-/// major, the mismatch would not be detected (`IDX-5` is honored at
-/// backend-major granularity).
-const FASTEMBED_BACKEND_VERSION: &str = "5";
+/// The version token carried in `model_id()`. Mirrors the `fastembed = "6"`
+/// pin in `Cargo.toml` — bump them together. Limitation: weights re-published
+/// within the `6.x` line are reported identically (mismatch is detected only
+/// at backend-major granularity).
+const FASTEMBED_BACKEND_VERSION: &str = "6";
 
 /// A local fastembed [`EmbeddingProvider`]: ONNX text embeddings with no
 /// remote service (see module docs for the first-run-download tolerance).
@@ -58,7 +51,7 @@ impl FastembedProvider {
         Self::model_id_for(&Self::DEFAULT_MODEL)
     }
 
-    /// `IDX-5`: stable across runs (derived from the model's static metadata)
+    /// Stable across runs (derived from the model's static metadata)
     /// and changes when the model changes (the model code identifies the
     /// weights, the suffix the backend's major).
     fn model_id_for(model: &EmbeddingModel) -> Result<String> {
