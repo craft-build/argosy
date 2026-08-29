@@ -55,9 +55,14 @@ enum Command {
     Mcp(McpArgs),
 }
 
-/// Serve this project over the Model Context Protocol (doc 10) so any
-/// MCP-compatible harness can search and read its argosys and write to the
-/// local one. Lifecycle steps 1–4 run at startup: the project opens,
+/// Serve the current project over the Model Context Protocol (doc 10) so
+/// any MCP-compatible harness can search and read its argosys and write to
+/// the local one. The argosy set is the standard one discovered from the
+/// working directory — exactly what `argosy index build` indexes: the local
+/// bundle at `.argosy/default`, every other checkout in `.argosy/<name>`,
+/// then every argosy in the global user store, in that precedence order.
+/// Launch the server from the project root (MCP harnesses spawn it with
+/// `cwd` set there). Lifecycle steps 1–4 run at startup: the project opens,
 /// validates, and reconciles its index before the transport starts —
 /// reconcile-on-start is the freshness model; there are no live change
 /// notifications, so restart the server after external edits.
@@ -67,17 +72,6 @@ enum Command {
 /// unauthenticated: only bind it on trusted networks (spec §15).
 #[derive(Args)]
 struct McpArgs {
-    /// Directory containing the LOCAL (writable) argosy — the one holding
-    /// its own `argosy.md`. Memory/rule writes and promotions land here;
-    /// imported argosys are always read-only (MUL-3).
-    #[arg(long)]
-    project_root: PathBuf,
-
-    /// Root of an argosy to import read-only (its manifest name becomes its
-    /// `argosy://` name); repeat for multiple imports.
-    #[arg(long)]
-    import: Vec<PathBuf>,
-
     /// Transport to serve: `stdio` (the default, for editor/CLI harnesses
     /// that spawn this process) or `http` (streamable HTTP, unauthenticated,
     /// trusted networks only).
@@ -734,8 +728,17 @@ fn cmd_mcp(_out: &Output, args: &McpArgs) -> Result<ExitCode> {
     // Lifecycle steps 1–4 run to completion before the transport starts: any
     // startup failure prints via `run`'s `error:` mapping and exits 1 —
     // never serve a half-broken context.
-    let context = ProjectContext::open(&args.project_root, args.import.iter().cloned())?;
-    let db = args.project_root.join(".argosy/index.db");
+    //
+    // The argosy set is discovered from the working directory, exactly like
+    // the index verbs (`cmd_index`): `.argosy/default` local, `.argosy/<name>`
+    // checkouts, then the global user store. No single-argosy
+    // `--project-root`: one server serves the whole project.
+    let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
+        path: ".".into(),
+        source,
+    })?;
+    let context = ProjectContext::open_project(&root)?;
+    let db = root.join(".argosy/index.db");
     let store = SqliteVecStore::open(&db)?;
     let provider = FastembedProvider::new_default()?;
     let mut index = Index::new(provider, store);
@@ -922,12 +925,6 @@ mod mcp_parse_tests {
         let cli = Cli::try_parse_from([
             "argosy",
             "mcp",
-            "--project-root",
-            "proj",
-            "--import",
-            "a",
-            "--import",
-            "b",
             "--transport",
             "http",
             "--bind",
@@ -937,22 +934,26 @@ mod mcp_parse_tests {
         let Command::Mcp(args) = cli.command else {
             panic!("expected mcp argv");
         };
-        assert_eq!(args.project_root, PathBuf::from("proj"));
-        assert_eq!(
-            args.import,
-            vec![PathBuf::from("a"), PathBuf::from("b")],
-            "repeatable --import"
-        );
         assert!(matches!(args.transport, McpTransport::Http));
         assert_eq!(args.bind, "0.0.0.0:9000");
 
-        let cli =
-            Cli::try_parse_from(["argosy", "mcp", "--project-root", "proj"]).expect("argv parses");
+        let cli = Cli::try_parse_from(["argosy", "mcp"]).expect("argv parses");
         let Command::Mcp(args) = cli.command else {
             panic!("expected mcp argv");
         };
         assert!(matches!(args.transport, McpTransport::Stdio));
-        assert!(args.import.is_empty());
         assert_eq!(args.bind, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn mcp_takes_no_argosy_selection_flags() {
+        // Membership comes from `.argosy/` + global-store discovery, not from
+        // a hand-maintained flag list: neither flag may parse at all.
+        for flag in ["--project-root", "--import"] {
+            assert!(
+                Cli::try_parse_from(["argosy", "mcp", flag, "x"]).is_err(),
+                "`{flag}` must not parse"
+            );
+        }
     }
 }

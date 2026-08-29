@@ -52,7 +52,7 @@ Keeping everything in one crate avoids version skew between the format logic and
 
 The MCP server is a subcommand of the `argosy` binary, built on the library with the default backend enabled. From the specification's point of view (§11), it *is* a harness: it performs discovery, validation, index building, and activation internally, then exposes the result through MCP instead of a native API.
 
-It is launched with a project root (matching the specification's project context, §1.4) so it knows which argosy is local and which are imported.
+It is launched from the project's working directory (matching the specification's project context, §1.4) and discovers the active set itself — the local `.argosy/default` bundle, every other `.argosy/<name>` checkout, then the global user store — so it knows which argosy is local and which are imported without any per-launch flag bookkeeping.
 
 ### 3.2 Tool and Resource Mapping
 
