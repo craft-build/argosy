@@ -5,6 +5,8 @@
 //! structurally validates a bundle on disk.
 
 pub mod bundle;
+#[cfg(feature = "code-tools")]
+pub mod codetools;
 pub mod concept;
 pub mod context;
 pub mod error;

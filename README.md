@@ -65,6 +65,28 @@ a `dream` prompt: a guided memory-consolidation pass (merge, update,
 delete, deduplicate) that harnesses can run whenever the local memory
 feels redundant.
 
+### Code-intelligence tools
+
+The same server also serves read-mostly **code-intelligence tools** over
+the workspace directory it was spawned in, ported from Craft:
+
+| Tool | What it does |
+|---|---|
+| `outline` | Structural outline of a file or directory (nested symbol tree with signatures and line ranges, or a flat file table). |
+| `zoom` | The body of one symbol (or a line range) in a file, with a numbered gutter. |
+| `astgrep` | AST search/replace with `$VAR` / `$$$BODY` metavariables — dry-run diffs by default; `apply` writes, with syntax validation and rollback. |
+| `conflicts` | Find (and optionally resolve `@ours` / `@theirs` / `@base`) git merge-conflict markers. |
+| `inspect` | Quick health check: TODO/FIXME/HACK/XXX scan plus `git status`. |
+| `callgraph` | Intra-file call graph: `call_tree`, `callers`, `impact` (blast radius). |
+| `repomap` | Token-budgeted, PageRank-ranked map of a repository's definitions. |
+
+`astgrep` (with `rewrite` + `apply`) and `conflicts` (with `resolve`) are
+the only ones that write files, and both refuse to write a file that
+changed since you last read it through these tools. The tools pull in
+~35 tree-sitter grammars; builds that don't need them can drop the
+default `code-tools` feature (`--no-default-features` plus the features
+you want) for a much faster, smaller compile.
+
 ## Reviewer subagent
 
 `argosy agent reviewer <harness>` writes a read-only `reviewer` subagent

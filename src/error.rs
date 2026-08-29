@@ -136,6 +136,14 @@ pub enum Error {
     #[cfg(feature = "default-index")]
     #[snafu(display("SQLite index operation failed: {source}"))]
     Sqlite { source: rusqlite::Error },
+
+    /// A code-intelligence tool (`outline`, `zoom`, `astgrep`, `conflicts`,
+    /// `inspect`, `callgraph`, `repomap`) failed on caller input: an
+    /// unsupported language, an ambiguous symbol, a stale read, an invalid
+    /// pattern. The message is phrased for an LLM caller to act on.
+    #[cfg(feature = "code-tools")]
+    #[snafu(display("{message}"))]
+    CodeTool { message: String },
 }
 
 /// Convenient alias for `std::result::Result` with [`Error`].
