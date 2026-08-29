@@ -28,3 +28,7 @@ target
 # fastembed model cache: populated by the gated smoke test
 # (`cargo test -- --ignored`); never commit model weights.
 /.fastembed_cache
+
+# Project-local argosy state: the .argosy/default bundle and the index
+# cache (.argosy/index.db*) are per-checkout runtime data, not source.
+.argosy/

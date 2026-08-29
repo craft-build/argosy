@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "argosy": {
+        "type": "local",
+        "command": [
+          "/Users/akarifur/Projects/argosy/target/debug/argosy",
+          "mcp"
+        ]
+      }
+    }
+  }
+}
