@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/craft-build/argosy/compare/v0.1.2...v0.2.0) - 2026-08-29
+
+### Added
+
+- [**breaking**] move argosy data out of project tree into XDG state dir
+
 ## [0.1.2](https://github.com/craft-build/argosy/compare/v0.1.1...v0.1.2) - 2026-08-29
 
 ### Added
