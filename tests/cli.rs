@@ -374,12 +374,18 @@ fn package_tar_gz_produces_a_gzip_archive() {
 #[test]
 fn package_include_index_ships_the_argosy_cache() {
     let scratch = TempDir::new().unwrap();
+    let source = fixture_copy("valid-acme-billing", &scratch);
+    // `--include-index` ships a pre-built cache verbatim; it does not build
+    // one. The bundle keeps no `.argosy/` runtime state in git (see
+    // .gitignore), so plant a stand-in file in the copy: any bytes will do.
+    fs::create_dir_all(source.join(".argosy")).unwrap();
+    fs::write(source.join(".argosy/index.db"), "sqlite bytes").unwrap();
     let dest = scratch.path().join("with-index");
     argosy_bin()
         .args([
             "package",
             "--include-index",
-            fixture("valid-acme-billing").to_str().unwrap(),
+            source.to_str().unwrap(),
             dest.to_str().unwrap(),
         ])
         .assert()
