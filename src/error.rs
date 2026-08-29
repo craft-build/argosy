@@ -60,14 +60,14 @@ pub enum Error {
     #[snafu(display("concept `{id}` does not exist"))]
     ConceptNotFound { id: ConceptId },
 
-    /// A write targeted a filename reserved by the bundle format (§4.4:
+    /// A write targeted a filename reserved by the bundle format
     /// `argosy.md`, `index.md`, `log.md`).
     #[snafu(display(
         "`argosy.md`, `index.md`, and `log.md` are reserved filenames and cannot be write targets"
     ))]
     ReservedFilename,
 
-    /// A write violated the target namespace's hard contract (e.g. `STG-2`
+    /// A write violated the target namespace's hard contract
     /// when a `styleguide/` concept lacks `type: Styleguide Rule`).
     #[snafu(display("namespace contract violation ({requirement}): {detail}"))]
     NamespaceContractViolation {
@@ -82,7 +82,7 @@ pub enum Error {
     NotAnArgosy { path: PathBuf, reason: String },
 
     /// A project context activated two argosys with the same manifest name
-    /// (`MUL-5`: identity by name must be unambiguous). The colliding name is
+    /// (identity by name must be unambiguous). The colliding name is
     /// included.
     #[snafu(display(
         "duplicate argosy name `{name}`: every active argosy must have a distinct manifest name (MUL-5)"
@@ -100,7 +100,7 @@ pub enum Error {
     InvalidUri { uri: String, reason: String },
 
     /// An embedding provider or vector store could not carry out an index
-    /// operation (embed, upsert, search, ...); the reason names the failing
+    /// operation (embed, upsert, search,...); the reason names the failing
     /// backend and operation.
     #[snafu(display("index operation failed: {reason}"))]
     Index { reason: String },
@@ -112,7 +112,7 @@ pub enum Error {
     Embedding { source: fastembed::Error },
 
     /// A bundle file was a symlink whose resolved target escapes the bundle
-    /// root. Packaging refuses to follow it (`DIST-3`'s same root-containment
+    /// root. Packaging refuses to follow it (the same root-containment
     /// rule as the readers): materializing it would smuggle outside content
     /// into the distributed artifact.
     #[snafu(display(
@@ -121,7 +121,7 @@ pub enum Error {
     ))]
     SymlinkEscape { path: PathBuf },
 
-    /// Recomputing a bundle's `DIST-6` integrity sidecar disagreed with what
+    /// Recomputing a bundle's integrity sidecar disagreed with what
     /// is on disk (missing sidecar, missing file, or hash mismatch).
     #[snafu(display("integrity check failed for `{}`: {reason}", path.display()))]
     IntegrityMismatch { path: PathBuf, reason: String },

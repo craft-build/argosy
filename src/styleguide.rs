@@ -1,19 +1,8 @@
-//! The typed model and namespace contract for `styleguide/` rules (spec §5.4).
-//!
-//! Styleguide rules are ordinary concepts retrieved by embedding similarity
-//! and filtered by `language`/`category` (`QRY-3`); this module provides the
-//! typed view that later query layers consume. [`StyleguideRule::list`] is
-//! tolerant in the same way [`crate::skill::Skill::list`] is — only concepts
-//! satisfying the hard contract (`STG-2`, `STG-3`) become rules — while
-//! [`Argosy::validate_styleguide`]/[`validate`] surface violations, including
-//! the `STG-4` `Warning` for rules missing their filter facets.
-//!
-//! `STG-1` (OKF conformance) and `STG-8` (multi-argosy combination, §9.4) are
-//! deliberately out of scope here: the former is enforced generically by
-//! [`Argosy::validate`], the latter belongs to the import/aggregation layer.
-//!
-//! No markdown parsing beyond scanning for `## Good`/`## Bad` headings
-//! (`STG-6`) — full markdown handling is not this crate's job.
+//! The typed model and namespace contract for `styleguide/` rules: ordinary
+//! concepts retrieved by embedding similarity and filtered by
+//! `language`/`category`. [`StyleguideRule::list`] is tolerant — only
+//! hard-contract concepts become rules — while [`validate`] surfaces
+//! violations, warning on missing facets.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -22,16 +11,13 @@ use crate::bundle::{Argosy, Finding, Namespace, Severity, sorted_walk};
 use crate::concept::{Concept, ConceptId};
 use crate::error::{Error, Result};
 
-/// The `type` every styleguide rule concept must carry (`STG-2`).
+/// The `type` every styleguide rule concept must carry.
 pub(crate) const TYPE: &str = "Styleguide Rule";
 
 /// A styleguide rule: an owning typed view over one `styleguide/` concept.
-///
-/// Owning the [`ConceptId`] and [`Concept`] (rather than borrowing from an
-/// [`Argosy`]) keeps rules free of lifetimes so [`StyleguideRule::filter`]
-/// can consume and return them and later query layers can hold them in
-/// arbitrary collections; accessors like [`StyleguideRule::good_examples`]
-/// borrow per call, so there is no self-referential field.
+/// Owning the [`ConceptId`] and [`Concept`] keeps rules free of lifetimes so
+/// [`StyleguideRule::filter`] can consume and return them and query layers
+/// can hold them in arbitrary collections; accessors borrow per call.
 #[derive(Debug, Clone)]
 pub struct StyleguideRule {
     id: ConceptId,
@@ -39,14 +25,11 @@ pub struct StyleguideRule {
 }
 
 impl StyleguideRule {
-    /// Lists every concept under `styleguide/` satisfying `STG-2`/`STG-3`,
-    /// sorted by concept id. Subdirectory organization (`STG-7`) is followed
-    /// recursively — `styleguide/rust/naming/foo.md` is one rule. Listing is
-    /// tolerant like [`crate::skill::Skill::list`]: concepts failing the hard
-    /// contract *or failing to parse* are skipped (validation reports them),
-    /// so one broken rule cannot poison every consumer. An absent namespace
-    /// yields an empty vec (`STR-8`); unreadable directories remain hard
-    /// errors (nothing meaningful could be listed anyway).
+    /// Lists every concept under `styleguide/` satisfying the hard contract,
+    /// sorted by concept id; subdirectories are followed recursively.
+    /// Tolerant like [`crate::skill::Skill::list`]: failing or unparseable
+    /// concepts are skipped (validation reports them). Absent namespace
+    /// yields an empty vec; unreadable directories are hard errors.
     pub fn list(argosy: &Argosy) -> Result<Vec<StyleguideRule>> {
         let Some(dir) = argosy.namespace_dir(&Namespace::Styleguide) else {
             return Ok(Vec::new());
@@ -85,7 +68,8 @@ impl StyleguideRule {
         Ok(rules)
     }
 
-    /// Narrows `rules` by exact match on the `STG-4` facets. `None` means
+    /// Narrows `rules` by exact match on the language/category facets.
+    /// `None` means
     /// "no constraint"; a rule lacking the requested facet never matches a
     /// `Some(_)` filter.
     pub fn filter(
@@ -115,40 +99,40 @@ impl StyleguideRule {
         &self.concept
     }
 
-    /// `STG-4`: the language this rule applies to (`rust`, `python`,
-    /// `general`, ...).
+    /// The language this rule applies to (`rust`, `python`,
+    /// `general`,...).
     pub fn language(&self) -> Option<&str> {
         self.concept.get_str("language")
     }
 
-    /// `STG-4`: the rule category (`naming`, `error-handling`, ...).
+    /// The rule category (`naming`, `error-handling`,...).
     pub fn category(&self) -> Option<&str> {
         self.concept.get_str("category")
     }
 
-    /// `STG-5`: a producer's stable rule identifier, if set.
+    /// A producer's stable rule identifier, if set.
     pub fn rule_id(&self) -> Option<&str> {
         self.concept.get_str("rule_id")
     }
 
-    /// `STG-5`: the producer's priority (`error`/`warn`/`info` by convention;
+    /// The producer's priority (`error`/`warn`/`info` by convention;
     /// the value is not validated).
     pub fn priority(&self) -> Option<&str> {
         self.concept.get_str("priority")
     }
 
-    /// `STG-5`: a machine-checkable pattern, if the producer supplied one.
+    /// A machine-checkable pattern, if the producer supplied one.
     pub fn pattern(&self) -> Option<&str> {
         self.concept.get_str("pattern")
     }
 
-    /// `STG-6`: the body section under a `## Good` heading, trimmed. `None`
+    /// The body section under a `## Good` heading, trimmed. `None`
     /// when the heading is absent.
     pub fn good_examples(&self) -> Option<&str> {
         self.section("Good")
     }
 
-    /// `STG-6`: the body section under a `## Bad` heading, trimmed. `None`
+    /// The body section under a `## Bad` heading, trimmed. `None`
     /// when the heading is absent.
     pub fn bad_examples(&self) -> Option<&str> {
         self.section("Bad")
@@ -220,12 +204,11 @@ fn is_any_heading(line: &str) -> bool {
     hashes > 0 && (line.len() == hashes || line.as_bytes()[hashes] == b' ')
 }
 
-/// Validates the `styleguide/` namespace contract of the bundle at `root`
-/// (spec §5.4). Absent `styleguide/` is fine (`STR-8`). `STG-1` (OKF
-/// conformance) is enforced generically by [`Argosy::validate`] and is *not*
-/// duplicated here: unparseable or untyped concepts are skipped, so `STG-2`
-/// fires only on a present-but-wrong `type`. Unreadable directories are the
-/// structural layer's `STR-1` findings.
+/// Validates the `styleguide/` namespace contract of the bundle at `root`.
+/// Absent `styleguide/` is fine. OKF conformance is enforced generically by
+/// [`Argosy::validate`] and is not duplicated here: unparseable or untyped
+/// concepts are skipped, so the type check fires only on a present-but-wrong
+/// `type`. Unreadable directories are the structural layer's findings.
 pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     let ns_dir = root.join("styleguide");
     if !ns_dir.is_dir() {
@@ -245,7 +228,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             continue;
         };
         // An untyped concept — including a present-but-empty `type` — is
-        // wholly the generic pass's `STG-1` finding; running rule-contract
+        // wholly the generic pass's finding; running rule-contract
         // checks on it would only double-report one root cause.
         let Some(ty) = concept.concept_type() else {
             continue;
@@ -297,7 +280,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
 }
 
 impl Argosy {
-    /// Validates only the `styleguide/` namespace contract (spec §5.4), for
+    /// Validates only the `styleguide/` namespace contract, for
     /// callers that want a single namespace rather than the full
     /// [`Argosy::validate`] report.
     pub fn validate_styleguide(&self) -> Vec<Finding> {
@@ -353,8 +336,8 @@ mod tests {
         // The malformed concept is skipped, not an Err for the whole list.
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id().as_str(), "styleguide/good");
-        // ...and validation is where the breakage is surfaced (`STG-1`,
-        // from the generic concept pass).
+        //...and validation is where the breakage is surfaced (from the
+        // generic concept pass).
         let report = Argosy::validate(fixture("rule-malformed"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
         assert_eq!(ids, vec![Some("STG-1")]);
@@ -493,7 +476,7 @@ mod tests {
     fn stg2_rule_with_wrong_type_is_an_error() {
         let findings = validate(&fixture("rule-wrong-type"));
         assert_eq!(error_ids(&findings), vec![Some("STG-2")]);
-        // ...and the wrongly-typed concept never becomes a listed rule.
+        //...and the wrongly-typed concept never becomes a listed rule.
         let argosy = Argosy::open(fixture("rule-wrong-type")).unwrap();
         assert!(StyleguideRule::list(&argosy).unwrap().is_empty());
     }
@@ -501,7 +484,7 @@ mod tests {
     #[test]
     fn stg1_untyped_rule_is_the_generic_passes_job_not_stg2s() {
         // `validate` here knows nothing of `type` absence — that is the
-        // structural layer's STG-1. The composed report must not double up.
+        // structural layer's. The composed report must not double up.
         assert!(validate(&fixture("rule-untyped")).is_empty());
         let report = Argosy::validate(fixture("rule-untyped"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
@@ -545,7 +528,7 @@ mod tests {
         assert_eq!(validate(root), vec![]);
         let report = Argosy::validate(root);
         let errors: Vec<_> = report.errors().collect();
-        // The generic pass's STG-1 only — no STG-2 on top.
+        // The generic pass's untyped finding only — no type check on top.
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].id, Some("STG-1"));
     }

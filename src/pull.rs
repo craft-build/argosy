@@ -1,14 +1,8 @@
-//! Pulling external argosies into a project or the global store (§9's
-//! "imported" side of `MUL-1`).
-//!
-//! A project's argosies all live in one directory, `.argosy/` at the
-//! project root: the local (writable) bundle at `.argosy/default`, pulled
-//! checkouts at `.argosy/<name>/`, and the derived index at
+//! Pulling external argosies into a project or the global store. A
+//! project's argosies all live in `.argosy/`: the local bundle at
+//! `.argosy/default`, pulled checkouts at `.argosy/<name>/`, the index at
 //! `.argosy/index.db` — outside every bundle, so bundles stay clean to
-//! `package` (doc 08) and plain `git` workflows. Global checkouts shared
-//! by every project live under [`global_argosy_dir`]. Both tiers are plain
-//! git clones of standalone bundles; checkout names are the same URI-safe
-//! spelling as manifest names.
+//! `package` and plain `git`. Global checkouts: [`global_argosy_dir`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,11 +37,9 @@ pub fn global_argosy_dir() -> Result<PathBuf> {
 
 /// Clones the argosy at `url` into `<root>/<name>` via `git clone` and
 /// opens it, refusing to overwrite an existing checkout and rejecting
-/// `name` outside the URI charset (`argosy://` spelling, see
-/// [`crate::bundle::is_safe_bundle_name`]).
-///
-/// All-or-nothing: a clone that fails or that does not contain an argosy
-/// (no parseable `argosy.md`) leaves no partial checkout behind.
+/// `name` outside the URI charset (see
+/// [`crate::bundle::is_safe_bundle_name`]). All-or-nothing: a failed or
+/// non-bundle clone leaves no partial checkout behind.
 pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
     ensure!(
         crate::bundle::is_safe_bundle_name(name),

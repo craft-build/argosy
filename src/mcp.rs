@@ -1,34 +1,8 @@
-//! The MCP server (doc 10): argosys as MCP Resources and Tools for any
-//! MCP-compatible harness (reference doc §3).
-//!
-//! **stdio constraint (read before editing)**: on the stdio transport,
-//! stdout *is* the protocol channel — a single stray `println!` corrupts it
-//! beyond recovery. All diagnostics — startup notes, reconcile summaries,
-//! listen addresses — go to **stderr** (`eprintln!`). Nothing in this module
-//! may write to stdout.
-//!
-//! This module is a translation layer only (same discipline as the CLI): every
-//! handler is a thin adapter over [`ProjectContext`], [`LocalArgosy`],
-//! and [`Index`]. Logic that isn't MCP-shaped belongs in the library proper.
-//!
-//! Two layers, both generic over the embedding backend like [`Index`]:
-//!
-//! - [`McpState`] — the plain handler layer: plain functions returning typed,
-//!   serde-serializable outcomes or [`Error`], unit-testable with no transport
-//!   at all. (They are sync, not async as doc 10 §2.4 sketches: every library
-//!   call they wrap is itself synchronous today, and composing `async fn`
-//!   handlers across the SDK's `Send` futures would force spurious `Sync`
-//!   bounds onto non-`Sync` backends like the sqlite store.)
-//! - [`ArgosyMcpServer`] — the rmcp [`ServerHandler`] wrapper that dispatches
-//!   `tools/call` and `resources/read` onto the handler layer. Every failure a
-//!   caller can act on is a tool-level `isError` result — including malformed
-//!   tool arguments; protocol-level `Err(McpError)` is reserved for unroutable
-//!   requests only (unknown tool name, unknown resource → `resource_not_found`).
-//!
-//! Scheme extensions beyond concept URIs (reference doc §3.2):
-//! `argosy://_argosys` lists the active argosys (name, version, local vs
-//! imported), and `argosy://<name>/_index` reads a bundle's root `index.md`
-//! for progressive-disclosure browsing (OKF §8).
+//! The MCP server: argosys as MCP Resources and Tools for any
+//! MCP-compatible harness. **stdio constraint**: stdout *is* the protocol
+//! channel — one stray `println!` corrupts it; diagnostics go to stderr.
+//! A translation layer only: [`McpState`] holds sync, unit-testable
+//! handlers and [`ArgosyMcpServer`] dispatches.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -52,22 +26,22 @@ use crate::index::{EmbeddingProvider, Filter, Index, Query, VectorStore};
 use crate::local::PromotionTarget;
 
 /// The `argosy://_argosys` pseudo-resource: the active argosys with their
-/// versions and local/imported roles (§9 activation state, `MUL-5`).
+/// versions and local/imported roles.
 pub const ARGOSYS_URI: &str = "argosy://_argosys";
 
 /// Suffix of the `argosy://<name>/_index` pseudo-resource: a bundle's root
-/// `index.md` (OKF §8).
+/// `index.md`.
 pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";
 
 const DEFAULT_K: usize = 8;
 
 /// The trust-tier value reported for skills carrying no `verified` frontmatter
-/// entry at all (`SEC-2`).
+/// entry at all.
 const UNVERIFIED: &str = "unverified";
 
 /// Everything the server serves: the active project and its semantic index,
-/// reconciled at startup (§11 steps 1–4 — reconcile-on-start is the freshness
-/// model; there are no live change notifications in v1).
+/// reconciled at startup (reconcile-on-start is the freshness model; there
+/// are no live change notifications in v1).
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     /// The active argosys: one local (writable) plus imported (read-only).
     pub context: ProjectContext,
@@ -79,7 +53,7 @@ pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
 // Tool outcomes (serialized as structured tool results).
 // ---------------------------------------------------------------------------
 
-/// One search hit, with the qualified `argosy://` URI (`QRY-6`) and the
+/// One search hit, with the qualified `argosy://` URI and the
 /// unit's facets so clients can present and re-filter without resolving.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHitOut {
@@ -118,7 +92,7 @@ pub struct SearchReport {
 }
 
 /// One skill in `list_skills`, with everything a harness needs to surface
-/// trust (`SEC-1`/`SEC-2`): origin argosy, shadowing status (`MUL-6`), and
+/// trust: origin argosy, shadowing status, and
 /// the OKF trust tier derived from the `verified` frontmatter entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillOut {
@@ -128,12 +102,12 @@ pub struct SkillOut {
     pub argosy: String,
     /// The skill entry point's `argosy://` URI.
     pub uri: String,
-    /// Routing description (`SKL-4`).
+    /// Routing description.
     pub description: String,
-    /// True iff a higher-precedence argosy shadows this skill (`MUL-6`).
+    /// True iff a higher-precedence argosy shadows this skill.
     pub shadowed: bool,
     /// OKF trust tier: the entry point's `verified` frontmatter value, or
-    /// `"unverified"` when absent (`SEC-2`).
+    /// `"unverified"` when absent.
     pub verified: String,
 }
 
@@ -141,7 +115,7 @@ pub struct SkillOut {
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillsReport {
     /// All visible skills across every active argosy, shadowed ones
-    /// annotated (`MUL-6`).
+    /// annotated.
     pub skills: Vec<SkillOut>,
 }
 
@@ -149,9 +123,9 @@ pub struct SkillsReport {
 /// content (raw markdown with frontmatter).
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillContent {
-    /// The precedence-resolved skill (`MUL-7`), with trust fields.
+    /// The precedence-resolved skill, with trust fields.
     pub skill: SkillOut,
-    /// The raw markdown-with-frontmatter of the entry-point concept (`NFR-3`).
+    /// The raw markdown-with-frontmatter of the entry-point concept.
     pub content: String,
 }
 
@@ -160,7 +134,7 @@ pub struct SkillContent {
 pub struct UriContent {
     /// The concept's `argosy://` URI.
     pub uri: String,
-    /// Raw markdown with frontmatter (`NFR-3`).
+    /// Raw markdown with frontmatter.
     pub content: String,
 }
 
@@ -177,15 +151,14 @@ pub struct WriteReport {
     pub bytes: Option<u64>,
 }
 
-/// The `promote` tool outcome (`SEC-5`): the untouched source plus the drafted
+/// The `promote` tool outcome: the untouched source plus the drafted
 /// target concept, so the client harness can present both for confirmation —
-/// the server never confirms on the client's behalf (`PROM-5`).
+/// the server never confirms on the client's behalf.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromoteReport {
     /// Source memory URI.
     pub source_uri: String,
-    /// Source content as it stands (promotion never modifies the source,
-    /// `PROM-2`).
+    /// Source content as it stands (promotion never modifies the source).
     pub source_content: String,
     /// `"document"` or `"styleguide"`.
     pub target: &'static str,
@@ -196,7 +169,7 @@ pub struct PromoteReport {
 }
 
 /// The verified tier of a concept: its `verified` frontmatter value (string
-/// scalars passed through verbatim), or `"unverified"` when absent (`SEC-2`).
+/// scalars passed through verbatim), or `"unverified"` when absent.
 /// A non-string `verified` value is treated as absent — tool output is for
 /// LLM consumers, and a surprise structure is not a trust signal we want to
 /// relay.
@@ -211,7 +184,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     /// Builds server state over an already-opened context and index. The
     /// caller is responsible for running [`Index::reconcile`] first (the CLI's
     /// `mcp` verb does), so the server answers with a fresh index rather than
-    /// trusting staleness (§11 step 3).
+    /// trusting staleness.
     pub fn new(context: ProjectContext, index: Index<P, S>) -> Self {
         Self { context, index }
     }
@@ -231,9 +204,9 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         }
     }
 
-    /// Semantic search across every active argosy and indexed namespace
-    /// (`QRY-1`–`QRY-3`, `QRY-6`). `argosy` is validated against the active
-    /// set: an unknown name errors rather than silently returning nothing.
+    /// Semantic search across every active argosy and indexed namespace.
+    /// `argosy` is validated against the active set: an unknown name
+    /// errors rather than silently returning nothing.
     pub fn search(&self, params: SearchParams) -> Result<SearchReport> {
         let mut filter = Filter {
             namespaces: params
@@ -259,7 +232,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         })
     }
 
-    /// The review-flow query (`STG-4`, §5.4): semantic search restricted to
+    /// The review-flow query: semantic search restricted to
     /// styleguide rules, optionally narrowed by `language`/`category` facets.
     pub fn search_rules(&self, params: RulesParams) -> Result<SearchReport> {
         self.search(SearchParams {
@@ -274,8 +247,8 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         })
     }
 
-    /// Every skill across all active argosys (`QRY-5`), shadowed ones
-    /// annotated (`MUL-6`), each with origin and trust tier (`SEC-2`).
+    /// Every skill across all active argosys, shadowed ones
+    /// annotated, each with origin and trust tier.
     pub fn list_skills(&self) -> Result<SkillsReport> {
         let skills = self
             .context
@@ -305,7 +278,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         Ok(SkillsReport { skills })
     }
 
-    /// One skill by name, resolved by precedence across argosies (`MUL-7`),
+    /// One skill by name, resolved by precedence across argosies,
     /// with its entry-point content. Unknown names are errors, not empty
     /// results.
     pub fn get_skill(&self, params: GetSkillParams) -> Result<SkillContent> {
@@ -334,8 +307,8 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         })
     }
 
-    /// Direct read of a concept in the local argosy by bundle-relative path
-    /// (spec §10.2). Works for any namespace, used by harnesses for `memory/`.
+    /// Direct read of a concept in the local argosy by bundle-relative path.
+    /// Works for any namespace, used by harnesses for `memory/`.
     pub fn read_memory(&self, params: ReadPathParams) -> Result<UriContent> {
         let name = self.context.local().manifest().name().to_string();
         let uri = format!("argosy://{name}/{}", params.path);
@@ -348,7 +321,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
 
     /// Writes a memory concept (full markdown with frontmatter) to the local
     /// argosy. Imported argosys are read-only and unreachable here by
-    /// construction (`MUL-3`): the local argosy is the only write target.
+    /// construction: the local argosy is the only write target.
     pub fn write_memory(&self, params: WriteParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
         let concept = parse_concept(&params.content)?;
@@ -364,7 +337,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// Writes a styleguide rule to the local argosy, enabling user rule
-    /// extension (§5.4). The namespace contract (`STG-2`/`STG-3`) is validated
+    /// extension. The namespace contract is validated
     /// by the library before anything touches disk.
     pub fn write_rule(&self, params: WriteParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
@@ -380,9 +353,9 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         Ok(self.deleted_report(params.path))
     }
 
-    /// Promotes a memory concept to a curated target (`PROM-1`–`PROM-5`). The
+    /// Promotes a memory concept to a curated target. The
     /// outcome carries the untouched source and the drafted concept for the
-    /// client's confirmation step (`SEC-5`): the *client* decides whether the
+    /// client's confirmation step: the *client* decides whether the
     /// draft stands; this call is the hook, not the decision.
     pub fn promote(&self, params: PromoteParams) -> Result<PromoteReport> {
         let source = concept_id(&params.source_path)?;
@@ -433,8 +406,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// Reads an `argosy://` resource: any concept in any active argosy
-    /// (`QRY-4`, via [`ProjectContext::read_uri`]), plus the two
-    /// pseudo-resources [`ARGOSYS_URI`] and `argosy://<name>/_index`.
+    /// via [`ProjectContext::read_uri`], plus the two pseudo-resources [`ARGOSYS_URI`] and `argosy://<name>/_index`.
     pub fn read_resource(&self, uri: &str) -> Result<ResourceBody> {
         if uri == ARGOSYS_URI {
             let infos = self.argosy_infos();
@@ -558,7 +530,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 }
 
-/// One entry of the `argosy://_argosys` listing (`MUL-5`).
+/// One entry of the `argosy://_argosys` listing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArgosyInfo {
     /// Manifest name.
@@ -568,7 +540,7 @@ pub struct ArgosyInfo {
     /// The OKF spec version the bundle targets, when declared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okf_version: Option<String>,
-    /// `"local"` (writable) or `"imported"` (read-only, `MUL-3`).
+    /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
 }
 
@@ -588,7 +560,7 @@ pub struct ResourceBody {
     pub text: String,
     /// MIME type.
     pub mime: &'static str,
-    /// Qualified-identity metadata (`NFR-3`): `{argosy, namespace, id}`.
+    /// Qualified-identity metadata: `{argosy, namespace, id}`.
     pub meta: Option<serde_json::Value>,
 }
 
@@ -625,7 +597,7 @@ pub(crate) fn meta_with_writable(argosy: &str, writable: bool) -> serde_json::Va
 // Tool parameters (Deserialize for dispatch, JsonSchema for tool listings).
 // ---------------------------------------------------------------------------
 
-/// `search` parameters (`QRY-1`–`QRY-3`, `QRY-6`).
+/// `search` parameters.
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SearchParams {
     /// Natural-language query: semantic match against every indexed concept.
@@ -637,19 +609,19 @@ pub struct SearchParams {
     /// treated as custom namespaces (matching nothing, silently) rather than
     /// errored — pass exact spellings.
     pub namespaces: Option<Vec<String>>,
-    /// Restrict to one argosy by manifest name; unknown names error (`QRY-2`).
+    /// Restrict to one argosy by manifest name; unknown names error.
     pub argosy: Option<String>,
-    /// Restrict to concepts carrying any of these tags (`QRY-3`).
+    /// Restrict to concepts carrying any of these tags.
     pub tags: Option<Vec<String>>,
-    /// Restrict to concepts with this frontmatter `type` (`QRY-3`).
+    /// Restrict to concepts with this frontmatter `type`.
     pub r#type: Option<String>,
-    /// Restrict to concepts with this exact `language` facet (`STG-4`).
+    /// Restrict to concepts with this exact `language` facet.
     pub language: Option<String>,
-    /// Restrict to concepts with this exact `category` facet (`STG-4`).
+    /// Restrict to concepts with this exact `category` facet.
     pub category: Option<String>,
 }
 
-/// `search_rules` parameters (`STG-4`, §5.4).
+/// `search_rules` parameters.
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct RulesParams {
     /// Natural-language description of the code or review concern to match
@@ -667,7 +639,7 @@ pub struct RulesParams {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct GetSkillParams {
     /// The skill's name (entry-point file stem), resolved by precedence
-    /// across all active argosies (`MUL-7`).
+    /// across all active argosies.
     pub name: String,
 }
 
@@ -695,27 +667,27 @@ pub struct WriteParams {
 #[derive(Debug, Clone, Copy, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PromoteTarget {
-    /// Promote to a prose concept under `document/` (§6.1).
+    /// Promote to a prose concept under `document/`.
     Document,
     /// Promote to a `Styleguide Rule` under `styleguide/`; requires a
-    /// description (`STG-3`) — supply `description` unless the source has one.
+    /// description — supply `description` unless the source has one.
     #[serde(rename = "styleguide")]
     StyleguideRule,
 }
 
-/// `promote` parameters (`PROM-1`–`PROM-5`).
+/// `promote` parameters.
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct PromoteParams {
     /// Bundle-relative memory path to promote, e.g. `memory/gotchas`. The
-    /// source is never moved or deleted (`PROM-2`).
+    /// source is never moved or deleted.
     pub source_path: String,
     /// `"document"` or `"styleguide"`.
     pub target: PromoteTarget,
     /// Bundle-relative path of the new concept, e.g.
-    /// `document/rate-limit-retry-gotcha`; must not already exist (`PROM-1`).
+    /// `document/rate-limit-retry-gotcha`; must not already exist.
     pub new_path: String,
     /// Description override; required when `target` is `styleguide` and the
-    /// source has no description of its own (`STG-3`).
+    /// source has no description of its own.
     pub description: Option<String>,
 }
 
@@ -749,10 +721,10 @@ mod rmcp_impl {
 
     use super::*;
 
-    /// The advertised tool set (§2.3). Descriptions are written for LLM
+    /// The advertised tool set. Descriptions are written for LLM
     /// consumers: what the tool does, when to reach for it, and — on every
     /// mutating tool — that imported argosys are read-only so writes always
-    /// land in the local argosy. Trust policy notes (`SEC-1`/`SEC-2`) are in
+    /// land in the local argosy. Trust policy notes are in
     /// the descriptions of the skill tools so downstream LLMs see them.
     pub fn tool_definitions() -> Vec<Tool> {
         vec![
@@ -864,15 +836,10 @@ mod rmcp_impl {
     }
 
     /// The rmcp [`ServerHandler`] over [`McpState`]. Dispatch only: argument
-    /// parsing, outcome serialization, error mapping. Holds the state behind
-    /// a shared [`Mutex`] because backends are `Send`-but-not-`Sync` while
-    /// `ServerHandler` requires `Sync` (the sqlite store keeps a `RefCell`
-    /// connection cache); requests execute serially, which is also the only
-    /// sane order for the mutating tools over a single WAL database. Handlers
-    /// are synchronous and run inline while the guard is held: a slow `search`
-    /// (embedding embed) or write stalls sibling requests. Acceptable at v1's
-    /// scale (one embedded CLI client); revisit with `spawn_blocking` if the
-    /// HTTP transport ever serves concurrent multi-session load.
+    /// parsing, outcome serialization, error mapping. State sits behind a
+    /// shared [`Mutex`] because backends are `Send`-but-not-`Sync` while
+    /// `ServerHandler` requires `Sync`; requests execute serially — also the
+    /// only sane order for mutating tools over a single WAL database.
     pub struct ArgosyMcpServer<P: EmbeddingProvider, S: VectorStore> {
         /// The handler state, shared across sessions; locked per request.
         pub state: Arc<Mutex<McpState<P, S>>>,
@@ -1234,7 +1201,7 @@ mod tests {
         assert!(uris.contains(&"argosy://acme-billing/_index".to_string()));
     }
 
-    // --- trust surfacing (SEC-1/SEC-2) ---
+    // --- trust surfacing ---
 
     #[test]
     fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
@@ -1643,7 +1610,7 @@ mod tests {
         assert_eq!(out.action, "deleted");
     }
 
-    // --- promote (SEC-5 confirmation hook) ---
+    // --- promote (confirmation hook) ---
 
     #[test]
     fn promote_to_document_returns_source_and_draft_untouched_source() {
@@ -1676,7 +1643,7 @@ mod tests {
             .read_resource("argosy://acme-billing/document/processor-gotchas")
             .unwrap();
         assert_eq!(promoted.text, out.drafted);
-        // PROM-2: the memory file still exists.
+        // The memory file still exists.
         assert!(
             rig.state
                 .context

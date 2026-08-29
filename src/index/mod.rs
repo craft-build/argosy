@@ -1,32 +1,8 @@
 //! The semantic index: trait boundaries, embedding units, reconciliation,
-//! and ranked search (spec §7 `IDX-1`–`IDX-13`, §10 `QRY-1`–`QRY-3`/
-//! `QRY-6`/`QRY-7`, `DIST-6`, `NFR-4`).
-//!
-//! **The index is a derived, rebuildable artifact** (spec §3.1): its only
-//! inputs are the on-disk bundle contents of a [`ProjectContext`] and an
-//! [`EmbeddingProvider`]. Nothing here persists anything itself or requires a
-//! specific backend — the crate ships the two traits [`EmbeddingProvider`]
-//! and [`VectorStore`], plus an [`Index`] engine written against them, and a
-//! consumer (e.g. Craft) may supply its own embedding stack by implementing
-//! the two traits and ignoring the default backend entirely. The default
-//! backend (sqlite-vec + fastembed) fills these traits behind the
-//! `default-index` Cargo feature: [`sqlite::SqliteVecStore`] and
-//! [`fastembed::FastembedProvider`]. With the feature off this module is
-//! dependency-free and the traits stand alone.
-//!
-//! **Chunking decision (locked per doc 06 §1).** One embedding unit per
-//! concept; the unit text is the concept's `description` (when present) plus
-//! its body. Concept-scale retrieval matches the spec's retrieval model
-//! (results are concepts, `IDX-3`), keeps traceability trivial, and avoids a
-//! premature chunking algorithm (spec §15 lists canonical chunking as future
-//! work). Multi-chunk embedding remains possible behind
-//! [`EmbeddingUnit::chunk_ordinal`], which exists from day one (`IDX-4`).
-//!
-//! **Retrieval modes.** Ranked semantic retrieval is [`Index::search`]
-//! (`QRY-1`); direct lookup of a known concept is
-//! [`ProjectContext::resolve`]/[`ProjectContext::read_uri`] (`QRY-4`) — the
-//! two complement each other and share [`QualifiedConceptId`] as the identity
-//! currency, so any hit can be resolved to the full concept.
+//! and ranked search. The index is a derived, rebuildable artifact whose
+//! only inputs are on-disk bundles and an [`EmbeddingProvider`]; custom
+//! backends implement the traits, sqlite-vec + fastembed by default. One
+//! unit per concept; search via [`Index::search`], lookup via resolve.
 
 mod sha256;
 
@@ -47,12 +23,10 @@ use crate::error::{IndexSnafu, Result, UnknownArgosySnafu};
 /// same order — this keeps the trait minimal and lets backends batch
 /// efficiently.
 pub trait EmbeddingProvider {
-    /// The stable identity of the model, including both name and
-    /// version/revision (e.g. `"fastembed/all-MiniLM-L6-v2@4"`). Recorded in
-    /// the index (`IDX-5`) and compared against the store's recorded identity
-    /// on every reconcile (`IDX-12`): vectors from different models are not
-    /// comparable (`IDX-6`), so identity must change whenever the weights or
-    /// weights format change.
+    /// The stable identity of the model — name and version/revision
+    /// (e.g. `"fastembed/all-MiniLM-L6-v2@4"`). Compared against the
+    /// store's recorded identity on every reconcile: vectors from different
+    /// models are not comparable, so this must change with the weights.
     fn model_id(&self) -> &str;
 
     /// The vector dimensionality every [`EmbeddingProvider::embed`] call
@@ -64,7 +38,7 @@ pub trait EmbeddingProvider {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
-/// The structured metadata a query can filter on (`IDX-9`, `QRY-3`, `STG-4`):
+/// The structured metadata a query can filter on:
 /// the OKF frontmatter fields, flattened and nullable to mirror the optional
 /// accessors on [`Concept`]. A `None` field means the source concept did not
 /// declare it, and such a unit cannot match a filter constraining that field.
@@ -76,9 +50,9 @@ pub struct UnitMeta {
     pub description: Option<String>,
     /// The frontmatter `tags`.
     pub tags: Vec<String>,
-    /// The frontmatter `language` facet (styleguide rules, `STG-4`).
+    /// The frontmatter `language` facet (styleguide rules).
     pub language: Option<String>,
-    /// The frontmatter `category` facet (styleguide rules, `STG-4`).
+    /// The frontmatter `category` facet (styleguide rules).
     pub category: Option<String>,
 }
 
@@ -95,75 +69,73 @@ impl UnitMeta {
     }
 }
 
-/// One embedded unit of a concept (`IDX-3`): enough to trace any retrieval
+/// One embedded unit of a concept: enough to trace any retrieval
 /// back to its source concept unambiguously. Multi-chunk concepts would
 /// record one unit per chunk, distinguished by [`EmbeddingUnit::chunk_ordinal`];
 /// in v1 there is always exactly one unit per concept (module docs).
 #[derive(Debug, Clone)]
 pub struct EmbeddingUnit {
-    /// The source concept's qualified identity (`IDX-3` traceability).
+    /// The source concept's qualified identity.
     pub concept: QualifiedConceptId,
-    /// The unit's position within its source concept (`IDX-4`). Always `0`
+    /// The unit's position within its source concept. Always `0`
     /// in v1's one-unit-per-concept chunking; kept from day one so a future
     /// multi-passage chunking strategy extends the data without changing it.
     pub chunk_ordinal: u32,
     /// The lowercase hex SHA-256 of the exact text that was embedded. Doubles
-    /// as the staleness signal (`IDX-11`) and the content-change detector
-    /// (`DIST-6`): same text ⇒ same hash ⇒ no re-embed (`NFR-4`).
+    /// as the staleness signal and the content-change detector
+    ///: same text ⇒ same hash ⇒ no re-embed.
     pub text_hash: String,
     /// The unit's embedding vector.
     pub vector: Vec<f32>,
-    /// The filterable facets of the source concept (`IDX-9`).
+    /// The filterable facets of the source concept.
     pub meta: UnitMeta,
 }
 
-/// The structured constraints a search composes with its query text
-/// (`IDX-8`/`IDX-9`, `QRY-2`/`QRY-3`). Every field is optional; `None` means
-/// unconstrained.
+/// The structured constraints a search composes with its query text.
+/// Every field is optional; `None` means unconstrained.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
-    /// Only return units in these namespaces (`IDX-8`).
+    /// Only return units in these namespaces.
     pub namespaces: Option<Vec<Namespace>>,
-    /// Only return units from these argosies (manifest names, `QRY-2`).
+    /// Only return units from these argosies (manifest names).
     /// [`Index::search`] validates every name against the context's active
     /// set before reaching the store; individual stores may assume validity.
     pub argosies: Option<Vec<String>>,
-    /// Only return units whose `type` is one of these (`IDX-9`, `QRY-3`).
+    /// Only return units whose `type` is one of these.
     pub concept_types: Option<Vec<String>>,
-    /// Only return units carrying at least one of these tags (`IDX-9`).
+    /// Only return units carrying at least one of these tags.
     pub tags: Option<Vec<String>>,
-    /// Only return units with this exact `language` facet (`STG-4`).
+    /// Only return units with this exact `language` facet.
     pub language: Option<String>,
-    /// Only return units with this exact `category` facet (`STG-4`).
+    /// Only return units with this exact `category` facet.
     pub category: Option<String>,
 }
 
-/// One ranked search result (`IDX-7`).
+/// One ranked search result.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
-    /// The retrieved concept's qualified identity — origin argosy visible
-    /// (`QRY-6`).
+    /// The retrieved concept's qualified identity — origin argosy visible.
     pub concept: QualifiedConceptId,
-    /// Similarity score; hits are ordered by descending score (`IDX-7`).
+    /// Similarity score; hits are ordered by descending score.
     pub score: f32,
     /// The retrieved unit's facets, so callers can present/filter further
     /// without resolving the concept.
     pub meta: UnitMeta,
 }
 
-/// One semantic query (`QRY-1`).
+/// One semantic query.
 #[derive(Debug, Clone)]
 pub struct Query {
     /// The natural-language query text.
     pub text: String,
     /// Maximum number of hits to return.
     pub k: usize,
-    /// Structured narrowing composed with the semantic ranking (`QRY-3`).
+    /// Structured narrowing composed with the semantic ranking.
     pub filter: Filter,
 }
 
 impl Query {
-    /// An unscoped query (`QRY-6`): searches every active argosy and
+    /// An unscoped query: searches every active argosy and
     /// namespace the store holds.
     pub fn unscoped(text: impl Into<String>, k: usize) -> Self {
         Self {
@@ -176,39 +148,39 @@ impl Query {
 
 /// Stores and retrieves embedding units. Implementations own the ranking
 /// contract: [`VectorStore::search`] returns hits ordered by descending
-/// similarity (`IDX-7`). `argosy` ships a sqlite-vec implementation behind
+/// similarity. `argosy` ships a sqlite-vec implementation behind
 /// the `default-index` feature; any store honoring this contract composes
 /// with [`Index`].
 pub trait VectorStore {
     /// The model identity recorded for the vectors the store currently
-    /// holds (`IDX-5`), or `None` before the first reconcile and after
+    /// holds, or `None` before the first reconcile and after
     /// [`VectorStore::clear`].
     fn model_id(&self) -> Option<&str>;
 
     /// Records the model identity of the store's current contents (set by
-    /// [`Index::reconcile`] after a (re)build, `IDX-5`).
+    /// [`Index::reconcile`] after a (re)build).
     fn set_model_id(&mut self, id: &str) -> Result<()>;
 
-    /// Inserts or replaces units keyed by their source concept (`IDX-10`
-    /// incremental update: re-upserting a concept must not duplicate it).
+    /// Inserts or replaces units keyed by their source concept —
+    /// re-upserting must not duplicate it.
     fn upsert(&mut self, units: &[EmbeddingUnit]) -> Result<()>;
 
-    /// Drops every unit of one concept (`IDX-10` incremental deletion).
+    /// Drops every unit of one concept (incremental deletion).
     fn remove_concept(&mut self, concept: &QualifiedConceptId) -> Result<()>;
 
     /// The stored `text_hash` of every concept — the diff input
     /// [`Index::reconcile`] compares against freshly hashed content
-    /// (`IDX-11`), so unchanged concepts never reach the embedder (`NFR-4`).
+    ///, so unchanged concepts never reach the embedder.
     fn unit_hashes(&self) -> Result<HashMap<QualifiedConceptId, String>>;
 
-    /// Drops every unit — the full-rebuild path (`IDX-12`). Dropping the
+    /// Drops every unit — the full-rebuild path. Dropping the
     /// recorded model identity too is recommended but not required:
     /// [`Index::reconcile`] re-records the identity explicitly after every
     /// rebuild rather than relying on this side effect.
     fn clear(&mut self) -> Result<()>;
 
     /// The `k` units most similar to `vector` under `filter`, ordered by
-    /// descending similarity (`IDX-7`–`IDX-9`).
+    /// descending similarity.
     fn search(&self, vector: &[f32], k: usize, filter: &Filter) -> Result<Vec<SearchHit>>;
 }
 
@@ -216,16 +188,16 @@ pub trait VectorStore {
 /// the CLI's `index` subcommand).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexReport {
-    /// True iff the store was cleared and fully re-embedded (`IDX-12`).
+    /// True iff the store was cleared and fully re-embedded.
     pub rebuilt: bool,
     /// Concepts embedded and upserted (new or content-changed).
     pub upserted: usize,
     /// Concepts removed from the store (deleted from disk).
     pub removed: usize,
     /// Concepts whose content hash was unchanged — each cost one hash and no
-    /// embedding (`NFR-4`).
+    /// embedding.
     pub unchanged: usize,
-    /// The model identity the store now records (`IDX-5`).
+    /// The model identity the store now records.
     pub model_id: String,
 }
 
@@ -243,9 +215,7 @@ fn default_namespaces() -> Vec<Namespace> {
 
 /// Walks `namespaces` of every active argosy in `context` and hashes each
 /// concept's would-be embedded text. Sorted by URI so downstream embedding
-/// batches are deterministic. `memory` of *imported* argosies is skipped
-/// unless `include_imported_memory` (the default-local-memory rule from
-/// [`Index::new`]). Shared by [`Index::reconcile`] and
+/// batches are deterministic. Shared by [`Index::reconcile`] and
 /// [`staleness_report`], which must never drift apart.
 fn gather_concepts(
     context: &ProjectContext,
@@ -298,12 +268,12 @@ pub struct StalenessReport {
     /// True iff the store's recorded model identity differs from
     /// `expected_model_id`, OR the store holds data with no recorded
     /// identity — either way a full rebuild, not an incremental diff
-    /// (`IDX-12`, mirroring [`Index::reconcile`]'s guard).
+    /// (mirroring [`Index::reconcile`]'s guard).
     pub model_mismatch: bool,
 }
 
 /// A read-only, embed-free preview of what [`Index::reconcile`] would apply
-/// (the CLI's `index status`, doc 09): gathers the default namespace
+/// (the CLI's `index status`): gathers the default namespace
 /// selection from disk, hashes each concept, and diffs against
 /// [`VectorStore::unit_hashes`]. Makes no embed calls and no writes.
 pub fn staleness_report(
@@ -314,7 +284,7 @@ pub fn staleness_report(
     let current = gather_concepts(context, &default_namespaces(), false)?;
     let stored = store.unit_hashes()?;
 
-    // Mirrors reconcile's identity check exactly (IDX-12): a store holding
+    // Mirrors reconcile's identity check exactly: a store holding
     // data with no recorded identity is a full rebuild, not a diff — the
     // preview must never claim "up to date" when the next build re-embeds
     // everything.
@@ -366,10 +336,7 @@ pub struct Index<P: EmbeddingProvider, S: VectorStore> {
 impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// An index over the default namespace set: `document`, `skill`, and
     /// `styleguide` of every active argosy, plus `memory` of the *local*
-    /// argosy only (memory search is a §10.2 recommendation and unscoped
-    /// `QRY-6` queries include it when local; imported memory stays out).
-    ///
-    /// Custom namespaces are not indexed by default; use
+    /// argosy only. Custom namespaces are not indexed by default; use
     /// [`Index::with_namespaces`].
     pub fn new(provider: P, store: S) -> Self {
         Self {
@@ -381,11 +348,9 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     }
 
     /// An index over an explicit namespace set, honored verbatim for every
-    /// active argosy — including `memory` of imported argosies when listed.
-    ///
-    /// The selection is part of the index's identity: reconcile removes
-    /// anything stored that the current selection no longer walks, so
-    /// narrowing the set between reconciles deletes units wholesale.
+    /// active argosy — including `memory` of imports when listed. The
+    /// selection is part of the index's identity: reconcile removes anything
+    /// stored that the current selection no longer walks.
     pub fn with_namespaces(provider: P, store: S, namespaces: Vec<Namespace>) -> Self {
         Self {
             provider,
@@ -401,7 +366,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     }
 
     /// Replaces the provider (e.g. after a model upgrade). The next
-    /// [`Index::reconcile`] detects the identity change (`IDX-12`) and
+    /// [`Index::reconcile`] detects the identity change and
     /// rebuilds; vectors from the old model are never mixed with the new
     /// one's.
     pub fn set_provider(&mut self, provider: P) {
@@ -431,28 +396,11 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         gather_concepts(context, &self.namespaces, self.include_imported_memory)
     }
 
-    /// Brings the store in line with the disk: the incremental maintenance
-    /// loop (`IDX-10`, `NFR-4`, lifecycle §11 steps 3 and 6).
-    ///
-    /// 1. **Model check (`IDX-12`).** If the store's recorded identity
-    ///    differs from the provider's, or it holds data with no recorded
-    ///    identity, the whole index is stale: the store is cleared **before**
-    ///    any new embedding runs and fully re-embedded. This
-    ///    clear-before-re-embed ordering is the enforcement point of
-    ///    `IDX-13` — by construction the store can never hold two models'
-    ///    vectors, so a query can never mix them silently.
-    /// 2. **Otherwise, diff.** Each concept's fresh content hash is compared
-    ///    against [`VectorStore::unit_hashes`]; only new or changed concepts
-    ///    reach the embedder, stored-but-gone concepts are removed
-    ///    (`IDX-10`/`IDX-11`). Unchanged concepts cost one hash each —
-    ///    reconcile scales with what changed, not the bundle size (`NFR-4`).
-    /// 3. The store's model identity is (re)recorded (`IDX-5`) and an
-    ///    [`IndexReport`] returned.
-    ///
-    /// `IDX-1`/`IDX-2` by construction: reconcile's only inputs are the
-    /// bundles' contents and the provider, so a markdown-only argosy is fully
-    /// usable after one reconcile and the index can always be rebuilt from
-    /// scratch.
+    /// Brings the store in line with the disk. An identity mismatch (or
+    /// data with none recorded) clears the store **before** re-embedding,
+    /// so it never holds two models' vectors. Otherwise a diff: only new or
+    /// changed concepts are embedded, gone ones removed — reconcile scales
+    /// with what changed. Returns an [`IndexReport`]; fully rebuildable.
     pub fn reconcile(&mut self, context: &ProjectContext) -> Result<IndexReport> {
         let current = self.gather(context)?;
         let stored = self.store.unit_hashes()?;
@@ -461,7 +409,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         let identity_mismatch = match self.store.model_id() {
             Some(recorded) => recorded != model,
             // Data with no recorded identity cannot be trusted to match this
-            // provider either — treat it as a mismatch (`IDX-12`).
+            // provider either — treat it as a mismatch.
             None => !stored.is_empty(),
         };
 
@@ -481,7 +429,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         };
 
         // Deletions: stored concepts no longer on disk under any walked
-        // namespace (IDX-10). The lookup set keeps this O(stored + current)
+        // namespace. The lookup set keeps this O(stored + current)
         // rather than O(stored * current).
         let on_disk: std::collections::HashSet<&QualifiedConceptId> =
             current.iter().map(|c| &c.qid).collect();
@@ -492,8 +440,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
 
-        // New or content-changed concepts (IDX-11); everything else is one
-        // hash and done (NFR-4).
+        // New or content-changed concepts; everything else is one
+        // hash and done.
         let mut to_embed = Vec::new();
         for gathered in &current {
             match prior.get(&gathered.qid) {
@@ -532,7 +480,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         }
 
         // First reconcile (no identity yet) and every rebuild record the
-        // current identity (IDX-5). The rebuild branch does not rely on
+        // current identity. The rebuild branch does not rely on
         // `clear()` having dropped the identity: a store that kept it would
         // otherwise reconcile against a stale identity on every run and
         // clear + re-embed the whole corpus each time.
@@ -543,21 +491,11 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         Ok(report)
     }
 
-    /// Ranked semantic search (`QRY-1`): embeds [`Query::text`] and returns
-    /// the store's `k` most similar hits under [`Query::filter`]. For direct
-    /// lookup of a known concept, use [`ProjectContext::resolve`] (`QRY-4`) —
-    /// the two modes share [`QualifiedConceptId`], so a hit here resolves
-    /// there.
-    ///
-    /// `QRY-2`/`QRY-6`: every name in `filter.argosies` must be an active
-    /// argosy of `context` — naming an inactive argosy is
-    /// [`crate::error::Error::UnknownArgosy`], not an empty result (a silent
-    /// empty would hide a configuration mistake). An unscoped query searches
-    /// everything the store holds across all active argosies.
-    ///
-    /// `QRY-7`: hits are ordered by score alone. No precedence information
-    /// from `context` is threaded into the store, so local-first boosting is
-    /// impossible by construction.
+    /// Ranked semantic search: embeds [`Query::text`] and returns the
+    /// store's `k` most similar hits under [`Query::filter`]; for direct
+    /// lookup use [`ProjectContext::resolve`]. Names in `filter.argosies`
+    /// must be active in `context` — else
+    /// [`crate::error::Error::UnknownArgosy`], never a silent empty.
     pub fn search(&self, context: &ProjectContext, query: &Query) -> Result<Vec<SearchHit>> {
         if let Some(argosies) = &query.filter.argosies {
             for name in argosies {
@@ -623,7 +561,7 @@ pub(crate) mod tests {
     use crate::error::Error;
 
     // --- Test doubles: MockEmbedder + MemStore prove trait sufficiency with
-    // no ONNX and no SQLite (doc 06 §2.6). ---
+    // no ONNX and no SQLite. ---
 
     /// Deterministic provider: every text maps to a normalized 128-dim
     /// vector by hashing its tokens into dims, so identical texts always
@@ -641,8 +579,7 @@ pub(crate) mod tests {
             Self::with_model_id("mock-embedder@1")
         }
 
-        /// A provider with a different identity, to simulate model flips
-        /// (`IDX-12`).
+        /// A provider with a different identity, to simulate model flips.
         pub(crate) fn with_model_id(model_id: &str) -> Self {
             Self {
                 model_id: model_id.to_string(),
@@ -787,9 +724,9 @@ pub(crate) mod tests {
                     meta: unit.meta.clone(),
                 })
                 .collect();
-            // Descending similarity (IDX-7). Ties keep whatever order the
+            // Descending similarity. Ties keep whatever order the
             // filter walk produced — never an argosy-precedence order,
-            // because the store never sees precedence (QRY-7).
+            // because the store never sees precedence.
             hits.sort_by(|a, b| b.score.total_cmp(&a.score));
             hits.truncate(k);
             Ok(hits)
@@ -937,7 +874,7 @@ pub(crate) mod tests {
         index.reconcile(&ctx).unwrap();
 
         // A recorded identity differing from the expected model ⇒ mismatch
-        // (reconcile would rebuild, IDX-12).
+        // (reconcile would rebuild).
         let report = staleness_report(&ctx, index.store(), "other-model@2").unwrap();
         assert!(report.model_mismatch);
 
@@ -959,7 +896,7 @@ pub(crate) mod tests {
         assert_eq!(report.added, 5);
     }
 
-    // --- First reconcile, IDX-1/IDX-2 ---
+    // --- First reconcile ---
 
     #[test]
     fn first_reconcile_embeds_every_default_namespace_concept_and_records_model() {
@@ -992,7 +929,7 @@ pub(crate) mod tests {
         );
     }
 
-    // --- Unchanged reconcile, NFR-4/IDX-10 ---
+    // --- Unchanged reconcile ---
 
     #[test]
     fn second_reconcile_with_no_changes_costs_only_hashing() {
@@ -1014,7 +951,7 @@ pub(crate) mod tests {
         );
     }
 
-    // --- Incremental edit + delete, IDX-10/IDX-11 ---
+    // --- Incremental edit + delete ---
 
     #[test]
     fn editing_one_concept_upserts_exactly_it_and_deleting_removes_it() {
@@ -1053,7 +990,7 @@ pub(crate) mod tests {
             .delete_concept(Namespace::Memory, &concept_id("memory/gotchas"))
             .unwrap();
         let report = index.reconcile(&ctx).unwrap();
-        assert_eq!(report.removed, 1, "IDX-10: deletion is incremental");
+        assert_eq!(report.removed, 1, "deletion is incremental");
         assert_eq!(report.upserted, 0);
         assert_eq!(index.store().removals, vec![qid.clone()]);
         let hits = index
@@ -1067,7 +1004,7 @@ pub(crate) mod tests {
         let _ = local;
     }
 
-    // --- Model flip, IDX-12/IDX-13 ---
+    // --- Model flip ---
 
     #[test]
     fn flipping_the_model_id_clears_and_fully_rebuilds() {
@@ -1091,8 +1028,8 @@ pub(crate) mod tests {
         assert_eq!(index.store().clears, 1, "clear happened before re-embed");
 
         // The same concepts are re-stored under the new identity and are
-        // searchable — the cleared old vectors are gone entirely (IDX-13:
-        // interleaving old and new models is impossible by construction).
+        // searchable — the cleared old vectors are gone entirely (interleaving
+        // old and new models is impossible by construction).
         assert!(index.store().unit_hashes().unwrap() == before);
         let hits = index
             .search(&ctx, &Query::unscoped("architecture", 10))
@@ -1152,7 +1089,7 @@ pub(crate) mod tests {
         assert_eq!(report.unchanged, 5);
     }
 
-    // --- Namespace + facet filters, IDX-8/IDX-9, QRY-2/QRY-3 ---
+    // --- Namespace + facet filters ---
 
     #[test]
     fn namespace_filter_scopes_search_to_the_selected_namespaces() {
@@ -1186,7 +1123,7 @@ pub(crate) mod tests {
 
         let mut query = Query::unscoped("service", 10);
 
-        // language + category (STG-4 facets, IDX-9).
+        // language + category facets.
         query.filter.language = Some("rust".to_string());
         let hits = index.search(&ctx, &query).unwrap();
         assert_eq!(hits.len(), 1, "only the styleguide rule declares language");
@@ -1217,7 +1154,7 @@ pub(crate) mod tests {
         assert_eq!(hits[0].concept.id, concept_id("skill/deploy"));
         query.filter.concept_types = None;
 
-        // Semantic + structured in one call (QRY-3): the database-tagged
+        // Semantic + structured in one call: the database-tagged
         // locking note tops a `database locking` semantic query, and the
         // namespace constraint still holds.
         let mut query = Query::unscoped("database locking retries", 10);
@@ -1235,13 +1172,13 @@ pub(crate) mod tests {
         );
     }
 
-    // --- Unscoped search across argosys, QRY-6/QRY-7 ---
+    // --- Unscoped search across argosys ---
 
     #[test]
     fn unscoped_search_spans_argosys_with_score_only_ranking_and_no_precedence_boost() {
         // Identical text in the local and an imported argosy: their scores
         // must tie exactly — any local-first reordering would require
-        // precedence data the search path never receives (QRY-7).
+        // precedence data the search path never receives.
         const SAME: &str = "---\ntype: Note\ndescription: Shared body.\n---\nalpha beta gamma.\n";
         let local = make_argosy("local", &[("document/shared.md", SAME)]);
         let imported = make_argosy("vendor", &[("document/shared.md", SAME)]);
@@ -1260,7 +1197,7 @@ pub(crate) mod tests {
             "identical text ⇒ identical score; no precedence reweighting"
         );
 
-        // Scoping to a single argosy by name narrows to it (QRY-2).
+        // Scoping to a single argosy by name narrows to it.
         let mut query = Query::unscoped("alpha beta gamma", 10);
         query.filter.argosies = Some(vec!["vendor".to_string()]);
         let hits = index.search(&ctx, &query).unwrap();

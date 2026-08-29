@@ -1,42 +1,8 @@
-//! The `sqlite-vec`-backed default [`VectorStore`] (spec §7.3–§7.6,
-//! `IDX-5`–`IDX-16`), gated behind the `default-index` Cargo feature.
-//!
-//! The index is a single file — conventionally `<project-root>/.argosy/
-//! index.db` (doc 00 §3: the store lives beside the markdown, not in a
-//! service, per spec §3.4) — that one [`super::ProjectContext`] spans all
-//! active argosys of: the `argosy` column is what separates their rows
-//! (`MUL-5`). The index directory is **not bundle content**: `argosy.md`
-//! validation and `walk_bundle` ignore `.argosy/` from doc 02 onward, and
-//! packaging (doc 08) excludes it unless explicitly opting into precomputed
-//! embeddings (`IDX-14`/`IDX-16`: a bundled index is an optimization, never
-//! authoritative — the stored `model_id` mismatch path, `IDX-12`/`IDX-15`,
-//! rebuilds automatically when a harness's provider differs).
-//!
-//! # Schema (v1, `PRAGMA user_version = 1` for future migrations)
-//!
-//! - `meta`: single row holding the recorded `model_id` (`IDX-5`),
-//!   `dimensions`, and created/updated timestamps.
-//! - `units`: one row per [`EmbeddingUnit`], PK `(argosy, namespace,
-//!   concept_id, chunk_ordinal)`, carrying every [`Filter`] facet (`tags`
-//!   as a JSON array).
-//! - `unit_vectors`: a `vec0` virtual table `vector float[N]` keyed by the
-//!   units rowid — vec0 has no metadata columns, so the join to `units`
-//!   **is** the `IDX-9` structured-filter implementation.
-//!
-//! # Scoring
-//!
-//! vec0 returns ascending distances (L2 by default); the reported
-//! [`SearchHit::score`] is **`-distance`**, so larger is better and hits are
-//! ordered by descending similarity (`IDX-7`), monotonic with similarity.
-//!
-//! # Limitations (v1)
-//!
-//! - Filters apply to the join result **after** vec0's `k = ?` KNN
-//!   truncation: heavily filtered queries can return fewer than `k` hits
-//!   even when more matches exist beyond the unfiltered top-`k`. Overfetch
-//!   strategies are deferred.
-//! - One writer at a time, single-process (MCP/CLI are single-process); the
-//!   WAL journal gives crash safety but multi-process use is not supported.
+//! The `sqlite-vec`-backed default [`VectorStore`], gated behind the
+//! `default-index` Cargo feature: one `.argosy/index.db` file spanning all
+//! active argosys (`meta` model row, `units` facet rows, `unit_vectors`
+//! vec0 keyed by units rowid). Scores are `-distance`. v1 limits: filters
+//! apply after vec0's top-k truncation; single-process writers only.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int};
@@ -240,15 +206,11 @@ fn ensure_vec_table(conn: &Connection, dims: usize) -> Result<()> {
     Ok(())
 }
 
-/// Forces a complete `TRUNCATE` WAL checkpoint on the store file at
-/// `path`, so a subsequent raw file copy (`package --include-index`)
-/// snapshots the full state instead of a pre-checkpoint main file plus
-/// torn sidecars. A no-op where `path` is missing or not a sqlite database
-/// (magic-checked, so non-database placeholders are left untouched).
-/// Errors when the checkpoint cannot complete (another process holds the
-/// index): since the WAL sidecars are excluded from the copy, an
-/// incomplete checkpoint would silently package a main file missing
-/// committed data — far worse than a failed run the caller can retry.
+/// Forces a complete `TRUNCATE` WAL checkpoint on the store at `path`, so
+/// a raw file copy (`package --include-index`) snapshots the full state
+/// instead of a pre-checkpoint main file plus torn sidecars (excluded from
+/// the copy). A no-op on missing or non-database files (magic-checked);
+/// an incomplete checkpoint errors rather than packaging silently.
 pub fn checkpoint_wal(path: &Path) -> Result<()> {
     use std::io::Read as _;
 
@@ -371,12 +333,10 @@ impl VectorStore for SqliteVecStore {
                 .prepare_cached("INSERT INTO unit_vectors (rowid, vector) VALUES (?1, ?2)")
                 .context(SqliteSnafu)?;
 
-            // vec0 has no UPDATE: re-upserting a concept is delete-then-
-            // insert of its units rows (all ordinals) and their vec rows.
-            // The delete runs ONCE PER CONCEPT, not per unit — a batch may
-            // hold several chunks of one concept (chunk_ordinal), and
-            // deleting per unit would wipe the chunks inserted earlier in
-            // this same loop.
+            // vec0 has no UPDATE: re-upserting is delete-then-insert of the
+            // concept's units and vec rows. The delete runs once per
+            // CONCEPT, not per unit — a batch may hold several chunks, and
+            // deleting per unit would wipe chunks inserted earlier here.
             let mut deleted: HashSet<(&str, &str, &str)> = HashSet::new();
             for unit in units {
                 let namespace = unit.concept.namespace.as_dir_name();
@@ -475,18 +435,11 @@ impl VectorStore for SqliteVecStore {
     }
 
     fn clear(&mut self) -> Result<()> {
-        // Drop the data tables, keep meta (schema row + timestamps), but
-        // release BOTH the recorded identity and the dimensionality: the next
-        // upsert re-establishes both inside its batch transaction — which is
-        // what lets a model upgrade with a DIFFERENT vector width rebuild
-        // through the ordinary reconcile path (mismatch → clear → upsert)
-        // instead of failing the dimension guard forever. The cleared store
-        // holds no vectors, so nothing incompatible is mixed (IDX-6/IDX-13).
-        // One transaction for the whole reset — a partially applied clear
-        // would leave `meta` claiming an identity and hashes while the data
-        // is gone, so reconcile would re-embed nothing and search would
-        // silently return nothing (the class remove_concept is guarded
-        // against too).
+        // Drop the data tables but release BOTH the identity and the
+        // dimensionality: the next upsert re-establishes them in-batch, so
+        // a width-changing model upgrade rebuilds via the ordinary reconcile
+        // path. One transaction — a partial clear would leave `meta`
+        // claiming hashes while the data is gone, silently emptying search.
         let tx = self.conn.transaction().context(SqliteSnafu)?;
         tx.execute_batch("DROP TABLE IF EXISTS unit_vectors; DELETE FROM units;")
             .context(SqliteSnafu)?;
@@ -591,7 +544,7 @@ impl VectorStore for SqliteVecStore {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     // Score = -distance: descending order is descending
-                    // similarity (module docs, IDX-7).
+                    // similarity (module docs).
                     -row.get::<_, f64>(8)? as f32,
                 ))
             })
@@ -624,7 +577,7 @@ impl VectorStore for SqliteVecStore {
             )
             .collect::<Result<Vec<_>>>()?;
         // vec0's KNN constraint returns at most k rows; sort here so
-        // descending-score order (`IDX-7`) does not depend on iteration order.
+        // descending-score order does not depend on iteration order.
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         Ok(hits)
     }
@@ -678,7 +631,7 @@ mod tests {
         let (dir, store) = open_in_tmp();
         let db = dir.path().join(".argosy/index.db");
         drop(store);
-        // A checkout/artifact with locked permissions (the doc 09 `index
+        // A checkout/artifact with locked permissions (the `index
         // status` guarantee: read-only really means read-only).
         let mut perms = std::fs::metadata(&db).unwrap().permissions();
         perms.set_mode(0o444);
@@ -989,7 +942,7 @@ mod tests {
                 .is_empty()
         );
 
-        // And the store is immediately usable again (IDX-12 rebuild path):
+        // And the store is immediately usable again (the rebuild path):
         // the re-seed re-establishes identity-less dimensionality in the same
         // transaction as its inserts.
         seed(&mut store, &embedder);
@@ -1185,8 +1138,8 @@ mod tests {
         assert_eq!(store.unit_hashes().unwrap().len(), 2);
     }
 
-    /// Doc 07 §2.5: doc-06 engine + doc-07 store on a temp ProjectContext;
-    /// covers IDX-12/IDX-13/IDX-15 against a real database.
+    /// Real-database coverage: engine + store on a temp ProjectContext,
+    /// including the model-mismatch rebuild paths.
     #[test]
     fn reconcile_end_to_end_with_sqlite_store() {
         let (local, _imported, ctx) = fixture();
@@ -1236,7 +1189,7 @@ mod tests {
             "the replaced text no longer tops its own old query"
         );
 
-        // IDX-12/IDX-15: a provider with a different identity rebuilds
+        // A provider with a different identity rebuilds
         // everything with zero errors and zero mixed vectors.
         index.set_provider(MockEmbedder::with_model_id(
             "fastembed/sentence-transformers/all-MiniLM-L6-v2@fastembed-5",
@@ -1250,7 +1203,7 @@ mod tests {
         );
     }
 
-    /// Doc 07 §4: a second open over the same db reuses it with zero re-embeds.
+    /// A second open over the same db reuses it with zero re-embeds.
     #[test]
     fn reopening_the_store_reuses_the_index_with_zero_reembeds() {
         let (_local, _imported, ctx) = fixture();

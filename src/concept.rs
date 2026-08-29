@@ -1,4 +1,4 @@
-//! OKF concepts: markdown documents with optional YAML frontmatter (spec §1.4).
+//! OKF concepts: markdown documents with optional YAML frontmatter.
 
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -32,7 +32,7 @@ fn yaml_depth(value: &Value) -> usize {
 /// One markdown-plus-frontmatter document.
 ///
 /// The frontmatter is kept as an ordered [`Mapping`] so unknown keys survive a
-/// parse → serialize round-trip untouched (`STR-6`); no argosy-typed schema is
+/// parse → serialize round-trip untouched; no argosy-typed schema is
 /// imposed at this layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Concept {
@@ -137,7 +137,7 @@ impl Concept {
 
     /// Serializes back to the markdown-plus-frontmatter form. Unknown keys and
     /// the body round-trip untouched; YAML block formatting may normalize.
-    // Inherent `to_string` is the spec'd serialization API; no `Display` impl is wanted.
+    // Inherent `to_string` is the serialization API; no `Display` impl is wanted.
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         if self.frontmatter.is_empty() {
@@ -190,7 +190,7 @@ impl Concept {
     }
 
     /// True iff frontmatter exists with a non-empty `type` — the only hard OKF
-    /// concept requirement argosy depends on (spec §1.5, `STR-5`).
+    /// concept requirement argosy depends on.
     pub fn is_okf_conformant(&self) -> bool {
         !self.frontmatter.is_empty() && self.concept_type().is_some_and(|t| !t.trim().is_empty())
     }

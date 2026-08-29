@@ -1,14 +1,7 @@
-//! The `argosy` binary (doc 09): argument parsing + one library call +
-//! output formatting per subcommand. Any real logic here is a bug — it
-//! belongs in the library.
-//!
-//! Output contract: human text on stdout by default, one finding per line
-//! in the `Display` rendering of [`ValidationReport`]; `--json` emits the
-//! library's report structs (`serde_json`) as the only stdout content;
-//! `-q/--quiet` suppresses non-error human lines (safety warnings still
-//! print — they go to stderr). Exit codes: `0` success, `1` command-level
-//! failure (non-conformant validation, packaging failure, ...), `2` usage
-//! error (handled by clap).
+//! The `argosy` binary: argument parsing + one library call + output
+//! formatting per subcommand. Any real logic here is a bug — it belongs in
+//! the library. Exit codes: `0` success, `1` command failure, `2` usage
+//! error.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -55,21 +48,11 @@ enum Command {
     Mcp(McpArgs),
 }
 
-/// Serve the current project over the Model Context Protocol (doc 10) so
-/// any MCP-compatible harness can search and read its argosys and write to
-/// the local one. The argosy set is the standard one discovered from the
-/// working directory — exactly what `argosy index build` indexes: the local
-/// bundle at `.argosy/default`, every other checkout in `.argosy/<name>`,
-/// then every argosy in the global user store, in that precedence order.
-/// Launch the server from the project root (MCP harnesses spawn it with
-/// `cwd` set there). Lifecycle steps 1–4 run at startup: the project opens,
-/// validates, and reconciles its index before the transport starts —
-/// reconcile-on-start is the freshness model; there are no live change
-/// notifications, so restart the server after external edits.
-///
-/// The default transport speaks JSON-RPC over stdio: **stdout is the
-/// protocol channel** — all diagnostics go to stderr. The HTTP transport is
-/// unauthenticated: only bind it on trusted networks (spec §15).
+/// Serve the current project over the Model Context Protocol so any
+/// MCP-compatible harness can search, read, and write its argosys. The
+/// argosy set is the one discovered from the working directory — what
+/// `argosy index build` indexes. stdio is the default transport and
+/// **stdout is the protocol channel**; restart after external edits.
 #[derive(Args)]
 struct McpArgs {
     /// Transport to serve: `stdio` (the default, for editor/CLI harnesses
@@ -111,12 +94,10 @@ struct PullArgs {
 }
 
 /// Create a new, empty argosy in `<path>`: the root `argosy.md` manifest
-/// (version `0.1.0`) plus the four reserved namespace directories
-/// (`document/`, `skill/`, `memory/`, `styleguide/`). Without `<path>`,
-/// initializes this project's LOCAL bundle at `.argosy/default` — the
-/// writable argosy every `index` verb picks up automatically. Fails if the
-/// target directory already contains a manifest — a bundle is initialized
-/// exactly once.
+/// (version `0.1.0`) plus the four reserved namespace directories. Without
+/// `<path>`, initializes this project's local bundle at `.argosy/default`.
+/// Fails if the target already contains a manifest — a bundle is
+/// initialized exactly once.
 #[derive(Args)]
 struct InitArgs {
     /// Directory to initialize. Defaults to `<cwd>/.argosy/default`, the
@@ -154,7 +135,7 @@ struct ValidateArgs {
 /// Package a validated bundle into a distributable artifact. The bundle is
 /// validated first — packaging a non-conformant bundle fails with the
 /// validation errors shown. The bundle's `memory/` namespace is NEVER
-/// included (`DIST-3`): local memory stays local.
+/// included: local memory stays local.
 #[derive(Args)]
 struct PackageArgs {
     /// The bundle to package (must be an openable, conformant argosy).
@@ -169,19 +150,16 @@ struct PackageArgs {
     #[arg(long, value_enum, default_value_t = Format::Dir)]
     format: Format,
 
-    /// Also ship the `.argosy/` index cache in the artifact (`IDX-14`). Off
+    /// Also ship the `.argosy/` index cache in the artifact. Off
     /// by default: the index is derivative and rebuildable on demand.
     #[arg(long)]
     include_index: bool,
 }
 
-/// Operate on the semantic index of the current project (the working
-/// directory): the local bundle is `.argosy/default` (see `init`), pulled
-/// checkouts are `.argosy/<name>` (see `pull`), all global checkouts from
-/// the user store are included too, and the derived index lives at
-/// `.argosy/index.db` — deleting it costs one `build` (`IDX-16`). There is
-/// no `--import`: membership comes from checkout locations, in that
-/// precedence order.
+/// Operate on the semantic index of the current project: the local bundle
+/// at `.argosy/default`, pulled checkouts at `.argosy/<name>`, and global
+/// checkouts from the user store. The index lives at `.argosy/index.db` —
+/// deleting it costs one `build`. Membership comes from checkout locations.
 #[derive(Args)]
 struct IndexArgs {
     #[command(subcommand)]
@@ -208,7 +186,7 @@ enum IndexVerb {
     Query(QueryArgs),
 }
 
-/// A semantic query (`QRY-1`). Narrowing flags each constrain one filter
+/// A semantic query. Narrowing flags each constrain one filter
 /// facet; repeat `--namespace`/`--argosy`/`--type`/`--tag` to allow several
 /// values.
 #[derive(Args)]
@@ -225,15 +203,15 @@ struct QueryArgs {
     namespace: Vec<Ns>,
 
     /// Only hits from these argosies, by manifest name. An unknown name is
-    /// an error, not an empty result (`QRY-2`).
+    /// an error, not an empty result.
     #[arg(long)]
     argosy: Vec<String>,
 
-    /// Only hits whose frontmatter `language` matches exactly (`STG-4`).
+    /// Only hits whose frontmatter `language` matches exactly.
     #[arg(long)]
     language: Option<String>,
 
-    /// Only hits whose frontmatter `category` matches exactly (`STG-4`).
+    /// Only hits whose frontmatter `category` matches exactly.
     #[arg(long)]
     category: Option<String>,
 
@@ -241,7 +219,7 @@ struct QueryArgs {
     #[arg(long)]
     tag: Vec<String>,
 
-    /// Only hits whose frontmatter `type` is one of these (`QRY-3`).
+    /// Only hits whose frontmatter `type` is one of these.
     #[arg(long = "type")]
     concept_type: Vec<String>,
 }
@@ -326,9 +304,9 @@ impl Output {
         }
     }
 
-    /// A safety warning (e.g. `DIST-4`): prints even under `--quiet` AND
-    /// `--json` — stderr is not part of the JSON contract, and the
-    /// safeguard must never be silent.
+    /// A safety warning: prints even under `--quiet` and `--json` — stderr
+    /// is not part of the JSON contract, and the safeguard must never be
+    /// silent.
     fn warn(&self, line: &str) {
         eprintln!("warning: {line}");
     }
@@ -725,14 +703,10 @@ fn cmd_mcp(_out: &Output, args: &McpArgs) -> Result<ExitCode> {
     use argosy::mcp::{ArgosyMcpServer, McpState};
     use rmcp::ServiceExt;
 
-    // Lifecycle steps 1–4 run to completion before the transport starts: any
-    // startup failure prints via `run`'s `error:` mapping and exits 1 —
-    // never serve a half-broken context.
-    //
-    // The argosy set is discovered from the working directory, exactly like
-    // the index verbs (`cmd_index`): `.argosy/default` local, `.argosy/<name>`
-    // checkouts, then the global user store. No single-argosy
-    // `--project-root`: one server serves the whole project.
+    // Startup runs to completion before the transport starts: any failure
+    // prints via `run`'s `error:` mapping and exits 1 — never serve a
+    // half-broken context. The argosy set is discovered from the working
+    // directory, exactly like the index verbs.
     let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
         path: ".".into(),
         source,
@@ -817,7 +791,7 @@ fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     Ok(ExitCode::FAILURE)
 }
 
-/// Maps query flags 1:1 onto the library's [`Filter`] (doc 06).
+/// Maps query flags 1:1 onto the library's [`Filter`].
 #[cfg(feature = "default-index")]
 fn build_filter(q: &QueryArgs) -> Filter {
     Filter {

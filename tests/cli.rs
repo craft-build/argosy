@@ -1,8 +1,8 @@
-//! Integration tests for the `argosy` binary (doc 09 §2.3). These drive the
+//! Integration tests for the `argosy` binary. These drive the
 //! compiled binary, not library calls: argument parsing, exit codes, the
 //! stdout/stderr split, and the `--json` schema are the contract under test.
 //! Everything here runs offline; the real-backend index tests that need the
-//! downloaded ONNX model are `#[ignore]`d like doc 07's backend tests.
+//! downloaded ONNX model are `#[ignore]`d like the backend tests.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -225,7 +225,7 @@ fn validate_json_is_the_serialized_validation_report() {
         .clone();
     let report: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
     // Conformant bundles still serialize their non-error findings (the
-    // fixture's memory-present STR-9 info note); exit 0 means: no errors.
+    // info note); exit 0 means: no errors.
     let findings = report["findings"].as_array().unwrap();
     assert!(
         findings.iter().all(|f| f["severity"] != "error"),
@@ -304,7 +304,7 @@ fn package_memory_exclusion_warns_even_under_quiet() {
 
 #[test]
 fn package_json_still_warns_on_stderr() {
-    // `--json` governs stdout; the DIST-4 safeguard must never be silent.
+    // `--json` governs stdout; the safeguard must never be silent.
     let scratch = TempDir::new().unwrap();
     let dest = scratch.path().join("out");
     argosy_bin()
@@ -574,7 +574,7 @@ fn pull_global_installs_into_the_user_store() {
 }
 
 // ------------------------------------------------------------------- index
-// All index tests are gated like doc 07: without the `default-index`
+// All index tests are gated: without the `default-index`
 // feature the binary refuses the subcommand entirely.
 
 #[cfg(feature = "default-index")]
@@ -617,7 +617,7 @@ fn help_documents_the_package_memory_guarantee() {
         .assert()
         .success()
         .stdout(predicate::str::contains("memory"))
-        .stdout(predicate::str::contains("DIST-3"));
+        .stdout(predicate::str::contains("NEVER included"));
 }
 
 #[cfg(feature = "default-index")]
@@ -713,7 +713,7 @@ fn index_build_status_query_round_trip() {
     assert!(hits[0]["score"].is_number());
     assert_eq!(hits[0]["concept"]["argosy"], "acme-billing");
 
-    // Unknown argosy names are an error (`QRY-2`), not silent emptiness.
+    // Unknown argosy names are an error, not silent emptiness.
     argosy_bin()
         .args(["index", "query", "caching", "--argosy", "no-such-argosy"])
         .current_dir(&project)

@@ -1,12 +1,11 @@
-//! Integration tests for the MCP server (doc 10): the rmcp transport layer
+//! Integration tests for the MCP server: the rmcp transport layer
 //! over an in-process duplex (no stdio child process, no network, no ONNX).
 #![cfg(feature = "mcp")]
 //!
-//! Handler-level coverage of every tool and resource — including error
-//! paths — lives in `src/mcp.rs`'s unit tests, which can use the crate's
-//! internal `MockEmbedder`/`MemStore` doubles. This file drives the *wire*:
-//! a real rmcp client over a real rmcp `ServerHandler`, with local
-//! public-trait doubles here (integration tests cannot see `pub(crate)`).
+//! Handler-level coverage of every tool and resource lives in
+//! `src/mcp.rs`'s unit tests with the crate's internal doubles. This file
+//! drives the *wire*: a real rmcp client over a real rmcp `ServerHandler`,
+//! with local public-trait doubles here (`pub(crate)` is invisible).
 
 use std::collections::HashMap;
 use std::fs;
@@ -245,7 +244,7 @@ fn rig() -> Rig {
 
 // --- Structural invariants -------------------------------------------------
 
-/// §2.3/§success-criteria: imported argosys are read-only *structurally* — no
+/// Imported argosys are read-only *structurally* — no
 /// mutating tool may expose an `argosy` selector. If a future tool violates
 /// this, the invariant breaks here, not in a runtime exploit.
 #[test]
@@ -290,7 +289,7 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         } else if tool.name.as_ref() == "search" {
             assert!(props.contains_key("argosy"), "search scopes by argosy");
         }
-        // Every tool carries an LLM-facing description (doc 10 §2.3).
+        // Every tool carries an LLM-facing description.
         assert!(
             tool.description.as_deref().is_some_and(|d| d.len() > 40),
             "tool `{}` needs a real description",
@@ -302,7 +301,7 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
 // --- HTTP transport smoke (no request traffic) -----------------------------
 
 /// The `--transport http` stack composes, and a bind to an occupied address
-/// fails as an error (the CLI surfaces it as `failed to bind ...` + exit 1).
+/// fails as an error (the CLI surfaces it as `failed to bind...` + exit 1).
 #[tokio::test]
 async fn http_bind_to_a_used_port_fails_gracefully() {
     use rmcp::transport::streamable_http_server::{
@@ -367,7 +366,7 @@ async fn end_to_end_over_in_process_duplex() {
     let client = ().serve(client_io).await.expect("initialize handshake");
 
     // list_skills: trust tier surfaced for local (unverified) and imported
-    // (machine-confirmed) skills — SEC-2.
+    // (machine-confirmed) skills.
     let skills = complete(
         client
             .call_tool_once(call("list_skills", serde_json::json!({})))

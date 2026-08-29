@@ -1,18 +1,8 @@
-//! Hand-rolled SHA-256 (FIPS 180-4), so the index's content hashes (`IDX-11`,
-//! `DIST-6`) carry no external dependency — a deliberate deviation from using
-//! the `sha2` crate to keep doc 06 dependency-free; doc 07 may swap in the
-//! crate once it starts adding the default backend's dependencies anyway.
-//!
-//! **Not a security boundary.** These digests are content addresses for
-//! staleness detection and change detection only: they are never used for
-//! authentication, integrity verification against an adversary, signatures,
-//! or key material, so the usual requirement to prefer vetted cryptographic
-//! libraries does not apply here. The implementation is confined to this one
-//! private module (the only export is [`sha256_hex`], used solely to fill
-//! `EmbeddingUnit.text_hash`) and is pinned against the FIPS 180-4
-//! known-answer vectors, including both padding-block boundary cases; if a
-//! security-relevant use ever appears, this module must be replaced by a
-//! vetted crate rather than extended.
+//! Hand-rolled SHA-256 (FIPS 180-4), so the index's content hashes carry no
+//! external dependency. **Not a security boundary**: the digests are content
+//! addresses for staleness/change detection only, never authentication.
+//! Pinned against the FIPS 180-4 known-answer vectors (both padding-block
+//! boundaries); a security-relevant use requires a vetted crate.
 
 /// The `K` constants: first 32 bits of the fractional parts of the cube
 /// roots of the first 64 primes.

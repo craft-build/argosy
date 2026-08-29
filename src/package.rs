@@ -1,44 +1,8 @@
 //! Distribution packaging, bundle integrity, and Craft YAML styleguide
-//! import (spec §8 `DIST-1`–`DIST-6`, §7.6 `IDX-14`–`IDX-16`, `MEM-3`).
-//!
-//! **Out.** [`package`] copies an open [`Argosy`] to a destination directory
-//! or a gzipped tarball — the markdown bundle itself is the distributable
-//! artifact (`DIST-1`), so git-distribution needs no code here (`DIST-2`
-//! stays mechanism-agnostic by design). Two things never or only
-//! conditionally ride along:
-//!
-//! - `memory/` is excluded unconditionally (`DIST-3`/`MEM-3`) by filtering
-//!   the walk on the *first* relative path component — a structural rule,
-//!   not a glob, so nested lookalikes such as `document/memory-notes/` (or
-//!   even `document/memory/`) are ordinary content and survive. There is no
-//!   override flag, and when a root `memory/` existed at packaging time the
-//!   report carries a `DIST-4` warning so the exclusion is visible even when
-//!   it worked.
-//! - `.argosy/` ships only under [`PackageOptions::include_index`] (`IDX-14`),
-//!   and then purely as a precomputed cache — consumers must still treat it
-//!   as derivative (`IDX-16`) and reconcile against the markdown.
-//!
-//! **Integrity** (`DIST-6`). Every copy emits [`INTEGRITY_FILENAME`], a
-//! SHA256SUMS-style sidecar (`<sha256>  <relative-path>` per line, manifest
-//! first, remaining paths sorted) inside the destination or archive root;
-//! [`validate_integrity`] recomputes it, and [`bundle_content_hash`] reduces
-//! the whole distributable content to one digest for change detection that
-//! does not depend on `argosy_version` bumps. Because the content hash covers
-//! exactly the files packaging copies, it is stable across a packaged copy.
-//!
-//! **Symlinks** are never preserved as links. A link resolving inside the
-//! bundle is materialized as the target file's contents; one whose canonical
-//! target escapes the bundle root fails packaging with
-//! [`Error::SymlinkEscape`].
-//!
-//! **In.** [`import_styleguide_yaml`] performs the one-time conversion the
-//! reference doc (§4, §6) prescribes for Craft's YAML rule sets: one
-//! `Styleguide Rule` concept per rule at
-//! `styleguide/<language or "general">/<category or "misc">/<RULE-ID>.md`,
-//! written through [`LocalArgosy::write_concept`] so the `STG-2`/`STG-3`
-//! contract is enforced by the same code path as every other write. The
-//! batch is partial-failure tolerant: a rule that cannot be converted or
-//! written becomes a [`Finding`] in the report, not an abort.
+//! import. [`package`] copies an [`Argosy`] to a directory or gzipped
+//! tarball: `memory/` is excluded unconditionally (first-component filter,
+//! so nested lookalikes survive), `.argosy/` only under
+//! [`PackageOptions::include_index`]. Every copy emits a verified sidecar.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -56,11 +20,11 @@ use crate::error::{
 };
 use crate::local::LocalArgosy;
 
-/// The integrity sidecar every package emits (`DIST-6`).
+/// The integrity sidecar every package emits.
 pub const INTEGRITY_FILENAME: &str = "argosy-integrity.txt";
-/// The root namespace that never leaves the source (`DIST-3`/`MEM-3`).
+/// The root namespace that never leaves the source.
 const MEMORY_DIR: &str = "memory";
-/// The derivative index directory (`IDX-14`).
+/// The derivative index directory.
 const INDEX_DIR: &str = ".argosy";
 
 /// How [`package`] materializes the distributable bundle.
@@ -76,8 +40,8 @@ pub enum PackageFormat {
 /// Knobs for [`package`].
 #[derive(Debug, Clone, Default)]
 pub struct PackageOptions {
-    /// Ship `.argosy/` as a precomputed index cache (`IDX-14`). Off by
-    /// default: the index is derivative (`IDX-16`) and rebuildable, so most
+    /// Ship `.argosy/` as a precomputed index cache. Off by
+    /// default: the index is derivative and rebuildable, so most
     /// distributions leave it out.
     pub include_index: bool,
     /// The materialization format.
@@ -87,17 +51,16 @@ pub struct PackageOptions {
 /// The outcome of a [`package`] run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PackageReport {
-    /// Manifest name of the packaged argosy (`DIST-5`: the CLI prints
-    /// "packaged <name> <version>").
+    /// Manifest name of the packaged argosy (printed by the CLI).
     pub name: String,
     /// Manifest `argosy_version` of the packaged argosy.
     pub argosy_version: semver::Version,
     /// Bundle files copied (excluding the integrity sidecar).
     pub files_copied: usize,
     /// True iff a root `memory/` directory existed at the source and was
-    /// excluded (`DIST-3`/`MEM-3`).
+    /// excluded.
     pub memory_excluded: bool,
-    /// Non-fatal observations; always contains the `DIST-4` warning when
+    /// Non-fatal observations; always carries a warning when
     /// [`PackageReport::memory_excluded`] is true.
     pub warnings: Vec<String>,
 }
@@ -109,10 +72,10 @@ pub struct ImportReport {
     pub written: usize,
     /// Rule ids whose target concept already existed and were therefore left
     /// untouched — imports are additive and re-runnable; silently overwriting
-    /// user edits is how you lose trust (`STG-8`'s user-extensibility spirit).
+    /// user edits is how you lose trust.
     pub skipped_existing: Vec<String>,
     /// Rules that could not be converted or written. The batch never aborts
-    /// on one bad rule; callers (doc 09's command) treat a non-empty vec as
+    /// on one bad rule; callers treat a non-empty vec as
     /// failure after the fact.
     pub findings: Vec<Finding>,
 }
@@ -180,7 +143,7 @@ fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> 
             // checkpoints the live index first, so the main file alone
             // carries the full state and a torn sidecar copy would be
             // strictly worse than none (also keeps the content hash stable
-            // across live-write activity, DIST-6).
+            // across live-write activity).
             if name.ends_with("-wal") || name.ends_with("-shm") {
                 continue;
             }
@@ -190,16 +153,11 @@ fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-/// Reads `root/rel` into bytes, resolving symlinks along the way. A symlink
-/// is materialized as its target's contents iff the canonical target stays
-/// within the (canonical) bundle root; otherwise packaging refuses: silently
-/// following an escaping link would smuggle outside content into the
-/// distributable artifact, which `DIST-3`'s containment rule forbids.
-///
-/// Known residual race: the containment check and the read are separate
-/// syscalls (TOCTOU), so a concurrently-mutating actor could swap the link
-/// in between. Acceptable at this layer — packaging runs against a workspace
-/// the caller controls; fd-relative reads would be needed to close it fully.
+/// Reads `root/rel` into bytes, resolving symlinks along the way: a link is
+/// materialized as its target's contents iff the canonical target stays
+/// within the (canonical) bundle root, else packaging refuses. Residual
+/// TOCTOU race between check and read — acceptable against a
+/// caller-controlled workspace; fd-relative reads would close it.
 fn read_bundle_file(
     root: &Path,
     canonical_root: &Path,
@@ -253,15 +211,9 @@ fn posix(rel: &Path) -> String {
 }
 
 /// Reads and hashes every file about to be packaged in one pass, so the
-/// copy loop, the tar appender, and the integrity sidecar all share one
-/// digest computation. The manifest is ordered first, remaining paths
-/// sorted (`DIST-6` sidecar layout).
-///
-/// Tradeoff: the whole payload — including a shipped `.argosy/` index
-/// database — is resident in memory at once. Bundles are knowledge bases,
-/// so this is comfortably small at expected scales; if that ever stops
-/// being true, copy-with-streaming-hash plus a sidecar-last second pass
-/// would bound memory at one file.
+/// copy loop, the tar appender, and the integrity sidecar share one digest
+/// computation; the manifest is ordered first, remaining paths sorted.
+/// The whole payload is resident in memory — fine at knowledge-base scales.
 fn collect_payload(root: &Path, include_index: bool) -> Result<Vec<(PathBuf, Vec<u8>, String)>> {
     let canonical_root = fs::canonicalize(root).context(IoSnafu {
         path: root.to_path_buf(),
@@ -304,15 +256,10 @@ fn staging_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Copies `source` to `dest` for distribution (`DIST-1`).
-///
-/// `dest` must not already contain anything for [`PackageFormat::Directory`]
-/// (packaging never merges into or overwrites an existing tree; the check
-/// happens before any copying starts). Both formats are staged to a sibling
-/// temp path and renamed over `dest` on success, so a mid-copy failure
-/// leaves neither a partial tree nor a truncated archive. `dest` must lie
-/// outside the source bundle. The integrity sidecar is written last, inside
-/// the directory or archive root.
+/// Copies `source` to `dest` for distribution. `dest` must be empty for
+/// [`PackageFormat::Directory`] and lie outside the source bundle. Both
+/// formats stage to a sibling temp path and rename on success, so a
+/// mid-copy failure leaves no partial tree or truncated archive.
 pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result<PackageReport> {
     let root = source.root();
 
@@ -350,8 +297,8 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
         .fail();
     }
 
-    // Probe before copying: DIST-4 wants the exclusion *visible* whenever
-    // memory/ existed at packaging time, even though it always works.
+    // Probe before copying so the exclusion is *visible* whenever memory/
+    // existed at packaging time, even though it always works.
     let memory_excluded = fs::symlink_metadata(root.join(MEMORY_DIR)).is_ok();
     #[cfg(feature = "default-index")]
     if options.include_index {
@@ -495,12 +442,9 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
 }
 
 /// One SHA-256 over the ordered `(relative-path, file-hash)` pairs of
-/// everything [`package`] would copy — the spec's recommended change
-/// detector (`DIST-6`), independent of `argosy_version` bumps. Because the
-/// covered file set matches the packaging copy set, the hash is stable
-/// across a packaged copy and changes when any distributable file does.
-///
-/// Errors when `argosy_root` is not a bundle root (no `argosy.md`).
+/// everything [`package`] would copy — a change detector independent of
+/// `argosy_version` bumps, stable across a packaged copy. Errors when
+/// `argosy_root` is not a bundle root (no `argosy.md`).
 pub fn bundle_content_hash(argosy_root: &Path) -> Result<String> {
     if !argosy_root.join("argosy.md").is_file() {
         return NotAnArgosySnafu {
@@ -520,7 +464,7 @@ pub fn bundle_content_hash(argosy_root: &Path) -> Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Recomputes every hash in the bundle's integrity sidecar (`DIST-6`). A
+/// Recomputes every hash in the bundle's integrity sidecar. A
 /// missing sidecar, a line whose file is absent, or a hash that disagrees is
 /// an [`Error::IntegrityMismatch`], as is a bundle file present on disk but
 /// not listed in the sidecar — the sidecar claims completeness.
@@ -556,7 +500,7 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
         };
         // The sidecar text is attacker-controlled: reject anything but
         // plain non-empty relative paths before touching the filesystem
-        // (`DIST-3` containment — this covers literal `..` components, while
+        // (containment — this covers literal `..` components, while
         // `read_bundle_file`'s unconditional canonicalize covers symlinked
         // path components).
         if rel.is_empty()
@@ -599,7 +543,7 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
         listed.push(rel);
     }
     listed.sort();
-    // The writer lists `.argosy/**` when it shipped them (`IDX-14`), so
+    // The writer lists `.argosy/**` when it shipped them, so
     // completeness is checked against whatever is actually on disk.
     let actual = walk_copied_files(argosy_root, argosy_root.join(INDEX_DIR).is_dir())?;
     if listed != actual {
@@ -613,32 +557,10 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
 }
 
 /// Imports Craft YAML rule sets into the local argosy's `styleguide/`
-/// namespace (reference doc §4, §6).
-///
-/// `yaml_dir` holds `*.yaml`/`*.yml` files, each decoding to either a
-/// sequence of rule objects or a mapping with a top-level `rules:` sequence.
-/// A rule object needs `id` and `description`; `language`, `category`,
-/// `priority`, `pattern`, examples, and `tags` are optional, and extra keys
-/// are ignored. Each rule becomes one concept at
-/// `styleguide/<language or "general">/<category or "misc">/<RULE-ID>.md`
-/// with `type: Styleguide Rule` frontmatter and, when examples exist,
-/// `## Good`/`## Bad` body sections (`STG-6`).
-///
-/// Craft rule sets put the facets on the file, not the rule: a mapping's
-/// top-level `metadata:` block supplies `language`/`category` defaults that
-/// per-rule values override. Examples nest as
-/// `examples: {good: [...], bad: [...]}` alongside the flat per-rule
-/// `good:`/`bad:` form (nested wins when both appear), `priority` accepts
-/// the schema vocabulary `error`/`warn`/`warning`/`info`/`hint`
-/// (`warning` canonicalizes to `warn`, per the `STG-5` convention), and
-/// `tags` (a string or list of strings) carry into frontmatter tags.
-///
-/// Writes go through [`LocalArgosy::write_concept`], so `STG-2`/`STG-3` are
-/// enforced by the one shared write path. A rule or file that fails reading,
-/// conversion, or validation is collected into [`ImportReport::findings`]
-/// without aborting the batch; an already-existing target goes to
-/// [`ImportReport::skipped_existing`] untouched (imports are additive and
-/// re-runnable).
+/// namespace: one concept per rule at `styleguide/<language or "general">/
+/// <category or "misc">/<RULE-ID>.md` via [`LocalArgosy::write_concept`].
+/// A file-level `metadata:` block supplies default `language`/`category`;
+/// examples nest or stay flat; `warning`→`warn`; tags carry over.
 pub fn import_styleguide_yaml(local: &LocalArgosy, yaml_dir: &Path) -> Result<ImportReport> {
     let mut report = ImportReport::default();
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(yaml_dir)
@@ -796,12 +718,10 @@ fn rule_to_concept(
             .or(default.as_deref())
             .map(str::to_string)
     };
-    // Examples preserve the YAML form: a sequence renders as `- ` bullets, a
-    // bare string verbatim (`STG-6`). Non-string items inside a sequence are
-    // reported, matching the scalar-field strictness below — silently
-    // dropping `42` from `good: ["ok", 42]` loses rule content invisibly.
-    // The Craft schema nests them (`examples.good`/`examples.bad`); the flat
-    // per-rule keys are the legacy shape, and nested wins when both appear.
+    // Examples preserve the YAML form: sequences render as `- ` bullets,
+    // bare strings verbatim; non-string items are reported, never silently
+    // dropped. Nested (`examples.good`/`examples.bad`) and flat
+    // (`good:`/`bad:`) shapes are both read; nested wins when both appear.
     let get_examples = |key: &str| -> std::result::Result<(Vec<String>, bool), String> {
         if let Some(nested) = rule.get("examples")
             && !matches!(nested, Value::Null)
@@ -837,7 +757,7 @@ fn rule_to_concept(
     }
     let priority = match get_str("priority") {
         Some("error" | "warn" | "info" | "hint") => get_str("priority"),
-        // The schema's `warning` is the conventional `warn` (`STG-5`).
+        // The schema's `warning` is the conventional `warn`.
         Some("warning") => Some("warn"),
         Some(p) => {
             return Err(format!(
@@ -1177,7 +1097,7 @@ mod tests {
         assert!(dest.join(".argosy/index.db").is_file());
         assert!(!dest.join(".argosy/index.db-wal").exists());
         assert!(!dest.join(".argosy/index.db-shm").exists());
-        // ...because the main file alone carries the checkpointed state.
+        //...because the main file alone carries the checkpointed state.
         let copied = SqliteVecStore::open_read_only(dest.join(".argosy/index.db")).unwrap();
         assert_eq!(copied.model_id(), Some("mock-embedder@1"));
         validate_integrity(&dest).unwrap();
@@ -1306,7 +1226,7 @@ mod tests {
         package(&argosy, &dest, &PackageOptions::default()).unwrap();
 
         // An attacker-controlled sidecar must not make the validator hash
-        // files outside the bundle (`DIST-3` containment).
+        // files outside the bundle (containment).
         fs::write(dest.join(INTEGRITY_FILENAME), "deadbeef  ../outside.txt\n").unwrap();
         let err = validate_integrity(&dest).unwrap_err();
         assert!(
@@ -1360,7 +1280,7 @@ mod tests {
         let after = bundle_content_hash(&root).unwrap();
         assert_ne!(before, after);
 
-        // Packaging excludes memory/ and .argosy/, so a packaged copy hashes
+        // Packaging excludes memory/ and.argosy/, so a packaged copy hashes
         // the same as its source — the hash covers distributable content.
         let dest = dir.path().join("out");
         let argosy = Argosy::open(&root).unwrap();
@@ -1539,11 +1459,11 @@ rules:
         assert_eq!(concept.get_str("language"), Some("rust"));
         assert_eq!(concept.get_str("category"), Some("naming"));
         assert_eq!(concept.get_str("rule_id"), Some("SNAKE-CASE-VARS"));
-        // Schema `warning` canonicalizes to the STG-5 `warn`.
+        // Schema `warning` canonicalizes to `warn`.
         assert_eq!(concept.get_str("priority"), Some("warn"));
         assert_eq!(concept.get_str("pattern"), Some("^[a-z][a-z0-9_]*$"));
         assert_eq!(concept.tags(), vec!["naming", "convention"]);
-        // Nested examples become the STG-6 body sections.
+        // Nested examples become the body sections.
         assert!(concept.body().contains("## Good"));
         assert!(concept.body().contains("- let my_variable = 5;"));
         assert!(concept.body().contains("## Bad"));
@@ -1674,7 +1594,7 @@ rules:
         let concept = Concept::from_file(&eval).unwrap();
         assert!(concept.body().contains("- eval(text)"));
 
-        // The import produced STG-conformant rules end to end.
+        // The import produced conformant rules end to end.
         assert_eq!(error_findings(&local).len(), 0);
     }
 

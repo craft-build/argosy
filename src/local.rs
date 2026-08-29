@@ -1,39 +1,8 @@
 //! The write surface of the local argosy: concept writes, deletes, and the
-//! memory-to-distributable promotion pathway (spec §5.3 `MEM-1`–`MEM-4`, §6
-//! `PROM-1`–`PROM-5`, §9 `MUL-3`/`MUL-4`).
-//!
-//! **Why a separate type.** `Argosy` is strictly read-only. Writes live only
-//! on [`LocalArgosy`], so `MUL-3` (never write to an imported argosy) is
-//! unrepresentable by construction rather than a documented rule — the
-//! multi-argosy layer (doc 05) can hand imported argosys out as `Argosy` and
-//! hold the single local one as `LocalArgosy`, and no code path exists that
-//! writes anywhere else. `MUL-4` is then honored intrinsically: every
-//! namespace the library supports is writable through this type.
-//!
-//! **Custom namespaces are refused.** A [`Namespace::Custom`] is
-//! producer-owned: the library does not know its concept contract, so it can
-//! neither validate a write against it nor safely place files under it.
-//! Producers write their own namespaces directly.
-//!
-//! **No change-notification machinery.** Writes deliberately carry no
-//! index-invalidation hooks: the reconcile pass (doc 06) discovers changes
-//! via content hashing (`IDX-11`). Do not add a callback system here.
-//!
-//! **Promotion is mechanical by design** (`PROM-2`). The body of a memory
-//! concept is copied and its frontmatter rebuilt; rewriting an informal note
-//! for an external reader is the harness/LLM's job (`PROM-2`'s rationale),
-//! not a serialization step's. The source file is never moved, renamed, or
-//! deleted (`PROM-2`/`PROM-3`) — [`LocalArgosy::delete_memory`] is the
-//! caller's discretionary follow-up. Promotion also changes nothing about
-//! `MEM-3`: the packaging layer (doc 08) excludes `memory/` from
-//! distribution unconditionally, regardless of any `sources` entries a
-//! promoted concept now carries.
-//!
-//! **Trust-boundary UX is delegated, not enforced** (`PROM-5`, `SEC-4`/`SEC-5`):
-//! whether promotion needs human confirmation is a harness decision. The
-//! library's job is implementability — [`Promotion`] returns the source id
-//! and the drafted concept exactly as written, everything a confirmation
-//! dialog needs.
+//! memory-to-distributable promotion pathway. `Argosy` is read-only, so
+//! writing to an import is unrepresentable; custom namespaces are refused.
+//! No index-invalidation hooks — reconcile discovers changes by hash.
+//! Promotion is mechanical; `memory/` stays out of packaging.
 
 use std::fs;
 use std::ops::Deref;
@@ -61,12 +30,9 @@ fn conformance_requirement(namespace: &Namespace) -> &'static str {
     }
 }
 
-/// True iff `inner` — the path of a concept *relative to the `skill/`
-/// directory, with its `.md` extension — names a skill entry-point position
-/// (`SKL-1`): file form `foo.md` at the top level, or directory form
-/// `foo/foo.md`. Everything else under `skill/` (supporting materials under
-/// `references/`, deeper layouts) is a plain concept with no entry-point
-/// contract.
+/// True iff `inner` — a path relative to `skill/` — names a skill
+/// entry-point position: file form `foo.md` at the top level, or directory
+/// form `foo/foo.md`. Everything else under `skill/` is a plain concept.
 fn is_skill_entry_point(inner: &Path) -> bool {
     let components: Vec<&str> = inner
         .components()
@@ -83,9 +49,9 @@ fn is_skill_entry_point(inner: &Path) -> bool {
 }
 
 /// The contract violation that keeps a `concept` out of `namespace` at
-/// bundle-relative path `rel`: OKF conformance everywhere (`type` present),
-/// `STG-2`/`STG-3` under `styleguide/`, and `SKL-1`–`SKL-5` under `skill/`
-/// when the write lands at an entry-point position.
+/// bundle-relative path `rel`: OKF conformance everywhere, the rule
+/// contract under `styleguide/`, and the entry-point contract under
+/// `skill/` when the write lands at an entry-point position.
 fn contract_violation(
     namespace: &Namespace,
     rel: &Path,
@@ -150,7 +116,7 @@ fn contract_violation(
 }
 
 /// The local, writable argosy — the only type with write APIs (see module
-/// docs). Derefs to [`Argosy`], so every doc 02–03 read API is available
+/// docs). Derefs to [`Argosy`], so every read API is available
 /// unchanged.
 #[derive(Debug)]
 pub struct LocalArgosy(Argosy);
@@ -163,18 +129,18 @@ impl Deref for LocalArgosy {
     }
 }
 
-/// What a promotion turns a memory concept into (`PROM-1`).
+/// What a promotion turns a memory concept into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromotionTarget {
-    /// A prose concept under `document/` (the default target, §6.1).
+    /// A prose concept under `document/` (the default target).
     Document,
     /// A `type: Styleguide Rule` concept under `styleguide/`, which must
-    /// satisfy the §5.4 namespace contract like any other rule (`PROM-4`).
+    /// satisfy the styleguide namespace contract like any other rule.
     StyleguideRule,
 }
 
 /// The outcome of a promotion, carrying everything a confirmation dialog or
-/// follow-up step needs (`SEC-4`/`SEC-5`): the source id (its file is
+/// follow-up step needs: the source id (its file is
 /// byte-identical after promotion), the target kind, and the drafted concept
 /// exactly as written to the target namespace.
 #[derive(Debug, Clone)]
@@ -194,16 +160,11 @@ impl LocalArgosy {
         Ok(Self(Argosy::open(path)?))
     }
 
-    /// Creates a new, empty argosy at `path` — the root `argosy.md`
-    /// manifest (version `0.1.0`) plus the four reserved namespace
-    /// directories — and opens it. When `name` is `None`, the directory's
-    /// basename is used.
-    ///
-    /// Fails when a manifest already exists at `path` (a bundle is
-    /// initialized exactly once), when the name cannot be derived (no
-    /// final directory component), or when it contains characters outside
-    /// the URI charset `[A-Za-z0-9._-]` — the manifest name appears in
-    /// `argosy://` URIs.
+    /// Creates a new, empty argosy at `path` — the root `argosy.md` manifest
+    /// (version `0.1.0`) plus the four reserved namespace directories — and
+    /// opens it. When `name` is `None`, the directory's basename is used.
+    /// Fails when a manifest already exists, when the name cannot be derived,
+    /// or when it falls outside the URI charset `[A-Za-z0-9._-]`.
     pub fn init(
         path: impl AsRef<Path>,
         name: Option<&str>,
@@ -268,12 +229,10 @@ impl LocalArgosy {
         Self::open(root)
     }
 
-    /// Resolves `id` against `namespace`, returning the bundle-relative path
-    /// and the absolute target path. Refuses: a [`Namespace::Custom`] target
-    /// (producer-owned — see module docs), an id whose first component is
-    /// not the namespace's directory, and a reserved filename (§4.4). `..`,
-    /// `\`, and `:` are already impossible: [`ConceptId`]'s parser rejects
-    /// them (doc 00 §5), so a resolved path can never escape the bundle root.
+    /// Resolves `id` against `namespace`, returning the bundle-relative and
+    /// absolute target paths. Refuses custom namespaces, ids outside the
+    /// namespace, and reserved filenames; [`ConceptId`]'s parser already
+    /// rejects `..`, `\`, and `:`, so a resolved path cannot escape the root.
     fn resolve_path(&self, namespace: &Namespace, id: &ConceptId) -> Result<(PathBuf, PathBuf)> {
         if let Namespace::Custom(name) = namespace {
             return ValidationSnafu {
@@ -305,10 +264,9 @@ impl LocalArgosy {
             ReservedFilenameSnafu
         );
         let path = self.0.root().join(&rel);
-        // Per doc 00 §5, verify the normalized path still lies under the
-        // namespace directory. Unreachable via ConceptId's parser (which
-        // rejects `..`, `\`, `:`), but checked unconditionally in release
-        // builds too — never trust a joined path.
+        // Defensive: verify the joined path still lies under the namespace
+        // directory. Unreachable via ConceptId's parser, but checked
+        // unconditionally in release builds too — never trust a joined path.
         ensure!(
             path.starts_with(self.0.root().join(namespace.as_dir_name())),
             ValidationSnafu {
@@ -322,14 +280,10 @@ impl LocalArgosy {
     }
 
     /// Writes `concept` at `id` in `namespace`, creating parent directories
-    /// as needed (`MEM-4`/`STG-7` free organization), and returns the
-    /// absolute path written. Overwriting an existing concept at `id` is
-    /// allowed — this is the deliberate edit path.
-    ///
-    /// The concept is validated *before* anything touches disk: OKF
-    /// conformance everywhere, `STG-2`/`STG-3` under `styleguide/`, and
-    /// `SKL-1`–`SKL-5` under `skill/` at an entry-point position — the
-    /// library never writes a concept [`Argosy::validate`] would itself flag.
+    /// as needed, and returns the absolute path written. Overwriting an
+    /// existing concept at `id` is allowed — this is the deliberate edit
+    /// path. The concept is validated *before* anything touches disk: the
+    /// library never writes a concept [`Argosy::validate`] would flag.
     pub fn write_concept(
         &self,
         namespace: Namespace,
@@ -349,14 +303,10 @@ impl LocalArgosy {
         Ok(path)
     }
 
-    /// Deletes the concept at `id` in `namespace`. Now-empty parent
-    /// directories are pruned, stopping at the namespace root (the namespace
-    /// root itself is never removed).
-    ///
-    /// Deleting a **directory-form** skill's entry point (`skill/foo/foo.md`)
-    /// is refused with `SKL-2` guidance: deleting the entry point alone would
-    /// silently leave a broken skill directory. Remove the whole skill
-    /// directory instead. File-form skill entry points delete normally.
+    /// Deletes the concept at `id` in `namespace`, pruning now-empty parent
+    /// directories up to the namespace root. Deleting a directory-form
+    /// skill's entry point alone is refused (remove the whole skill
+    /// directory instead); file-form entry points delete normally.
     pub fn delete_concept(&self, namespace: Namespace, id: &ConceptId) -> Result<()> {
         let (rel, path) = self.resolve_path(&namespace, id)?;
         if !path.is_file() {
@@ -399,8 +349,8 @@ impl LocalArgosy {
         Ok(())
     }
 
-    /// Writes a concept under `memory/` (`MEM-1`–`MEM-4`); see
-    /// [`LocalArgosy::write_concept`]. The MCP layer maps this 1:1 (doc 10).
+    /// Writes a concept under `memory/`; see
+    /// [`LocalArgosy::write_concept`]. The MCP layer maps this 1:1.
     pub fn write_memory(&self, id: &ConceptId, concept: &Concept) -> Result<PathBuf> {
         self.write_concept(Namespace::Memory, id, concept)
     }
@@ -410,8 +360,8 @@ impl LocalArgosy {
         self.delete_concept(Namespace::Memory, id)
     }
 
-    /// Writes a rule concept under `styleguide/`, enforcing `STG-2`/`STG-3`;
-    /// see [`LocalArgosy::write_concept`].
+    /// Writes a rule concept under `styleguide/`, enforcing the rule
+    /// contract; see [`LocalArgosy::write_concept`].
     pub fn write_rule(&self, id: &ConceptId, concept: &Concept) -> Result<PathBuf> {
         self.write_concept(Namespace::Styleguide, id, concept)
     }
@@ -427,27 +377,10 @@ impl LocalArgosy {
     }
 
     /// Promotes the `memory/` concept at `source` into a new concept at
-    /// `new_id` under the target namespace (`PROM-1`).
-    ///
-    /// Mechanical derivation (see module docs for why): the body is copied
-    /// verbatim and the source's frontmatter is carried over, with these
-    /// adjustments —
-    ///
-    /// - a `sources` entry whose `resource` names the source's
-    ///   bundle-relative path is **appended** (`PROM-4`); entries already
-    ///   present on the concept are preserved;
-    /// - for [`PromotionTarget::StyleguideRule`], `type` is set to
-    ///   `Styleguide Rule` and a non-empty `description` is required — taken
-    ///   from `description_override` first, then the source's own
-    ///   (`STG-2`/`STG-3`; `PROM-4`). For [`PromotionTarget::Document`] the
-    ///   override, when given, replaces the source description;
-    /// - `new_id` must not already exist in the target namespace — errors
-    ///   [`crate::error::Error::ConceptExists`] rather than silently
-    ///   overwriting (overwrites of existing concepts go through the
-    ///   deliberate [`LocalArgosy::write_concept`] path).
-    ///
-    /// The source file is only ever read: never moved, renamed, or deleted
-    /// (`PROM-2`/`PROM-3`).
+    /// `new_id` under the target namespace. The body is copied verbatim;
+    /// frontmatter carries over with a `sources` entry appended and, for
+    /// styleguide targets, `type: Styleguide Rule` plus a non-empty
+    /// `description` (override first). `new_id` must not exist.
     pub fn promote_memory(
         &self,
         source: &ConceptId,
@@ -517,7 +450,7 @@ impl LocalArgosy {
                 Value::String(description),
             );
         }
-        // PROM-4 provenance: append, never replace — entries the source
+        // Provenance: append, never replace — entries the source
         // concept already carries are preserved untouched.
         let provenance = {
             let mut entry = Mapping::new();
@@ -861,9 +794,9 @@ mod tests {
             )
             .unwrap();
 
-        // PROM-2: the source is byte-identical afterwards.
+        // The source is byte-identical afterwards.
         assert_eq!(fs::read(&source_path).unwrap(), before);
-        // PROM-1: a new, independent concept exists at the target id.
+        // A new, independent concept exists at the target id.
         let drafted = &promotion.drafted;
         let listed = local
             .concepts(&Namespace::Document)
@@ -874,7 +807,7 @@ mod tests {
             .1;
         assert_eq!(listed, *drafted, "what was written is what was returned");
         assert_eq!(drafted.concept_type(), Some("Session Note"));
-        // PROM-4: `sources` cites the bundle-relative memory path.
+        // `sources` cites the bundle-relative memory path.
         let sources = drafted.get("sources").unwrap().as_sequence().unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(
@@ -899,7 +832,7 @@ mod tests {
         let tmp = fixture_copy("valid-acme-billing");
         let local = LocalArgosy::open(tmp.path()).unwrap();
         // `memory/gotchas.md` has no `description`; without an override the
-        // promotion must fail rather than write an invalid rule (STG-3).
+        // promotion must fail rather than write an invalid rule.
         let err = local
             .promote_memory(
                 &id("memory/gotchas"),
@@ -948,7 +881,7 @@ mod tests {
             sources[0].get("resource").unwrap().as_str().unwrap(),
             "memory/gotchas.md"
         );
-        // The written rule is listable like any other (STG-2/STG-3 hold).
+        // The written rule is listable like any other.
         let rules = crate::styleguide::StyleguideRule::list(&local).unwrap();
         assert!(
             rules
@@ -1003,7 +936,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        // PROM-3: the source stays in memory/ (auto-delete never happens).
+        // The source stays in memory/ (auto-delete never happens).
         assert!(tmp.path().join("memory/gotchas.md").is_file());
         assert!(
             local
@@ -1018,7 +951,7 @@ mod tests {
             report.errors().next().is_none(),
             "unexpected errors:\n{report}"
         );
-        // `STR-9` Info about memory/ is expected; nothing worse.
+        // Info about memory/ is expected; nothing worse.
         assert!(
             report
                 .findings()
