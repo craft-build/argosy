@@ -65,6 +65,16 @@ a `dream` prompt: a guided memory-consolidation pass (merge, update,
 delete, deduplicate) that harnesses can run whenever the local memory
 feels redundant.
 
+## Reviewer subagent
+
+`argosy agent reviewer <harness>` writes a read-only `reviewer` subagent
+definition into the harness's agent directory (`.opencode/agents/`,
+`.claude/agents/`, or `.kiro/agents/`). The reviewer reads the code,
+grounds findings in the project's styleguide rules via the argosy MCP
+tools, and reports prioritized findings (P0–P3) with a final verdict —
+adapted from Craft's built-in reviewer. Register the argosy MCP server
+with the harness to enable rule grounding.
+
 ## Commands
 
 | Command | What it does |
@@ -75,6 +85,7 @@ feels redundant.
 | `argosy index build` / `status` / `query` | Build/diff/search the semantic index at `.argosy/index.db`. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
+| `argosy agent reviewer <harness>` | Install the read-only `reviewer` subagent definition into a harness (`opencode`, `claude`, `kiro-cli`); `--force` replaces an existing one. |
 | `argosy mcp` | Serve the project over MCP on stdio. |
 
 Most commands print machine-readable JSON with `--json` and quiet down

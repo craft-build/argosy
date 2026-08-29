@@ -45,6 +45,7 @@ enum Command {
     Pull(PullArgs),
     Index(IndexArgs),
     Convert(ConvertArgs),
+    Agent(AgentArgs),
     Mcp(McpArgs),
 }
 
@@ -242,6 +243,36 @@ struct ConvertStyleguideArgs {
     argosy_path: Option<PathBuf>,
 }
 
+/// Install agent definitions that wire a coding harness into this
+/// project's argosy.
+#[derive(Args)]
+struct AgentArgs {
+    #[command(subcommand)]
+    verb: AgentVerb,
+}
+
+#[derive(Subcommand)]
+enum AgentVerb {
+    /// Write the `reviewer` subagent definition into a coding harness's
+    /// agent directory in the current project (`.opencode/agents/`,
+    /// `.claude/agents/`, or `.kiro/agents/`). The reviewer is read-only
+    /// and reports prioritized findings (P0-P3), grounding them in the
+    /// project's styleguide rules through the argosy MCP tools. Works in
+    /// any directory — it writes harness config, not argosy content.
+    Reviewer(ReviewerArgs),
+}
+
+/// Install the reviewer subagent for one harness.
+#[derive(Args)]
+struct ReviewerArgs {
+    /// The coding harness to install the reviewer for.
+    harness: HarnessOpt,
+
+    /// Replace an existing reviewer definition instead of failing.
+    #[arg(long)]
+    force: bool,
+}
+
 /// CLI-only selector for the four reserved namespaces (clap-parseable;
 /// custom namespaces are not addressable here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -278,6 +309,31 @@ impl From<Format> for PackageFormat {
         match format {
             Format::Dir => Self::Directory,
             Format::TarGz => Self::TarGz,
+        }
+    }
+}
+
+/// A coding harness argosy can install agent definitions into. Explicit
+/// value names: clap's default kebab-casing would spell OpenCode
+/// `open-code`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HarnessOpt {
+    /// OpenCode (`.opencode/agents/`).
+    #[value(name = "opencode")]
+    OpenCode,
+    /// Claude Code (`.claude/agents/`).
+    Claude,
+    /// Kiro IDE or kiro-cli (`.kiro/agents/`).
+    #[value(name = "kiro-cli")]
+    KiroCli,
+}
+
+impl From<HarnessOpt> for argosy::Harness {
+    fn from(opt: HarnessOpt) -> Self {
+        match opt {
+            HarnessOpt::OpenCode => Self::OpenCode,
+            HarnessOpt::Claude => Self::Claude,
+            HarnessOpt::KiroCli => Self::KiroCli,
         }
     }
 }
@@ -328,6 +384,7 @@ fn cmd_result(out: &Output, command: &Command) -> Result<ExitCode> {
         Command::Pull(args) => cmd_pull(out, args),
         Command::Index(args) => cmd_index(out, args),
         Command::Convert(args) => cmd_convert(out, args),
+        Command::Agent(args) => cmd_agent(out, args),
         Command::Mcp(args) => cmd_mcp(out, args),
     }
 }
@@ -545,6 +602,44 @@ fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> {
             } else {
                 ExitCode::FAILURE
             })
+        }
+    }
+}
+
+fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
+    match &args.verb {
+        AgentVerb::Reviewer(reviewer) => {
+            // The project root is the working directory — the same scope
+            // the index and mcp verbs use. Agent definitions are harness
+            // config, so no argosy needs to exist here.
+            let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
+                path: ".".into(),
+                source,
+            })?;
+            let report = argosy::setup_reviewer(reviewer.harness.into(), &root, reviewer.force)?;
+            if out.json {
+                out.json(&report)?;
+            } else {
+                let verb = if report.overwritten {
+                    "replaced"
+                } else {
+                    "created"
+                };
+                out.note(&format!(
+                    "{verb} reviewer agent for {} at {}",
+                    report.harness,
+                    report.path.display()
+                ));
+                // The reviewer grounds findings in rules through the argosy
+                // MCP server; without it, it degrades to ungrounded review
+                // (the prompt says so) — a hint, not a warning.
+                out.note(
+                    "note: the reviewer grounds findings in styleguide rules via the argosy \
+                     MCP server (`argosy mcp` on stdio) — register it with the harness to \
+                     enable rule grounding",
+                );
+            }
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
@@ -910,6 +1005,61 @@ mod mcp_parse_tests {
             assert!(
                 Cli::try_parse_from(["argosy", "mcp", flag, "x"]).is_err(),
                 "`{flag}` must not parse"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_parse_tests {
+    use super::*;
+
+    #[test]
+    fn agent_reviewer_parses_each_harness_and_force_is_opt_in() {
+        for (argv, expected) in [
+            (
+                &["argosy", "agent", "reviewer", "opencode"][..],
+                HarnessOpt::OpenCode,
+            ),
+            (
+                &["argosy", "agent", "reviewer", "claude"][..],
+                HarnessOpt::Claude,
+            ),
+            (
+                &["argosy", "agent", "reviewer", "kiro-cli"][..],
+                HarnessOpt::KiroCli,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("argv parses");
+            let Command::Agent(AgentArgs {
+                verb: AgentVerb::Reviewer(ReviewerArgs { harness, force }),
+            }) = cli.command
+            else {
+                panic!("expected `agent reviewer` argv, got another command");
+            };
+            assert_eq!(harness, expected);
+            assert!(!force, "force is opt-in");
+        }
+
+        let cli =
+            Cli::try_parse_from(["argosy", "agent", "reviewer", "claude", "--force"]).unwrap();
+        let Command::Agent(AgentArgs {
+            verb: AgentVerb::Reviewer(ReviewerArgs { force, .. }),
+        }) = cli.command
+        else {
+            panic!("expected `agent reviewer` argv, got another command");
+        };
+        assert!(force);
+    }
+
+    #[test]
+    fn agent_reviewer_rejects_misspelled_harnesses() {
+        // clap's default kebab-casing would spell OpenCode `open-code`;
+        // the explicit value names keep the documented spellings only.
+        for bad in ["cursor", "open-code", "kiro", "claude-code"] {
+            assert!(
+                Cli::try_parse_from(["argosy", "agent", "reviewer", bad]).is_err(),
+                "`{bad}` must not parse"
             );
         }
     }
