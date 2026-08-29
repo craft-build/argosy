@@ -618,12 +618,20 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
 /// `yaml_dir` holds `*.yaml`/`*.yml` files, each decoding to either a
 /// sequence of rule objects or a mapping with a top-level `rules:` sequence.
 /// A rule object needs `id` and `description`; `language`, `category`,
-/// `priority` (`error`/`warn`/`info`), `pattern`, and `good`/`bad` examples
-/// (a string or a list of strings) are optional, and extra keys are ignored.
-/// Each rule becomes one concept at
+/// `priority`, `pattern`, examples, and `tags` are optional, and extra keys
+/// are ignored. Each rule becomes one concept at
 /// `styleguide/<language or "general">/<category or "misc">/<RULE-ID>.md`
 /// with `type: Styleguide Rule` frontmatter and, when examples exist,
 /// `## Good`/`## Bad` body sections (`STG-6`).
+///
+/// Craft rule sets put the facets on the file, not the rule: a mapping's
+/// top-level `metadata:` block supplies `language`/`category` defaults that
+/// per-rule values override. Examples nest as
+/// `examples: {good: [...], bad: [...]}` alongside the flat per-rule
+/// `good:`/`bad:` form (nested wins when both appear), `priority` accepts
+/// the schema vocabulary `error`/`warn`/`warning`/`info`/`hint`
+/// (`warning` canonicalizes to `warn`, per the `STG-5` convention), and
+/// `tags` (a string or list of strings) carry into frontmatter tags.
 ///
 /// Writes go through [`LocalArgosy::write_concept`], so `STG-2`/`STG-3` are
 /// enforced by the one shared write path. A rule or file that fails reading,
@@ -702,6 +710,7 @@ fn import_rule_file(local: &LocalArgosy, value: &Value, file: &Path, report: &mu
         ));
         return;
     };
+    let defaults = file_defaults(value, file, report);
     for item in rules {
         let Value::Mapping(rule) = item else {
             report.findings.push(Finding::new(
@@ -712,38 +721,104 @@ fn import_rule_file(local: &LocalArgosy, value: &Value, file: &Path, report: &mu
             ));
             continue;
         };
-        import_one_rule(local, &rule, file, report);
+        import_one_rule(local, &rule, file, &defaults, report);
     }
+}
+
+/// File-level facet defaults from a rule set's `metadata:` block: the Craft
+/// schema puts `language`/`category` on the file, and every rule in it
+/// inherits them unless the rule carries its own. A malformed block is a
+/// finding, not an abort — the rules still import with whatever facets they
+/// carry themselves.
+fn file_defaults(value: &Value, file: &Path, report: &mut ImportReport) -> FileDefaults {
+    let mut defaults = FileDefaults {
+        language: None,
+        category: None,
+    };
+    let Some(metadata) = value.as_mapping().and_then(|m| m.get("metadata")) else {
+        return defaults;
+    };
+    let Value::Mapping(map) = metadata else {
+        report.findings.push(Finding::new(
+            Severity::Error,
+            None,
+            Some(file.to_path_buf()),
+            "`metadata` must be a mapping",
+        ));
+        return defaults;
+    };
+    for (key, slot) in [
+        ("language", &mut defaults.language),
+        ("category", &mut defaults.category),
+    ] {
+        match map.get(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) => {
+                let s = s.trim();
+                if !s.is_empty() {
+                    *slot = Some(s.to_string());
+                }
+            }
+            Some(_) => report.findings.push(Finding::new(
+                Severity::Error,
+                None,
+                Some(file.to_path_buf()),
+                format!("`metadata.{key}` must be a string"),
+            )),
+        }
+    }
+    defaults
+}
+
+/// The per-file facet defaults [`file_defaults`] extracts.
+struct FileDefaults {
+    language: Option<String>,
+    category: Option<String>,
 }
 
 /// Converts one decoded rule object: `Err(String)` carries the human-readable
 /// reason the rule cannot become a finding-free concept.
-fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), String> {
+fn rule_to_concept(
+    rule: &Mapping,
+    defaults: &FileDefaults,
+) -> std::result::Result<(String, Concept), String> {
     let get_str = |key: &str| rule.get(key).and_then(Value::as_str);
     let id = get_str("id")
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "rule has no `id`".to_string())?;
+    // A facet the rule carries itself beats the file-level default it
+    // inherits; an empty/whitespace value counts as absent either way.
+    let facet = |key: &str, default: &Option<String>| {
+        get_str(key)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or(default.as_deref())
+            .map(str::to_string)
+    };
     // Examples preserve the YAML form: a sequence renders as `- ` bullets, a
     // bare string verbatim (`STG-6`). Non-string items inside a sequence are
     // reported, matching the scalar-field strictness below — silently
     // dropping `42` from `good: ["ok", 42]` loses rule content invisibly.
+    // The Craft schema nests them (`examples.good`/`examples.bad`); the flat
+    // per-rule keys are the legacy shape, and nested wins when both appear.
     let get_examples = |key: &str| -> std::result::Result<(Vec<String>, bool), String> {
+        if let Some(nested) = rule.get("examples")
+            && !matches!(nested, Value::Null)
+        {
+            let Value::Mapping(map) = nested else {
+                return Err(format!(
+                    "rule `{id}`: `examples` must be a mapping with `good`/`bad` keys"
+                ));
+            };
+            return match map.get(key) {
+                None | Some(Value::Null) => Ok((Vec::new(), false)),
+                Some(value) => example_items(value, id, &format!("examples.{key}")),
+            };
+        }
         match rule.get(key) {
-            Some(Value::Sequence(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    match item.as_str() {
-                        Some(s) => out.push(s.to_string()),
-                        None => {
-                            return Err(format!("rule `{id}`: `{key}` list items must be strings"));
-                        }
-                    }
-                }
-                Ok((out, true))
-            }
-            Some(Value::String(s)) => Ok((vec![s.clone()], false)),
-            _ => Ok((Vec::new(), false)),
+            None | Some(Value::Null) => Ok((Vec::new(), false)),
+            Some(value) => example_items(value, id, key),
         }
     };
     let description = get_str("description")
@@ -761,10 +836,12 @@ fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), Str
         }
     }
     let priority = match get_str("priority") {
-        Some(p @ ("error" | "warn" | "info")) => Some(p),
+        Some("error" | "warn" | "info" | "hint") => get_str("priority"),
+        // The schema's `warning` is the conventional `warn` (`STG-5`).
+        Some("warning") => Some("warn"),
         Some(p) => {
             return Err(format!(
-                "rule `{id}`: `priority` must be one of error/warn/info, got `{p}`"
+                "rule `{id}`: `priority` must be one of error/warn/warning/info/hint, got `{p}`"
             ));
         }
         None => None,
@@ -794,6 +871,29 @@ fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), Str
             ));
         }
     };
+    let tags = match rule.get("tags") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(value) => match value {
+            Value::String(s) => vec![s.clone()],
+            Value::Sequence(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item.as_str() {
+                        Some(s) => out.push(s.to_string()),
+                        None => {
+                            return Err(format!("rule `{id}`: `tags` list items must be strings"));
+                        }
+                    }
+                }
+                out
+            }
+            _ => {
+                return Err(format!(
+                    "rule `{id}`: `tags` must be a string or list of strings"
+                ));
+            }
+        },
+    };
 
     let mut frontmatter = Mapping::new();
     let mut put = |key: &str, value: &str| {
@@ -804,11 +904,11 @@ fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), Str
     };
     put("type", crate::styleguide::TYPE);
     put("description", description);
-    if let Some(language) = get_str("language") {
-        put("language", language);
+    if let Some(language) = facet("language", &defaults.language) {
+        put("language", &language);
     }
-    if let Some(category) = get_str("category") {
-        put("category", category);
+    if let Some(category) = facet("category", &defaults.category) {
+        put("category", &category);
     }
     put("rule_id", id);
     if let Some(priority) = priority {
@@ -816,6 +916,12 @@ fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), Str
     }
     if let Some(pattern) = &pattern {
         put("pattern", pattern);
+    }
+    if !tags.is_empty() {
+        frontmatter.insert(
+            Value::String("tags".to_string()),
+            Value::Sequence(tags.into_iter().map(Value::String).collect()),
+        );
     }
 
     let good = get_examples("good")?;
@@ -845,9 +951,43 @@ fn rule_to_concept(rule: &Mapping) -> std::result::Result<(String, Concept), Str
     Ok((id.to_string(), concept))
 }
 
+/// One `good:`/`bad:` example value in either shape: a sequence of strings
+/// (rendered as bullets) or one bare string (rendered verbatim). Anything
+/// else is an error, not a silent drop.
+fn example_items(
+    value: &Value,
+    id: &str,
+    key: &str,
+) -> std::result::Result<(Vec<String>, bool), String> {
+    match value {
+        Value::Sequence(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(s) => out.push(s.to_string()),
+                    None => {
+                        return Err(format!("rule `{id}`: `{key}` list items must be strings"));
+                    }
+                }
+            }
+            Ok((out, true))
+        }
+        Value::String(s) => Ok((vec![s.clone()], false)),
+        _ => Err(format!(
+            "rule `{id}`: `{key}` must be a string or list of strings"
+        )),
+    }
+}
+
 /// Writes one converted rule under `styleguide/` (or records why not).
-fn import_one_rule(local: &LocalArgosy, rule: &Mapping, file: &Path, report: &mut ImportReport) {
-    let (rule_id, concept) = match rule_to_concept(rule) {
+fn import_one_rule(
+    local: &LocalArgosy,
+    rule: &Mapping,
+    file: &Path,
+    defaults: &FileDefaults,
+    report: &mut ImportReport,
+) {
+    let (rule_id, concept) = match rule_to_concept(rule, defaults) {
         Ok(ok) => ok,
         Err(reason) => {
             report.findings.push(Finding::new(
@@ -1350,6 +1490,131 @@ rules:
       - \"eval(text)\"
 ";
 
+    // The Craft schema shape (styleguide-schema.json): facets live in the
+    // file-level `metadata:` block, examples nest under `examples:`, and
+    // `priority` may be `warning`/`hint`.
+    const CRAFT_SCHEMA_RULES: &str = "\
+metadata:
+  name: \"Rust Naming Conventions\"
+  version: \"1.0.0\"
+  language: rust
+  category: naming
+rules:
+  - id: SNAKE-CASE-VARS
+    description: Use snake_case for variables and functions.
+    priority: warning
+    pattern: \"^[a-z][a-z0-9_]*$\"
+    examples:
+      good:
+        - \"let my_variable = 5;\"
+      bad:
+        - \"let MyVariable = 5;\"
+    tags: [naming, convention]
+  - id: OVERRIDE-EXPLICIT-FACETS
+    description: Per-rule facets beat the file-level metadata defaults.
+    language: rust-2021
+    category: style
+  - id: HINT-PRIORITY-KEPT
+    description: The hint priority passes through verbatim.
+    priority: hint
+";
+
+    #[test]
+    fn import_honors_craft_metadata_block_and_nested_examples() {
+        let dir = TempDir::new().unwrap();
+        let local = import_fixture(&dir);
+        let yaml_dir = dir.path().join("yaml");
+        write(&yaml_dir, "naming.yaml", CRAFT_SCHEMA_RULES);
+
+        let report = import_styleguide_yaml(&local, &yaml_dir).unwrap();
+        assert_eq!(report.written, 3);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+        // File-level metadata facets place the rule and land in frontmatter.
+        let path = local
+            .root()
+            .join("styleguide/rust/naming/SNAKE-CASE-VARS.md");
+        assert!(path.is_file());
+        let concept = Concept::from_file(&path).unwrap();
+        assert_eq!(concept.get_str("language"), Some("rust"));
+        assert_eq!(concept.get_str("category"), Some("naming"));
+        assert_eq!(concept.get_str("rule_id"), Some("SNAKE-CASE-VARS"));
+        // Schema `warning` canonicalizes to the STG-5 `warn`.
+        assert_eq!(concept.get_str("priority"), Some("warn"));
+        assert_eq!(concept.get_str("pattern"), Some("^[a-z][a-z0-9_]*$"));
+        assert_eq!(concept.tags(), vec!["naming", "convention"]);
+        // Nested examples become the STG-6 body sections.
+        assert!(concept.body().contains("## Good"));
+        assert!(concept.body().contains("- let my_variable = 5;"));
+        assert!(concept.body().contains("## Bad"));
+        assert!(concept.body().contains("- let MyVariable = 5;"));
+
+        // A rule's own facets override the file's metadata defaults.
+        let path = local
+            .root()
+            .join("styleguide/rust-2021/style/OVERRIDE-EXPLICIT-FACETS.md");
+        assert!(path.is_file());
+        let concept = Concept::from_file(&path).unwrap();
+        assert_eq!(concept.get_str("language"), Some("rust-2021"));
+        assert_eq!(concept.get_str("category"), Some("style"));
+
+        // `hint` is valid schema vocabulary and passes through untouched.
+        let path = local
+            .root()
+            .join("styleguide/rust/naming/HINT-PRIORITY-KEPT.md");
+        let concept = Concept::from_file(&path).unwrap();
+        assert_eq!(concept.get_str("priority"), Some("hint"));
+
+        assert_eq!(error_findings(&local).len(), 0);
+    }
+
+    #[test]
+    fn import_reports_malformed_metadata_without_aborting() {
+        let dir = TempDir::new().unwrap();
+        let local = import_fixture(&dir);
+        let yaml_dir = dir.path().join("yaml");
+        write(
+            &yaml_dir,
+            "broken-metadata.yaml",
+            "metadata: not-a-mapping\nrules:\n  - id: orphaned-rule\n    description: Still imports.\n",
+        );
+        write(
+            &yaml_dir,
+            "numeric-metadata.yaml",
+            "metadata:\n  language: 7\nrules:\n  - id: numeric-language\n    description: Still imports.\n",
+        );
+
+        let report = import_styleguide_yaml(&local, &yaml_dir).unwrap();
+        assert_eq!(report.written, 2);
+        let messages: Vec<&str> = report.findings.iter().map(|f| f.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("`metadata` must be a mapping")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("`metadata.language` must be a string")),
+            "{messages:?}"
+        );
+        // The rules still landed, just without the broken file-level facets.
+        assert!(
+            local
+                .root()
+                .join("styleguide/general/misc/orphaned-rule.md")
+                .is_file()
+        );
+        assert!(
+            local
+                .root()
+                .join("styleguide/general/misc/numeric-language.md")
+                .is_file()
+        );
+        assert_eq!(error_findings(&local).len(), 0);
+    }
+
     const BROKEN_RULES: &str = "\
 - id: no-description-here
   language: rust
@@ -1454,7 +1719,7 @@ rules:
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("bad-priority") && m.contains("error/warn/info")),
+                .any(|m| m.contains("bad-priority") && m.contains("error/warn/warning/info/hint")),
             "{messages:?}"
         );
         assert!(
