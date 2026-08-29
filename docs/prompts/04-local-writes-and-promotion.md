@@ -29,7 +29,7 @@ So far the library only reads. A live argosy is a working layer: the harness wri
   - **Pre-write validation**: the concept being written must satisfy the target namespace's hard requirements, reusing doc 02/03 logic — `skill/` entries must satisfy `SKL-1`–`SKL-5` *if* the write lands at an entry-point position (file-form or directory-form entry point), `styleguide/` entries must satisfy `STG-2`/`STG-3` (`type` + `description`), all targets must satisfy OKF conformance (`type` present). Invalid writes are `Err` — the library never writes a concept it would itself flag.
   - Path safety: the final path must be verified to lie under `root/namespace_dir` after normalization (per doc 00 §5).
 - `delete_concept(&self, namespace: Namespace, id: &ConceptId) -> Result<()>`: removes the file; deleting a directory-form skill entry point must error with guidance to delete the skill directory instead (partial deletion would silently violate `SKL-2`); cleaning up now-empty parent directories is allowed but stop at the namespace root.
-- Convenience wrappers the MCP layer (doc 10) maps 1:1: `write_memory`, `delete_memory` (`MEM-1`–`MEM-4` read/write/delete), `write_rule`, `delete_rule`, `write_document`.
+- Convenience wrappers the MCP layer (doc 10) maps 1:1: `write_memory`, `delete_memory` (`MEM-1`–`MEM-4` read/write/delete), `write_rule`, `delete_rule`, `write_document`, `delete_document`.
 
 ### 2.3 Promotion (spec §6)
 

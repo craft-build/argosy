@@ -376,6 +376,12 @@ impl LocalArgosy {
         self.write_concept(Namespace::Document, id, concept)
     }
 
+    /// Deletes a concept under `document/`; see
+    /// [`LocalArgosy::delete_concept`].
+    pub fn delete_document(&self, id: &ConceptId) -> Result<()> {
+        self.delete_concept(Namespace::Document, id)
+    }
+
     /// Promotes the `memory/` concept at `source` into a new concept at
     /// `new_id` under the target namespace. The body is copied verbatim;
     /// frontmatter carries over with a `sources` entry appended and, for
@@ -628,6 +634,38 @@ mod tests {
             .write_document(&id("document/decisions/2026-08-caching"), &concept)
             .unwrap();
         assert_eq!(Concept::from_file(&path).unwrap(), concept);
+    }
+
+    #[test]
+    fn delete_document_removes_and_prunes_parents() {
+        let tmp = fixture_copy("valid-acme-billing");
+        let local = LocalArgosy::open(tmp.path()).unwrap();
+        local
+            .write_document(
+                &id("document/scratch/2026-08-caching"),
+                &Concept::from_str("---\ntype: Decision\n---\n# D\n\nBody.\n").unwrap(),
+            )
+            .unwrap();
+
+        local
+            .delete_document(&id("document/scratch/2026-08-caching"))
+            .unwrap();
+        assert!(!tmp.path().join("document/scratch").exists());
+        assert!(
+            tmp.path().join("document/architecture.md").is_file(),
+            "sibling documents survive"
+        );
+        // The pre-existing decisions/ tree is untouched.
+        assert!(
+            tmp.path()
+                .join("document/decisions/2026-05-caching.md")
+                .is_file()
+        );
+
+        let err = local
+            .delete_document(&id("document/scratch/2026-08-caching"))
+            .unwrap_err();
+        assert!(matches!(err, Error::ConceptNotFound { .. }), "got {err:?}");
     }
 
     #[test]

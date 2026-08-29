@@ -261,11 +261,13 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         "delete_memory",
         "write_rule",
         "delete_rule",
+        "write_document",
+        "delete_document",
         "promote",
     ] {
         assert!(names.contains(&expected), "missing tool `{expected}`");
     }
-    assert_eq!(tools.len(), 10, "exactly the doc-10 tool set");
+    assert_eq!(tools.len(), 12, "exactly the documented tool set");
 
     for tool in &tools {
         let props = tool.input_schema["properties"]
@@ -277,6 +279,8 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
             "delete_memory",
             "write_rule",
             "delete_rule",
+            "write_document",
+            "delete_document",
             "promote",
         ]
         .contains(&tool.name.as_ref())
@@ -438,6 +442,62 @@ async fn end_to_end_over_in_process_duplex() {
             .unwrap()
             .contains("# E2E")
     );
+
+    // write_document → same-session search sees it → delete_document makes
+    // it disappear (the index reconciles on every mutation).
+    let doc = "---\ntype: Decision\ndescription: e2e doc\n---\n# E2E Doc\n\nWe decide.\n";
+    let written = complete(
+        client
+            .call_tool_once(call(
+                "write_document",
+                serde_json::json!({
+                    "path": "document/e2e-decision",
+                    "content": doc,
+                }),
+            ))
+            .await
+            .unwrap(),
+    );
+    let written = structured(&written);
+    assert_eq!(
+        written["uri"],
+        "argosy://acme-billing/document/e2e-decision"
+    );
+    assert_eq!(written["action"], "created");
+    assert_eq!(written["indexed"], true, "the write reconciled the index");
+
+    let fresh_doc = complete(
+        client
+            .call_tool_once(call(
+                "search",
+                serde_json::json!({"query": "e2e decision doc", "namespaces": ["document"]}),
+            ))
+            .await
+            .unwrap(),
+    );
+    let fresh_doc = structured(&fresh_doc);
+    assert!(
+        fresh_doc["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["uri"]
+                .as_str()
+                .unwrap()
+                .ends_with("document/e2e-decision")),
+        "the fresh document is searchable in the same session, got {fresh_doc}"
+    );
+
+    let deleted = complete(
+        client
+            .call_tool_once(call(
+                "delete_document",
+                serde_json::json!({"path": "document/e2e-decision"}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(structured(&deleted)["action"], "deleted");
 
     // promote to document, then read the promoted concept as a resource.
     let promoted = complete(

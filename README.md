@@ -57,10 +57,10 @@ Wire it into a harness, e.g. OpenCode (`opencode.json`):
 
 The server exposes semantic `search` / `search_rules` tools, `argosy://`
 resources, skill listing with trust tiers, and write tools for the local
-argosy's `memory/` and `styleguide/` namespaces. Writes reconcile the
-index immediately — a concept written through MCP is searchable in the
-same session. The embedding model loads lazily: until the first `search`,
-startup is instant and works offline.
+argosy's `document/`, `memory/`, and `styleguide/` namespaces. Writes
+reconcile the index immediately — a concept written through MCP is
+searchable in the same session. The embedding model loads lazily: until
+the first `search`, startup is instant and works offline.
 
 ## Commands
 

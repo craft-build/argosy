@@ -51,6 +51,7 @@ Implement exactly this set — each maps 1:1 onto library APIs already built:
 | `write_memory` | `LocalArgosy::write_memory` | `path`, `content` (full markdown+frontmatter) | tool, not resource (mutating) |
 | `delete_memory` | `LocalArgosy::delete_memory` | `path` | — |
 | `write_rule` / `delete_rule` | `LocalArgosy::write_rule` / `delete_rule` | `path`, `content` | local argosy only by construction (`MUL-3`/`MUL-4`); enables user rule extension (§5.4) |
+| `write_document` / `delete_document` | `LocalArgosy::write_document` / `delete_document` | `path`, `content` | local argosy only by construction (`MUL-3`/`MUL-4`); curated document authoring/editing (`DOC-1` conformance enforced); overwrite is the edit path, reported as `updated` |
 | `promote` | `LocalArgosy::promote_memory` | `source_path`, `target: "document"|"styleguide"`, `new_path`, `description?` | returns source content + drafted concept (the `SEC-5` confirmation hook — the *client* decides whether to confirm; `PROM-5`) |
 
 - Every mutating tool returns the affected `argosy://` URI plus a short machine-readable summary (e.g. `{"written": "argosy://acme/memory/foo", "bytes": N}`).
