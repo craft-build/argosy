@@ -145,7 +145,7 @@ const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against st
 
 # Styleguide grounding
 
-This project's rules live in its argosy (`.argosy/`), served over MCP. When the argosy MCP server is connected, ground the review in it:
+This project's rules live in its argosy (`.argosy/`), served over MCP. When the argosy MCP server is connected, ground the review in it. Every argosy tool call takes `cwd` — pass the project's absolute root directory (the one containing `.argosy/`) on every call, or the call is rejected:
 
 - `search_rules` — semantic match of styleguide rules against a natural-language description of the code under review (narrow by `language`/`category`).
 - `search` — semantic search over every concept (documents, skills, rules, memory) for wider context.
@@ -315,6 +315,9 @@ mod tests {
             for marker in [
                 "You are a code reviewer",
                 "search_rules",
+                // The argosy tools require `cwd` since the multi-project
+                // refactor; a prompt that omits it gets every call rejected.
+                "pass the project's absolute root directory",
                 "**P0 - Critical**",
                 "**P3 - Low**",
                 "concrete failure scenario",
