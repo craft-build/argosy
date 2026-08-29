@@ -651,6 +651,55 @@ async fn end_to_end_over_in_process_duplex() {
     server_task.abort();
 }
 
+/// SEP-2549: `ttlMs` and `cacheScope` are required on list/read results
+/// under protocol `2026-07-28`, and strict clients (ZCode) reject the
+/// response when they are absent. Static capability listings are public
+/// and long-lived; resource listings and reads are private and never
+/// fresh from cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_and_read_results_carry_sep2549_cache_hints() {
+    let rig = rig();
+    let cwd = rig.cwd.clone();
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        use rmcp::ServiceExt;
+        let running = ArgosyMcpServer::new(rig.state)
+            .serve(server_io)
+            .await
+            .expect("server initializes");
+        let _ = running.waiting().await;
+    });
+    use rmcp::ServiceExt;
+    let client = ().serve(client_io).await.expect("initialize handshake");
+
+    let tools = client.list_tools(None).await.unwrap();
+    assert_eq!(tools.ttl_ms, Some(3_600_000), "tools list: public, 1h");
+    assert_eq!(tools.cache_scope, Some(rmcp::model::CacheScope::Public));
+
+    let prompts = client.list_prompts(None).await.unwrap();
+    assert_eq!(prompts.ttl_ms, Some(3_600_000));
+    assert_eq!(prompts.cache_scope, Some(rmcp::model::CacheScope::Public));
+
+    let resources = client.list_resources(None).await.unwrap();
+    assert_eq!(resources.ttl_ms, Some(0), "resource list: never fresh");
+    assert_eq!(
+        resources.cache_scope,
+        Some(rmcp::model::CacheScope::Private)
+    );
+
+    let read = client
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            argosy::mcp::ARGOSYS_URI,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.ttl_ms, Some(0), "resource read: never fresh");
+    assert_eq!(read.cache_scope, Some(rmcp::model::CacheScope::Private));
+
+    drop(client);
+    server_task.abort();
+}
+
 // --- Multi-project behavior over the wire ----------------------------------
 
 /// The server needs no project at startup and serves several projects from

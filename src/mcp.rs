@@ -969,7 +969,7 @@ pub use rmcp_impl::{ArgosyMcpServer, get_prompt_result, prompt_definitions, tool
 mod rmcp_impl {
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError,
+        CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError,
         GetPromptRequestMethod, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
         Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
@@ -979,6 +979,16 @@ mod rmcp_impl {
     use rmcp::service::{RequestContext, RoleServer};
 
     use super::*;
+
+    /// SEP-2549 cache hints. `ttlMs`/`cacheScope` are REQUIRED on list/read
+    /// results under protocol version `2026-07-28` (what `LATEST`
+    /// negotiates): omitting them fails strict clients (ZCode among them).
+    /// The static capability listings (tools, prompts) are identical for
+    /// every user of this binary, so they may be cached publicly for an
+    /// hour; resource listings and reads reflect one user's project on
+    /// disk, so they stay private and never fresh from cache.
+    const STATIC_LIST_TTL_MS: u64 = 3_600_000;
+    const DYNAMIC_RESULT_TTL_MS: u64 = 0;
 
     /// The advertised tool set. Descriptions are written for LLM
     /// consumers: what the tool does, when to reach for it, and — on every
@@ -1430,7 +1440,9 @@ Review the local argosy's memory and the recent conversation, then consolidate m
             _context: RequestContext<RoleServer>,
         ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + '_
         {
-            std::future::ready(Ok(ListToolsResult::with_all_items(tool_definitions())))
+            std::future::ready(Ok(ListToolsResult::with_all_items(tool_definitions())
+                .with_ttl_ms(STATIC_LIST_TTL_MS)
+                .with_cache_scope(CacheScope::Public)))
         }
 
         fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -1445,7 +1457,9 @@ Review the local argosy's memory and the recent conversation, then consolidate m
         {
             // Static definitions, so no state lock is needed here — unlike
             // call_tool, whose handlers reconcile the index.
-            std::future::ready(Ok(ListPromptsResult::with_all_items(prompt_definitions())))
+            std::future::ready(Ok(ListPromptsResult::with_all_items(prompt_definitions())
+                .with_ttl_ms(STATIC_LIST_TTL_MS)
+                .with_cache_scope(CacheScope::Public)))
         }
 
         fn get_prompt(
@@ -1549,7 +1563,9 @@ Review the local argosy's memory and the recent conversation, then consolidate m
                                 .with_mime_type(d.mime)
                         })
                         .collect(),
-                ))
+                )
+                .with_ttl_ms(DYNAMIC_RESULT_TTL_MS)
+                .with_cache_scope(CacheScope::Private))
             }
         }
 
@@ -1572,7 +1588,10 @@ Review the local argosy's memory and the recent conversation, then consolidate m
                 {
                     contents = contents.with_meta(map.into());
                 }
-                Ok(ReadResourceResult::new(vec![contents]).into())
+                Ok(ReadResourceResult::new(vec![contents])
+                    .with_ttl_ms(DYNAMIC_RESULT_TTL_MS)
+                    .with_cache_scope(CacheScope::Private)
+                    .into())
             }
         }
     }
