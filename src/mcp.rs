@@ -387,7 +387,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
 
     /// Writes a memory concept (full markdown with frontmatter) to the local
     /// argosy, then reconciles the index so the concept is immediately
-    /// searchable. Overwrites are the deliberate edit path — the report's
+    /// searchable. A missing or empty frontmatter `type` is auto-filled as
+    /// `type: Memory`. Overwrites are the deliberate edit path — the report's
     /// `action` says `"updated"` so silent destruction is never silent.
     /// Imported argosys are read-only and unreachable here by
     /// construction: the local argosy is the only write target.
@@ -1031,7 +1032,7 @@ mod rmcp_impl {
             ),
             tool::<WriteParams>(
                 "write_memory",
-                "Writes a memory concept (full markdown with frontmatter) to the local argosy; imported argosys are read-only and cannot be written. Use it to persist a session learning so future sessions can find it via search. The index is reconciled on every write, so the concept is immediately searchable; writing over an existing path updates it (the report says which happened). cwd: the project's absolute root directory (the one containing .argosy/).",
+                "Writes a memory concept (full markdown with frontmatter) to the local argosy; imported argosys are read-only and cannot be written. A missing or empty frontmatter `type` is auto-filled as `type: Memory`. Use it to persist a session learning so future sessions can find it via search. The index is reconciled on every write, so the concept is immediately searchable; writing over an existing path updates it (the report says which happened). cwd: the project's absolute root directory (the one containing .argosy/).",
                 false,
                 false,
             ),
@@ -1153,7 +1154,7 @@ Review the local argosy's memory and the recent conversation, then consolidate m
    - **Update**: if an entry is outdated or incomplete based on the recent conversation, rewrite it with current information.
    - **Delete**: if an entry is stale, wrong, or no longer relevant, delete it.
    - **Add**: if the recent conversation surfaced a non-obvious gotcha, decision, or pattern that is NOT yet in memory, add it as a new concise entry.
-5. Apply all changes with `write_memory` (full markdown with frontmatter — keep the entry's valid frontmatter, e.g. its `type`) and `delete_memory`.
+5. Apply all changes with `write_memory` (full markdown with frontmatter — keep the entry's valid frontmatter; a missing or empty `type` is auto-filled as `type: Memory`) and `delete_memory`.
 
 ## Rules
 
@@ -2146,6 +2147,36 @@ mod tests {
             .root()
             .to_path_buf();
         assert!(local_root.join("memory/rust-internals.md").is_file());
+    }
+
+    /// A memory write without a usable frontmatter `type` is auto-filled as
+    /// `type: Memory` instead of a MEM-1 rejection — what round-trips carries
+    /// the filled type.
+    #[test]
+    fn write_memory_auto_fills_missing_type() {
+        let mut rig = rig();
+        let out = rig
+            .state
+            .write_memory(WriteParams {
+                cwd: project(),
+                path: "memory/untyped-note".to_string(),
+                content: "# Just prose\n\nNo frontmatter at all.\n".to_string(),
+            })
+            .unwrap();
+        assert_eq!(out.action, "created");
+
+        let read = rig
+            .state
+            .read_memory(ReadPathParams {
+                cwd: project(),
+                path: "memory/untyped-note".to_string(),
+            })
+            .unwrap();
+        assert!(
+            read.content.starts_with("---\ntype: Memory\n"),
+            "auto-filled frontmatter, got {}",
+            read.content
+        );
     }
 
     /// The staleness regression: a concept written through the MCP surface

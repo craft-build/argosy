@@ -30,6 +30,26 @@ fn conformance_requirement(namespace: &Namespace) -> &'static str {
     }
 }
 
+/// The `type` auto-filled onto a memory concept whose frontmatter carries no
+/// usable one. Memory is the session-scratch namespace, so the write surface
+/// fills the OKF requirement instead of rejecting; what lands on disk still
+/// satisfies MEM-1.
+const MEMORY_TYPE: &str = "Memory";
+
+/// Returns `concept` unchanged when it already carries a `type`, else a copy
+/// with `type: Memory` inserted (replacing an empty or non-string value).
+fn with_memory_type(concept: &Concept) -> Result<Concept> {
+    if concept.concept_type().is_some_and(|t| !t.trim().is_empty()) {
+        return Ok(concept.clone());
+    }
+    let mut frontmatter = concept.frontmatter().clone();
+    frontmatter.insert(
+        Value::String("type".to_string()),
+        Value::String(MEMORY_TYPE.to_string()),
+    );
+    Concept::new(frontmatter, concept.body().to_string())
+}
+
 /// True iff `inner` — a path relative to `skill/` — names a skill
 /// entry-point position: file form `foo.md` at the top level, or directory
 /// form `foo/foo.md`. Everything else under `skill/` is a plain concept.
@@ -291,7 +311,15 @@ impl LocalArgosy {
         concept: &Concept,
     ) -> Result<PathBuf> {
         let (rel, path) = self.resolve_path(&namespace, id)?;
-        if let Some(err) = contract_violation(&namespace, &rel, concept) {
+        // Memory is the only namespace whose write surface auto-fills the
+        // OKF `type` instead of rejecting — every other namespace keeps the
+        // strict contract below.
+        let concept = if namespace == Namespace::Memory {
+            with_memory_type(concept)?
+        } else {
+            concept.clone()
+        };
+        if let Some(err) = contract_violation(&namespace, &rel, &concept) {
             return Err(err);
         }
         if let Some(parent) = path.parent() {
@@ -350,7 +378,9 @@ impl LocalArgosy {
     }
 
     /// Writes a concept under `memory/`; see
-    /// [`LocalArgosy::write_concept`]. The MCP layer maps this 1:1.
+    /// [`LocalArgosy::write_concept`]. The MCP layer maps this 1:1. A
+    /// frontmatter `type` that is missing or empty is auto-filled as
+    /// `type: Memory` instead of being rejected — MEM-1 still holds on disk.
     pub fn write_memory(&self, id: &ConceptId, concept: &Concept) -> Result<PathBuf> {
         self.write_concept(Namespace::Memory, id, concept)
     }
@@ -700,14 +730,43 @@ mod tests {
     }
 
     #[test]
-    fn write_refuses_untyped_concept_with_conformance_id() {
+    fn write_memory_auto_fills_missing_type() {
+        let tmp = fixture_copy("valid-acme-billing");
+        let local = LocalArgosy::open(tmp.path()).unwrap();
+        // No frontmatter at all, and an empty `type` alongside a real field:
+        // both get `type: Memory` rather than a MEM-1 rejection.
+        local
+            .write_memory(
+                &id("memory/x"),
+                &Concept::from_str("# Just prose\n").unwrap(),
+            )
+            .unwrap();
+        local
+            .write_memory(
+                &id("memory/y"),
+                &Concept::from_str("---\ntype: \"\"\ndescription: d\n---\n# Y\n").unwrap(),
+            )
+            .unwrap();
+        for target in ["memory/x", "memory/y"] {
+            let written = Concept::from_file(tmp.path().join(format!("{target}.md"))).unwrap();
+            assert_eq!(written.concept_type(), Some("Memory"), "{target}");
+        }
+        // What landed on disk satisfies MEM-1: the bundle still validates.
+        let report = Argosy::validate(tmp.path());
+        assert!(report.is_conformant(), "{report:?}");
+    }
+
+    #[test]
+    fn write_document_still_refuses_untyped_concept() {
         let tmp = fixture_copy("valid-acme-billing");
         let local = LocalArgosy::open(tmp.path()).unwrap();
         let untyped = Concept::from_str("# Just prose\n").unwrap();
-        let err = local.write_memory(&id("memory/x"), &untyped).unwrap_err();
+        let err = local
+            .write_document(&id("document/x"), &untyped)
+            .unwrap_err();
         match err {
             Error::NamespaceContractViolation { requirement, .. } => {
-                assert_eq!(requirement, "MEM-1")
+                assert_eq!(requirement, "DOC-1")
             }
             other => panic!("got {other:?}"),
         }
