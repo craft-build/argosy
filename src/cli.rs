@@ -22,14 +22,11 @@ use serde::Serialize;
     about = "Create, validate, package, and query OKF knowledge bundles"
 )]
 struct Cli {
-    /// Emit machine-readable JSON on stdout (schema = the library's report
-    /// types) instead of human-readable lines. Safety warnings still go to
-    /// stderr.
+    /// Emit machine-readable JSON on stdout.
     #[arg(long, global = true)]
     json: bool,
 
-    /// Suppress non-error human output (findings, errors, and safety
-    /// warnings still print).
+    /// Suppress non-error human output.
     #[arg(short, long, global = true)]
     quiet: bool,
 
@@ -49,111 +46,73 @@ enum Command {
     Mcp(McpArgs),
 }
 
-/// Serve the current project over the Model Context Protocol (stdio
-/// transport — the channel editor/CLI harnesses spawn this process for)
-/// so any MCP-compatible harness can search, read, and write its
-/// argosys. The argosy set is the one discovered from the working
-/// directory — what `argosy index build` indexes. **stdout is the
-/// protocol channel**: diagnostics go to stderr. The embedding model
-/// loads only when something needs embedding — a FIRST RUN downloads it
-/// (~90 MB) into the user-level fastembed cache (`~/.cache/argosy/`
-/// under XDG, shared by every project); if the model is unavailable
-/// (offline), the server still serves every non-search tool, and writes
-/// report `indexed: false` until the model can load.
+/// Serve the current project's argosys over the Model Context Protocol
+/// (stdio; diagnostics on stderr). The first run downloads the embedding
+/// model (~90 MB).
 #[derive(Args)]
 struct McpArgs {}
 
-/// Clone an external argosy into this project's `.argosy/<name>` checkout
-/// — the standard way a project consumes shared bundles (`argosy pull`
-/// then `argosy index build`; no `--import` bookkeeping). The clone must
-/// itself be a bundle with a manifest; anything else leaves no checkout.
-/// The URL is handed to `git clone` verbatim (full history, git's URL
-/// semantics — including `ext::` transport helpers): only pull from
-/// repositories you trust.
+/// Clone an external argosy into this project's `.argosy/<name>`.
 #[derive(Args)]
 struct PullArgs {
     /// Git URL or local path of the argosy repository.
     url: String,
 
-    /// Checkout name (`.argosy/<name>`): `[A-Za-z0-9._-]` only. A checkout
-    /// with this name must not already exist.
+    /// Checkout name (`.argosy/<name>`).
     name: String,
 
-    /// Install into the user-wide argosy store
-    /// (`$XDG_STATE_HOME/argosy/<name>`, falling back to
-    /// `~/.local/state/argosy/<name>`) instead of this project's `.argosy/`
-    /// — shared by every project, automatically included in every index.
+    /// Install into the user-wide argosy store instead of `.argosy/`.
     #[arg(long)]
     global: bool,
 }
 
-/// Create a new, empty argosy in `<path>`: the root `argosy.md` manifest
-/// (version `0.1.0`) plus the four reserved namespace directories. Without
-/// `<path>`, initializes this project's local bundle at `.argosy/default`.
-/// Fails if the target already contains a manifest — a bundle is
-/// initialized exactly once.
+/// Create a new, empty argosy: the `argosy.md` manifest plus the reserved
+/// namespace directories.
 #[derive(Args)]
 struct InitArgs {
-    /// Directory to initialize. Defaults to `<cwd>/.argosy/default`, the
-    /// project-local bundle location.
+    /// Directory to initialize (default: `.argosy/default`).
     path: Option<PathBuf>,
 
-    /// The manifest `name`. Defaults to the target directory's basename
-    /// (with the implicit `.argosy/default` target: this directory's
-    /// basename). Only `[A-Za-z0-9._-]` are allowed — the name appears in
-    /// `argosy://` URIs.
+    /// Manifest name (default: the target directory's basename).
     #[arg(long)]
     name: Option<String>,
 
-    /// Initial manifest `description`.
+    /// Initial manifest description.
     #[arg(long)]
     description: Option<String>,
 }
 
-/// Validate a bundle on disk — lifecycle step 2 made scriptable. Works on
-/// directories that are not openable argosys; every problem becomes a
-/// finding line like `[ERROR STR-4] path/to/file.md: message`.
+/// Validate a bundle on disk and print findings.
 #[derive(Args)]
 struct ValidateArgs {
     /// Directory to validate.
     path: PathBuf,
 
-    /// Run only one namespace's checks. `skill`/`styleguide` run those
-    /// namespace contracts standalone (the bundle must be openable for
-    /// this); `document`/`memory` run the full structural validation
-    /// filtered to findings under that namespace.
+    /// Run only one namespace's checks.
     #[arg(long, value_enum)]
     namespace: Option<Ns>,
 }
 
-/// Package a validated bundle into a distributable artifact. The bundle is
-/// validated first — packaging a non-conformant bundle fails with the
-/// validation errors shown. The bundle's `memory/` namespace is NEVER
-/// included: local memory stays local.
+/// Package a bundle into a distributable artifact (validated first). The
+/// `memory/` namespace is NEVER included.
 #[derive(Args)]
 struct PackageArgs {
-    /// The bundle to package (must be an openable, conformant argosy).
+    /// The bundle to package.
     source: PathBuf,
 
-    /// Destination: a directory path (`--format dir`) or a `.tar.gz` file
-    /// (`--format tar.gz`). Materialization is failure-atomic: the artifact
-    /// appears at `<dest>` only once it is complete.
+    /// Destination directory or `.tar.gz` file.
     dest: PathBuf,
 
     /// The artifact format.
     #[arg(long, value_enum, default_value_t = Format::Dir)]
     format: Format,
 
-    /// Also ship the `.argosy/` index cache in the artifact. Off
-    /// by default: the index is derivative and rebuildable on demand.
+    /// Also ship the `.argosy/` index cache in the artifact.
     #[arg(long)]
     include_index: bool,
 }
 
-/// Operate on the semantic index of the current project: the local bundle
-/// at `.argosy/default`, pulled checkouts at `.argosy/<name>`, and global
-/// checkouts from the user store. The index lives at `.argosy/index.db` —
-/// deleting it costs one `build`. Membership comes from checkout locations.
+/// Operate on the project's semantic index (`.argosy/index.db`).
 #[derive(Args)]
 struct IndexArgs {
     #[command(subcommand)]
@@ -162,29 +121,18 @@ struct IndexArgs {
 
 #[derive(Subcommand)]
 enum IndexVerb {
-    /// Bring the index in line with the bundles (reconcile: embed new or
-    /// changed concepts, drop removed ones; O(hashes) when nothing
-    /// changed). FIRST RUN downloads the embedding model (~90 MB) into the
-    /// user-level fastembed cache (`$FASTEMBED_CACHE_DIR`, else
-    /// `$XDG_CACHE_HOME/argosy/fastembed`, else
-    /// `~/.cache/argosy/fastembed`); later runs are offline.
+    /// Bring the index in line with the bundles. The first run downloads
+    /// the embedding model (~90 MB).
     Build,
 
-    /// Read-only status: the store's recorded model identity, unit counts
-    /// per argosy/namespace, and a staleness preview — the diff `build`
-    /// would apply, computed from content hashes only (no embed calls, no
-    /// writes, no model load).
+    /// Read-only index status and staleness preview.
     Status,
 
-    /// Semantic search over the index (reconciles first when the index is
-    /// stale). Prints `[score] argosy://<argosy>/<concept-id> — description`
-    /// per hit.
+    /// Semantic search over the index.
     Query(QueryArgs),
 }
 
-/// A semantic query. Narrowing flags each constrain one filter
-/// facet; repeat `--namespace`/`--argosy`/`--type`/`--tag` to allow several
-/// values.
+/// A semantic query; repeatable flags allow several values.
 #[derive(Args)]
 struct QueryArgs {
     /// The natural-language query text.
@@ -198,8 +146,7 @@ struct QueryArgs {
     #[arg(long, value_enum)]
     namespace: Vec<Ns>,
 
-    /// Only hits from these argosies, by manifest name. An unknown name is
-    /// an error, not an empty result.
+    /// Only hits from these argosies, by manifest name.
     #[arg(long)]
     argosy: Vec<String>,
 
@@ -229,9 +176,8 @@ struct ConvertArgs {
 
 #[derive(Subcommand)]
 enum ConvertFormat {
-    /// Convert a directory of legacy YAML styleguide rules into OKF
-    /// Styleguide Rule concepts. Imports are additive and re-runnable:
-    /// rules that already exist are skipped, never overwritten.
+    /// Convert legacy YAML styleguide rules into OKF Styleguide Rule
+    /// concepts; existing rules are skipped, never overwritten.
     Styleguide(ConvertStyleguideArgs),
 }
 
@@ -241,13 +187,11 @@ struct ConvertStyleguideArgs {
     /// Directory of legacy YAML rule files.
     yaml_dir: PathBuf,
 
-    /// The local argosy that receives the rules (under `styleguide/`).
-    /// Defaults to the current project's `.argosy/default`.
+    /// Argosy that receives the rules (default: `.argosy/default`).
     argosy_path: Option<PathBuf>,
 }
 
-/// Install agent definitions that wire a coding harness into this
-/// project's argosy.
+/// Install agent definitions for a coding harness.
 #[derive(Args)]
 struct AgentArgs {
     #[command(subcommand)]
@@ -256,12 +200,8 @@ struct AgentArgs {
 
 #[derive(Subcommand)]
 enum AgentVerb {
-    /// Write the `reviewer` subagent definition into a coding harness's
-    /// agent directory in the current project (`.opencode/agents/`,
-    /// `.claude/agents/`, or `.kiro/agents/`). The reviewer is read-only
-    /// and reports prioritized findings (P0-P3), grounding them in the
-    /// project's styleguide rules through the argosy MCP tools. Works in
-    /// any directory — it writes harness config, not argosy content.
+    /// Write the read-only `reviewer` subagent into the current project's
+    /// harness agent directory.
     Reviewer(ReviewerArgs),
 }
 
@@ -300,9 +240,9 @@ impl From<Ns> for Namespace {
 /// Packaging artifact format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
-    /// A plain directory tree — the artifact you would commit to git.
+    /// A plain directory tree.
     Dir,
-    /// A gzipped tar archive (`.tar.gz`).
+    /// A gzipped tar archive.
     #[value(name = "tar.gz")]
     TarGz,
 }
