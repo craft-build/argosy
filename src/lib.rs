@@ -8,6 +8,7 @@ pub mod bundle;
 pub mod concept;
 pub mod context;
 pub mod error;
+mod hash;
 pub mod index;
 pub mod local;
 #[cfg(feature = "mcp")]
@@ -16,6 +17,8 @@ pub mod package;
 pub mod pull;
 pub mod skill;
 pub mod styleguide;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 pub use bundle::{Argosy, Finding, Manifest, Namespace, Severity, ValidationReport};
 pub use concept::{Concept, ConceptId};

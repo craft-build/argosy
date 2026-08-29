@@ -74,7 +74,7 @@ MCP distinguishes **Resources** (addressable, read-oriented data) from **Tools**
 
 ### 3.3 Transport
 
-`rmcp` supports both stdio and HTTP transports. Recommendation: stdio as the default (matching how most coding-tool MCP servers are launched today, as local subprocesses), with HTTP available as a secondary mode for shared or remote deployments — for instance, a team-hosted `argosy mcp` instance serving an argosy multiple people's harnesses read from.
+`rmcp` supports both stdio and HTTP transports. This implementation serves **stdio only**: the initial HTTP mode was unauthenticated and bound whatever address `--bind` accepted, which put destructive tools (`delete_memory`, `delete_rule`) on the network with no auth — removed rather than guarded. A future shared-deployment mode (a team-hosted `argosy mcp` several harnesses read from) would need a transport with real authentication before it returns.
 
 ## 4. Craft's Direct Integration
 

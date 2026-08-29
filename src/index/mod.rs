@@ -4,19 +4,18 @@
 //! backends implement the traits, sqlite-vec + fastembed by default. One
 //! unit per concept; search via [`Index::search`], lookup via resolve.
 
-mod sha256;
-
-#[cfg(feature = "default-index")]
-pub mod fastembed;
-#[cfg(feature = "default-index")]
-pub mod sqlite;
-
 use std::collections::HashMap;
 
 use crate::bundle::{Argosy, Namespace};
 use crate::concept::Concept;
 use crate::context::{ProjectContext, QualifiedConceptId};
 use crate::error::{IndexSnafu, Result, UnknownArgosySnafu};
+use crate::hash::sha256_hex;
+
+#[cfg(feature = "default-index")]
+pub mod fastembed;
+#[cfg(feature = "default-index")]
+pub mod sqlite;
 
 /// Produces embedding vectors for texts. Batch-only: every call, even for a
 /// single text, is a `&[String]` batch returning one vector per text in the
@@ -180,7 +179,13 @@ pub trait VectorStore {
     fn clear(&mut self) -> Result<()>;
 
     /// The `k` units most similar to `vector` under `filter`, ordered by
-    /// descending similarity.
+    /// descending similarity. **Filter contract**: filters constrain the
+    /// full ranked order and `k` truncates afterwards — a store that
+    /// truncates to `k` before applying `filter` silently loses recall
+    /// whenever the k nearest units are non-matching (an empty
+    /// `search_rules --language python` on a mixed corpus). Backends that
+    /// can only truncate first must over-fetch enough to make the
+    /// truncation invisible at this contract's granularity.
     fn search(&self, vector: &[f32], k: usize, filter: &Filter) -> Result<Vec<SearchHit>>;
 }
 
@@ -236,7 +241,7 @@ fn gather_concepts(
                         namespace: namespace.clone(),
                         id,
                     },
-                    hash: sha256::sha256_hex(text.as_bytes()),
+                    hash: sha256_hex(text.as_bytes()),
                     text,
                     meta: UnitMeta::from_concept(&concept),
                 });
@@ -643,7 +648,10 @@ pub(crate) mod tests {
 
     /// HashMap-backed store with brute-force cosine search honoring every
     /// `Filter` field. Also records bookkeeping (`clears`, `removals`) so
-    /// tests can assert reconcile's calls.
+    /// tests can assert reconcile's calls. Implements the trait's
+    /// filter-then-truncate contract verbatim (filter the full ranking,
+    /// then take `k`) — the reference semantics the sqlite backend's
+    /// filtered path must match; see `VectorStore::search`.
     pub(crate) struct MemStore {
         model_id: Option<String>,
         units: HashMap<QualifiedConceptId, EmbeddingUnit>,

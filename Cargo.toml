@@ -25,19 +25,13 @@ fastembed = { version = "6", default-features = false, features = [
 rmcp = { version = "3.1", default-features = false, features = [
   "server",
   "transport-io",
-  "transport-streamable-http-server",
 ], optional = true }
 tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",
   "macros",
   "io-util",
-  "net",
   "time",
   "sync",
-], optional = true }
-axum = { version = "0.8", default-features = false, features = [
-  "http1",
-  "tokio",
 ], optional = true }
 
 [features]
@@ -47,7 +41,7 @@ default-index = [
   "dep:sqlite-vec",
   "dep:fastembed",
 ]
-mcp = ["dep:rmcp", "dep:tokio", "dep:axum"]
+mcp = ["dep:rmcp", "dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -58,7 +52,6 @@ rmcp = { version = "3.1", default-features = false, features = [
   "server",
   "client",
   "transport-io",
-  "transport-streamable-http-server",
 ] }
 tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",

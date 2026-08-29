@@ -1,8 +1,11 @@
 //! The `sqlite-vec`-backed default [`VectorStore`], gated behind the
 //! `default-index` Cargo feature: one `.argosy/index.db` file spanning all
 //! active argosys (`meta` model row, `units` facet rows, `unit_vectors`
-//! vec0 keyed by units rowid). Scores are `-distance`. v1 limits: filters
-//! apply after vec0's top-k truncation; single-process writers only.
+//! vec0 keyed by units rowid). Scores are `-distance`. Filtered queries
+//! rank the full corpus (vec0 applies filters after its top-k, so
+//! `search` raises the SQL-side k to the row count and truncates after
+//! filtering — exact, at no asymptotic cost). v1 limit: single-process
+//! writers only.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int};
@@ -88,6 +91,12 @@ impl SqliteVecStore {
         // multi-process guarantees).
         conn.pragma_update(None, "journal_mode", "WAL")
             .context(SqliteSnafu)?;
+        // Wait briefly instead of failing instantly when another process
+        // (e.g. `argosy index build` while `argosy mcp` serves) holds the
+        // write lock: "database is locked" after 0 ms is cryptic, after
+        // 5 s it means something is genuinely stuck.
+        conn.pragma_update(None, "busy_timeout", 5_000)
+            .context(SqliteSnafu)?;
         // Stamp the schema version on fresh databases only; refuse dbs from a
         // newer argosy rather than silently misreading their layout (and
         // never clobber a higher version, so a future migration can notice).
@@ -134,7 +143,8 @@ impl SqliteVecStore {
 
     /// Opens the store strictly read-only (the CLI's `index status`): no
     /// parent-directory creation, no WAL pragma, no schema DDL — the
-    /// database must already exist and remain untouched. This is what lets
+    /// database must already exist and remain untouched. (`busy_timeout`
+    /// is connection-local state, not a database write.) This is what lets
     /// `status` answer on a mounted-read-only or permission-locked index
     /// where [`Self::open`] would fail before reading a single row.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
@@ -142,6 +152,9 @@ impl SqliteVecStore {
         let conn =
             Connection::open_with_flags(path.as_ref(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .context(SqliteSnafu)?;
+        // Readers hit locks too (WAL checkpoints); the same wait applies.
+        conn.pragma_update(None, "busy_timeout", 5_000)
+            .context(SqliteSnafu)?;
         Self::check_schema_version(&conn)?;
         let (model_id, dimensions) = Self::read_meta(&conn)?;
         Ok(Self {
@@ -470,6 +483,22 @@ impl VectorStore for SqliteVecStore {
         }
         self.ensure_vec_table_read()?;
 
+        // Filtered queries rank the WHOLE corpus first: vec0 applies
+        // metadata filters after its top-k truncation, so a small k would
+        // drop every matching concept whenever the k nearest are
+        // non-matching (empty `search_rules --language python` on a mixed
+        // corpus). Fetching k = row count makes filtered search exact —
+        // vec0 brute-forces all rows for any k, so this costs nothing
+        // asymptotically — and the caller's k is applied by truncating
+        // the fully ranked, fully filtered list below.
+        let sql_k: i64 = if filter_is_active(filter) {
+            self.conn
+                .query_row("SELECT COUNT(*) FROM units", [], |row| row.get(0))
+                .context(SqliteSnafu)?
+        } else {
+            k as i64
+        };
+
         // Bound-parameter SQL: every user-influenced filter value travels as
         // a parameter, never string-interpolated. Only the number of
         // placeholders (from counts) shapes the text.
@@ -481,7 +510,7 @@ impl VectorStore for SqliteVecStore {
              WHERE v.vector MATCH ? AND k = ?",
         );
         let mut values: Vec<rusqlite::types::Value> =
-            vec![vec_to_bytes(vector).into(), (k as i64).into()];
+            vec![vec_to_bytes(vector).into(), sql_k.into()];
 
         let mut push_in_list = |column: &str, entries: &[String]| {
             if entries.is_empty() {
@@ -576,11 +605,24 @@ impl VectorStore for SqliteVecStore {
                 },
             )
             .collect::<Result<Vec<_>>>()?;
-        // vec0's KNN constraint returns at most k rows; sort here so
-        // descending-score order does not depend on iteration order.
+        // vec0's KNN constraint returns at most sql_k rows; sort here so
+        // descending-score order does not depend on iteration order, then
+        // apply the caller's k to the fully filtered ranking.
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
         Ok(hits)
     }
+}
+
+/// True iff any filter field constrains the result set — the signal that
+/// `search` must rank the full corpus rather than trust vec0's top-k.
+fn filter_is_active(filter: &Filter) -> bool {
+    filter.namespaces.is_some()
+        || filter.argosies.is_some()
+        || filter.concept_types.is_some()
+        || filter.tags.is_some()
+        || filter.language.is_some()
+        || filter.category.is_some()
 }
 
 impl SqliteVecStore {
@@ -1136,6 +1178,81 @@ mod tests {
         }
         store.remove_concept(&units[1].concept).unwrap();
         assert_eq!(store.unit_hashes().unwrap().len(), 2);
+    }
+
+    /// Regression (filtered recall): vec0 applies metadata filters after
+    /// its own top-k truncation, so a naive `k` in SQL returns nothing
+    /// whenever the k nearest concepts are all non-matching. The store
+    /// ranks the full corpus when a filter is active; filtered queries
+    /// are exact.
+    #[test]
+    fn filtered_search_returns_matches_beyond_the_unfiltered_top_k() {
+        let (_dir, mut store) = open_in_tmp();
+        let embedder = MockEmbedder::new();
+        // Ten near-duplicate documents close to the query …
+        let mut units: Vec<EmbeddingUnit> = (0..10)
+            .map(|i| {
+                make_unit(
+                    &embedder,
+                    "local",
+                    Namespace::Document,
+                    &format!("document/d{i}"),
+                    "water flows downhill through valleys",
+                    meta(Some("Note"), &[], None, None),
+                )
+            })
+            .collect();
+        // … plus one styleguide rule that is NOT among the nearest.
+        units.push(make_unit(
+            &embedder,
+            "local",
+            Namespace::Styleguide,
+            "styleguide/rust/naming",
+            "naming conventions snake case identifiers",
+            meta(Some("Styleguide Rule"), &[], Some("rust"), Some("naming")),
+        ));
+        store.upsert(&units).unwrap();
+
+        let query = embedder
+            .embed(&["water flows downhill".to_string()])
+            .unwrap()
+            .remove(0);
+
+        // k = 3 with a styleguide filter: the unfiltered top-3 are all
+        // documents, yet the rule must surface — not an empty result.
+        let hits = store
+            .search(
+                &query,
+                3,
+                &Filter {
+                    namespaces: Some(vec![Namespace::Styleguide]),
+                    ..Filter::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the only matching concept is returned");
+        assert_eq!(hits[0].concept.id.as_str(), "styleguide/rust/naming");
+
+        // The facet path (the review flow: `search_rules --language rust`).
+        let hits = store
+            .search(
+                &query,
+                3,
+                &Filter {
+                    language: Some("rust".to_string()),
+                    ..Filter::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1, "language facet finds the same rule");
+
+        // Unfiltered, the same query honors k exactly — nothing regressed.
+        let hits = store.search(&query, 3, &Filter::default()).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert!(
+            hits.iter()
+                .all(|h| h.concept.namespace == Namespace::Document)
+        );
     }
 
     /// Real-database coverage: engine + store on a temp ProjectContext,

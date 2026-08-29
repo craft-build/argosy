@@ -18,6 +18,7 @@ use crate::error::{
     Error, IntegrityMismatchSnafu, IoSnafu, NotAnArgosySnafu, Result, SymlinkEscapeSnafu,
     ValidationSnafu,
 };
+use crate::hash::{hex, sha256_hex};
 use crate::local::LocalArgosy;
 
 /// The integrity sidecar every package emits.
@@ -78,6 +79,10 @@ pub struct ImportReport {
     /// on one bad rule; callers treat a non-empty vec as
     /// failure after the fact.
     pub findings: Vec<Finding>,
+    /// YAML files the import considered. Zero means the directory held no
+    /// `.yaml`/`.yml` files at all — almost always a wrong path spelling,
+    /// which must not look like a clean no-op success.
+    pub yaml_files_seen: usize,
 }
 
 /// The bundle-relative file paths [`package`] copies: every file under the
@@ -187,21 +192,6 @@ fn read_bundle_file(
         }
     }
     fs::read(&target).context(IoSnafu { path: target })
-}
-
-/// The lowercase hex SHA-256 of `data`.
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex(&hasher.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 /// Bundle-relative path rendered with `/` separators, for sidecar lines and
@@ -373,6 +363,18 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
             }
         }
         PackageFormat::TarGz => {
+            // Symmetry with Directory mode: never clobber an existing
+            // artifact (which also makes the rename cross-platform —
+            // Windows errors on rename-over-existing).
+            if dest.exists() {
+                return ValidationSnafu {
+                    reason: format!(
+                        "packaging destination `{}` already exists; refusing to overwrite it",
+                        dest.display()
+                    ),
+                }
+                .fail();
+            }
             let staging = staging_path(dest);
             let result = (|staging: &Path| -> Result<()> {
                 let file = fs::File::create(staging).context(IoSnafu {
@@ -384,6 +386,10 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                     let mut header = tar::Header::new_gnu();
                     header.set_size(bytes.len() as u64);
                     header.set_mode(0o644);
+                    // mtime 0 (the GNU default for unset) is a deliberate
+                    // reproducibility choice: identical bundles produce
+                    // byte-identical archives. Some strict extractors warn
+                    // about epoch timestamps — that is expected.
                     header.set_cksum();
                     builder
                         .append_data(&mut header, posix(rel), bytes.as_slice())
@@ -582,6 +588,7 @@ pub fn import_styleguide_yaml(local: &LocalArgosy, yaml_dir: &Path) -> Result<Im
         if !path.is_file() || !is_yaml {
             continue;
         }
+        report.yaml_files_seen += 1;
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) => {
@@ -956,6 +963,46 @@ mod tests {
 
     use super::*;
     use crate::local::LocalArgosy;
+
+    #[test]
+    fn package_tar_gz_refuses_an_existing_destination() {
+        // Regression: Directory mode refused non-empty destinations, but a
+        // second tar.gz run silently clobbered the first artifact (and
+        // errored on Windows instead). Both formats refuse now.
+        let dir = TempDir::new().unwrap();
+        let root = fixture_argosy(&dir);
+        let dest = dir.path().join("bundle.tar.gz");
+        let argosy = Argosy::open(&root).unwrap();
+        let opts = PackageOptions {
+            include_index: false,
+            format: PackageFormat::TarGz,
+        };
+        package(&argosy, &dest, &opts).unwrap();
+        let before = fs::read(&dest).unwrap();
+
+        let err = package(&argosy, &dest, &opts).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to overwrite"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fs::read(&dest).unwrap(), before, "the artifact is intact");
+    }
+
+    #[test]
+    fn import_of_a_directory_with_no_yaml_reports_zero_files_seen() {
+        // A wrong path spelling must not look like a clean no-op success:
+        // the report records that no YAML files were even considered.
+        let dir = TempDir::new().unwrap();
+        let local = import_fixture(&dir);
+        let yaml_dir = dir.path().join("not-yaml");
+        fs::create_dir_all(&yaml_dir).unwrap();
+        fs::write(yaml_dir.join("rules.yaml.bak"), "id: x").unwrap();
+
+        let report = import_styleguide_yaml(&local, &yaml_dir).unwrap();
+        assert_eq!(report.yaml_files_seen, 0);
+        assert_eq!(report.written, 0);
+        assert!(report.findings.is_empty());
+    }
 
     /// `validate_styleguide` returns raw findings; these are the error-severity ones.
     fn error_findings(argosy: &Argosy) -> Vec<Finding> {

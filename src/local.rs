@@ -492,33 +492,12 @@ mod tests {
     use super::*;
     use crate::bundle::Severity;
     use crate::error::Error;
+    use crate::testutil::fixture_copy;
 
     fn id(s: &str) -> ConceptId {
         ConceptId::from_str(s).unwrap()
     }
 
-    /// Copies a shared fixture into a fresh tempdir — tests must never
-    /// mutate `tests/fixtures/` directly.
-    fn fixture_copy(name: &str) -> TempDir {
-        fn copy_dir_all(src: &Path, dst: &Path) {
-            for entry in fs::read_dir(src).unwrap() {
-                let entry = entry.unwrap();
-                let to = dst.join(entry.file_name());
-                if entry.file_type().unwrap().is_dir() {
-                    fs::create_dir_all(&to).unwrap();
-                    copy_dir_all(&entry.path(), &to);
-                } else {
-                    fs::copy(entry.path(), to).unwrap();
-                }
-            }
-        }
-        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(name);
-        let dst = tempfile::tempdir().unwrap();
-        copy_dir_all(&src, dst.path());
-        dst
-    }
     fn note_concept() -> Concept {
         Concept::from_str("---\ntype: Session Note\n---\n# Note\n\nContent.\n").unwrap()
     }

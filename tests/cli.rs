@@ -263,6 +263,40 @@ fn validate_namespace_skill_passes_on_valid_fixture() {
         .stdout(predicate::str::contains("OK: acme-billing"));
 }
 
+#[test]
+fn validate_namespace_document_memory_keep_bundle_level_findings() {
+    // Regression: scoped runs used to drop findings with no path, so a
+    // bundle with no `argosy.md` validated "OK" under any namespace scope.
+    for ns in ["document", "memory"] {
+        argosy_bin()
+            .args([
+                "validate",
+                "--namespace",
+                ns,
+                fixture("missing-manifest").to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::contains("STR-2"));
+    }
+}
+
+#[test]
+fn validate_namespace_memory_scopes_path_findings() {
+    // Path findings stay scoped: an untyped concept under document/ is not
+    // reported by a memory-scoped run.
+    argosy_bin()
+        .args([
+            "validate",
+            "--namespace",
+            "memory",
+            fixture("untyped-concept").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
 // ----------------------------------------------------------------- package
 
 #[test]
@@ -458,6 +492,29 @@ fn convert_styleguide_fails_with_findings_on_malformed_rules() {
 }
 
 #[test]
+fn convert_styleguide_without_yaml_files_warns_on_stderr() {
+    // Regression: a directory with no .yaml/.yml files (typo'd path) used
+    // to look like a clean no-op success.
+    let scratch = TempDir::new().unwrap();
+    let target = fixture_copy("valid-acme-billing", &scratch);
+    let yaml_dir = scratch.path().join("yaml");
+    fs::create_dir_all(&yaml_dir).unwrap();
+    fs::write(yaml_dir.join("rules.yaml.bak"), "id: x").unwrap();
+
+    argosy_bin()
+        .args([
+            "convert",
+            "styleguide",
+            yaml_dir.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("no .yaml or .yml files found"))
+        .stdout(predicate::str::contains("written: 0 rule(s)"));
+}
+
+#[test]
 fn convert_styleguide_defaults_to_project_argosy() {
     let scratch = TempDir::new().unwrap();
     // A project in the standard layout: rules land in `.argosy/default`
@@ -618,6 +675,19 @@ fn help_documents_the_package_memory_guarantee() {
         .success()
         .stdout(predicate::str::contains("memory"))
         .stdout(predicate::str::contains("NEVER included"));
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn help_documents_the_mcp_stdio_transport_and_model_download() {
+    // The model download fires on `mcp` first runs too, not just
+    // `index build` — the help must say so.
+    argosy_bin()
+        .args(["mcp", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stdio"))
+        .stdout(predicate::str::contains("90 MB"));
 }
 
 #[cfg(feature = "default-index")]

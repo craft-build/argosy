@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
 use crate::bundle::Argosy;
 use crate::error::{IoSnafu, NotAnArgosySnafu, Result, ValidationSnafu};
@@ -33,6 +33,24 @@ pub fn global_argosy_dir() -> Result<PathBuf> {
                 .to_string(),
         })?;
     Ok(base.join("argosy"))
+}
+
+/// Maps a failed `git` process spawn. A missing binary is a setup problem,
+/// not an I/O problem on the destination — name `git` and PATH so the user
+/// can act on the message instead of chasing a misleading path.
+fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return ValidationSnafu {
+            reason: "`git` was not found on PATH; `argosy pull` shells out to \
+                     `git clone`, so install git (or fix PATH) and retry"
+                .to_string(),
+        }
+        .build();
+    }
+    IoSnafu {
+        path: dest.to_path_buf(),
+    }
+    .into_error(err)
 }
 
 /// Clones the argosy at `url` into `<root>/<name>` via `git clone` and
@@ -74,7 +92,7 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
         .args(["clone", "--quiet", url])
         .arg(&dest)
         .output()
-        .context(IoSnafu { path: dest.clone() })?;
+        .map_err(|err| git_spawn_error(&dest, err))?;
     if !output.status.success() {
         let _ = fs::remove_dir_all(&dest);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -136,6 +154,26 @@ mod tests {
             "-m",
             "x",
         ]);
+    }
+
+    #[test]
+    fn git_spawn_error_names_git_when_the_binary_is_missing() {
+        // Regression: a failed `git` spawn used to surface as an I/O error
+        // on the *destination path* — misleading on machines without git.
+        let err = git_spawn_error(
+            Path::new("/tmp/dest"),
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("`git` was not found on PATH"), "got {msg}");
+        assert!(!msg.contains("dest"), "no misleading path: {msg}");
+
+        // Any other spawn failure stays an I/O error on the destination.
+        let err = git_spawn_error(
+            Path::new("/tmp/dest"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(matches!(err, crate::error::Error::Io { .. }), "got {err:?}");
     }
 
     #[test]

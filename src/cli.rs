@@ -48,34 +48,26 @@ enum Command {
     Mcp(McpArgs),
 }
 
-/// Serve the current project over the Model Context Protocol so any
-/// MCP-compatible harness can search, read, and write its argosys. The
-/// argosy set is the one discovered from the working directory — what
-/// `argosy index build` indexes. stdio is the default transport and
-/// **stdout is the protocol channel**; restart after external edits.
+/// Serve the current project over the Model Context Protocol (stdio
+/// transport — the channel editor/CLI harnesses spawn this process for)
+/// so any MCP-compatible harness can search, read, and write its
+/// argosys. The argosy set is the one discovered from the working
+/// directory — what `argosy index build` indexes. **stdout is the
+/// protocol channel**: diagnostics go to stderr. The embedding model
+/// loads only when something needs embedding — a FIRST RUN downloads it
+/// (~90 MB) into the fastembed cache; if the model is unavailable
+/// (offline), the server still serves every non-search tool, and writes
+/// report `indexed: false` until the model can load.
 #[derive(Args)]
-struct McpArgs {
-    /// Transport to serve: `stdio` (the default, for editor/CLI harnesses
-    /// that spawn this process) or `http` (streamable HTTP, unauthenticated,
-    /// trusted networks only).
-    #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
-    transport: McpTransport,
-
-    /// Address the HTTP transport binds (`--transport http` only).
-    #[arg(long, default_value = "127.0.0.1:8787")]
-    bind: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum McpTransport {
-    Stdio,
-    Http,
-}
+struct McpArgs {}
 
 /// Clone an external argosy into this project's `.argosy/<name>` checkout
 /// — the standard way a project consumes shared bundles (`argosy pull`
 /// then `argosy index build`; no `--import` bookkeeping). The clone must
 /// itself be a bundle with a manifest; anything else leaves no checkout.
+/// The URL is handed to `git clone` verbatim (full history, git's URL
+/// semantics — including `ext::` transport helpers): only pull from
+/// repositories you trust.
 #[derive(Args)]
 struct PullArgs {
     /// Git URL or local path of the argosy repository.
@@ -311,11 +303,17 @@ impl Output {
         eprintln!("warning: {line}");
     }
 
-    /// JSON stdout for machine consumers.
-    fn json<T: Serialize>(&self, value: &T) {
+    /// JSON stdout for machine consumers. A serialization failure is a
+    /// command failure (exit 1) — never empty stdout plus a success code.
+    fn json<T: Serialize>(&self, value: &T) -> Result<()> {
         match serde_json::to_string_pretty(value) {
-            Ok(text) => println!("{text}"),
-            Err(e) => eprintln!("error: failed to serialize JSON output: {e}"),
+            Ok(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            Err(e) => Err(argosy::error::Error::Validation {
+                reason: format!("failed to serialize JSON output: {e}"),
+            }),
         }
     }
 }
@@ -371,7 +369,7 @@ fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
             "name": manifest.name(),
             "argosy_version": manifest.argosy_version(),
             "path": path,
-        }));
+        }))?;
     } else {
         let manifest = local.manifest();
         out.note(&format!(
@@ -398,7 +396,7 @@ fn cmd_pull(out: &Output, args: &PullArgs) -> Result<ExitCode> {
             "argosy_version": argosy.manifest().argosy_version(),
             "path": dest,
             "global": args.global,
-        }));
+        }))?;
     } else {
         out.note(&format!(
             "pulled {} {} into {}",
@@ -427,13 +425,17 @@ fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode> {
         Some(ns @ (Ns::Document | Ns::Memory)) => {
             let full = Argosy::validate(&args.path);
             let dir = Namespace::from(ns).as_dir_name().to_string();
+            // Bundle-level findings (no path — manifest missing, root
+            // problems) always survive the namespace filter: a bundle
+            // with no `argosy.md` must never validate "OK" under any
+            // scope. Path findings stay scoped to the namespace.
             let findings = full
                 .findings()
                 .iter()
                 .filter(|f| {
                     f.path
                         .as_ref()
-                        .is_some_and(|p| p.starts_with(Path::new(&dir)))
+                        .is_none_or(|p| p.starts_with(Path::new(&dir)))
                 })
                 .cloned()
                 .collect();
@@ -443,7 +445,7 @@ fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode> {
 
     let conformant = report.is_conformant();
     if out.json {
-        out.json(&report);
+        out.json(&report)?;
     } else if !conformant {
         print!("{report}");
     } else {
@@ -474,7 +476,7 @@ fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> {
     let report = Argosy::validate(&args.source);
     if !report.is_conformant() {
         if out.json {
-            out.json(&report);
+            out.json(&report)?;
         } else {
             eprint!("{report}");
         }
@@ -487,7 +489,7 @@ fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> {
     };
     let report: PackageReport = argosy::package::package(&source, &args.dest, &options)?;
     if out.json {
-        out.json(&report);
+        out.json(&report)?;
     } else {
         out.note(&format!(
             "packaged {} {}: {} file(s)",
@@ -511,8 +513,17 @@ fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> {
             let local = LocalArgosy::open(&argosy_path)?;
             let report: ImportReport =
                 argosy::package::import_styleguide_yaml(&local, &imp.yaml_dir)?;
+            // An existing directory with no YAML files is almost always a
+            // wrong path spelling — a silent "written: 0" success is how
+            // imports get pointed at nothing.
+            if report.yaml_files_seen == 0 && report.findings.is_empty() {
+                out.warn(&format!(
+                    "no .yaml or .yml files found in {} — nothing imported (check the path)",
+                    imp.yaml_dir.display()
+                ));
+            }
             if out.json {
-                out.json(&report);
+                out.json(&report)?;
             } else {
                 out.note(&format!(
                     "written: {} rule(s); skipped (existing): {}",
@@ -564,7 +575,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
                     db.display()
                 ));
                 if out.json {
-                    out.json(&serde_json::json!({"index": null, "db": db}));
+                    out.json(&serde_json::json!({"index": null, "db": db}))?;
                 }
                 return Ok(ExitCode::SUCCESS);
             }
@@ -608,7 +619,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
                     "units": total,
                     "by_argosy_namespace": by,
                     "staleness": stale,
-                }));
+                }))?;
             } else {
                 out.note(&format!(
                     "model: {}",
@@ -640,13 +651,17 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
         IndexVerb::Build | IndexVerb::Query(_) => {
             let context = ProjectContext::open_project(&root)?;
             let store = SqliteVecStore::open(&db)?;
+            // Loading the model takes a moment (and a ~90 MB download on a
+            // cold cache): say so on stderr so the pause never reads as a
+            // hang. stdout stays the machine-readable channel.
+            eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
             let provider = FastembedProvider::new_default()?;
             let mut index = Index::new(provider, store);
             let report = index.reconcile(&context)?;
             match &args.verb {
                 IndexVerb::Build => {
                     if out.json {
-                        out.json(&report);
+                        out.json(&report)?;
                     } else {
                         let how = if report.rebuilt { "rebuilt" } else { "updated" };
                         out.note(&format!(
@@ -664,7 +679,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
                     };
                     let hits = index.search(&context, &query)?;
                     if out.json {
-                        out.json(&hits);
+                        out.json(&hits)?;
                     } else {
                         for hit in &hits {
                             let description = hit.meta.description.as_deref().unwrap_or("");
@@ -694,19 +709,19 @@ fn cmd_index(_out: &Output, _args: &IndexArgs) -> Result<ExitCode> {
 }
 
 #[cfg(all(feature = "mcp", feature = "default-index"))]
-fn cmd_mcp(_out: &Output, args: &McpArgs) -> Result<ExitCode> {
+fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
     use argosy::error::Error;
     use argosy::index::Index;
-    use argosy::index::fastembed::FastembedProvider;
+    use argosy::index::fastembed::LazyFastembedProvider;
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::mcp::{ArgosyMcpServer, McpState};
     use rmcp::ServiceExt;
 
-    // Startup runs to completion before the transport starts: any failure
-    // prints via `run`'s `error:` mapping and exits 1 — never serve a
-    // half-broken context. The argosy set is discovered from the working
-    // directory, exactly like the index verbs.
+    // Startup runs to completion before the transport starts; the argosy
+    // set is discovered from the working directory, exactly like the
+    // index verbs. stdout is the stdio protocol channel: every
+    // diagnostic is stderr.
     let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
         path: ".".into(),
         source,
@@ -714,71 +729,47 @@ fn cmd_mcp(_out: &Output, args: &McpArgs) -> Result<ExitCode> {
     let context = ProjectContext::open_project(&root)?;
     let db = root.join(".argosy/index.db");
     let store = SqliteVecStore::open(&db)?;
-    let provider = FastembedProvider::new_default()?;
-    let mut index = Index::new(provider, store);
-    let report = index.reconcile(&context)?;
-    // stdout is the stdio protocol channel: every diagnostic is stderr.
-    eprintln!(
-        "argosy mcp: index reconciled ({} upserted, {} removed, {} unchanged)",
-        report.upserted, report.removed, report.unchanged
-    );
+    // The lazy provider makes startup instant and offline-tolerant: the
+    // model (and its ~90 MB first-run download) loads only when something
+    // actually needs embedding.
+    let mut index = Index::new(LazyFastembedProvider::new_default()?, store);
+    // A failed reconcile degrades retrieval, it must not kill the server
+    // (spec §11: an out-of-date index degrades search quality, never
+    // correctness) — warn on stderr and keep serving; mutating tools
+    // re-attempt reconciliation on every write.
+    match index.reconcile(&context) {
+        Ok(report) => eprintln!(
+            "argosy mcp: index reconciled ({} upserted, {} removed, {} unchanged)",
+            report.upserted, report.removed, report.unchanged
+        ),
+        Err(err) => eprintln!(
+            "argosy mcp: warning: index reconcile failed ({err:#}); serving degraded — \
+             search may error or miss changes until `argosy index build` succeeds"
+        ),
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Validation {
+        .map_err(|e| Error::Transport {
             reason: format!("failed to start the tokio runtime: {e}"),
         })?
         .block_on(async move {
-        let state = McpState::new(context, index);
-        match args.transport {
-            McpTransport::Stdio => {
-                eprintln!("argosy mcp: serving on stdio");
-                let service = ArgosyMcpServer::new(state)
-                    .serve(rmcp::transport::stdio())
-                    .await
-                    .map_err(|e| Error::Validation {
-                        reason: format!("MCP stdio handshake failed: {e}"),
-                    })?;
-                // `cancel()` would shut the server down immediately; wait for
-                // the natural end (stdin EOF / client disconnect) instead.
-                service.waiting().await.map_err(|e| Error::Validation {
-                    reason: format!("MCP server task failed: {e}"),
+            let state = McpState::new(context, index);
+            eprintln!("argosy mcp: serving on stdio");
+            let service = ArgosyMcpServer::new(state)
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| Error::Transport {
+                    reason: format!("MCP stdio handshake failed: {e}"),
                 })?;
-            }
-            McpTransport::Http => {
-                use rmcp::transport::streamable_http_server::{
-                    StreamableHttpServerConfig, StreamableHttpService,
-                    session::local::LocalSessionManager,
-                };
-                let server = ArgosyMcpServer::new(state);
-                let service = StreamableHttpService::new(
-                    move || Ok(server.clone()),
-                    std::sync::Arc::new(LocalSessionManager::default()),
-                    StreamableHttpServerConfig::default(),
-                );
-                let router = axum::Router::new().nest_service("/mcp", service);
-                let listener =
-                    tokio::net::TcpListener::bind(&args.bind)
-                        .await
-                        .map_err(|e| Error::Validation {
-                            reason: format!("failed to bind `{}`: {e}", args.bind),
-                        })?;
-                eprintln!(
-                    "argosy mcp: serving HTTP at http://{}/mcp (unauthenticated — trusted networks only)",
-                    listener.local_addr().map_err(|e| Error::Validation {
-                        reason: format!("bound address unreadable: {e}"),
-                    })?
-                );
-                axum::serve(listener, router)
-                    .await
-                    .map_err(|e| Error::Validation {
-                        reason: format!("HTTP server failed: {e}"),
-                    })?;
-            }
-        }
-        Ok::<(), Error>(())
-    })?;
+            // `cancel()` would shut the server down immediately; wait for
+            // the natural end (stdin EOF / client disconnect) instead.
+            service.waiting().await.map_err(|e| Error::Transport {
+                reason: format!("MCP server task failed: {e}"),
+            })?;
+            Ok::<(), Error>(())
+        })?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -895,28 +886,20 @@ mod mcp_parse_tests {
     use super::*;
 
     #[test]
-    fn mcp_flags_parse_and_stdio_is_the_default_transport() {
-        let cli = Cli::try_parse_from([
-            "argosy",
-            "mcp",
-            "--transport",
-            "http",
-            "--bind",
-            "0.0.0.0:9000",
-        ])
-        .expect("argv parses");
-        let Command::Mcp(args) = cli.command else {
-            panic!("expected mcp argv");
-        };
-        assert!(matches!(args.transport, McpTransport::Http));
-        assert_eq!(args.bind, "0.0.0.0:9000");
-
+    fn mcp_parses_with_no_flags_and_stdio_is_the_only_transport() {
         let cli = Cli::try_parse_from(["argosy", "mcp"]).expect("argv parses");
-        let Command::Mcp(args) = cli.command else {
+        let Command::Mcp(_args) = cli.command else {
             panic!("expected mcp argv");
         };
-        assert!(matches!(args.transport, McpTransport::Stdio));
-        assert_eq!(args.bind, "127.0.0.1:8787");
+
+        // The HTTP transport was removed (unauthenticated network exposure
+        // of destructive tools): neither flag may parse at all.
+        for flag in ["--transport", "--bind"] {
+            assert!(
+                Cli::try_parse_from(["argosy", "mcp", flag, "x"]).is_err(),
+                "`{flag}` must not parse"
+            );
+        }
     }
 
     #[test]

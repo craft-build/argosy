@@ -40,8 +40,9 @@ const DEFAULT_K: usize = 8;
 const UNVERIFIED: &str = "unverified";
 
 /// Everything the server serves: the active project and its semantic index,
-/// reconciled at startup (reconcile-on-start is the freshness model; there
-/// are no live change notifications in v1).
+/// reconciled at startup **and after every mutating tool** — a written or
+/// deleted concept is visible to `search`/`search_rules` in the same
+/// session, with no restart and no staleness window.
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     /// The active argosys: one local (writable) plus imported (read-only).
     pub context: ProjectContext,
@@ -141,7 +142,8 @@ pub struct UriContent {
 /// A mutating tool's machine-readable summary: what changed and where.
 #[derive(Debug, Clone, Serialize)]
 pub struct WriteReport {
-    /// `"written"` or `"deleted"`.
+    /// `"created"`, `"updated"`, or `"deleted"` — an update replaced
+    /// existing content, so callers know a prior version existed.
     pub action: &'static str,
     /// The affected `argosy://` URI.
     #[serde(rename = "uri")]
@@ -149,6 +151,15 @@ pub struct WriteReport {
     /// Bytes written; omitted for deletions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// True iff the semantic index was reconciled after the mutation: the
+    /// change is already visible to `search`. False means the write is on
+    /// disk but not yet indexed — see `index_error`.
+    pub indexed: bool,
+    /// Why reconciliation failed (embedding model unavailable, store
+    /// error); present only when `indexed` is false, phrased for an agent
+    /// to act on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
 }
 
 /// The `promote` tool outcome: the untouched source plus the drafted
@@ -166,6 +177,11 @@ pub struct PromoteReport {
     pub new_uri: String,
     /// Raw markdown of the drafted concept — present this for review.
     pub drafted: String,
+    /// True iff the semantic index was reconciled after the promotion.
+    pub indexed: bool,
+    /// Why reconciliation failed; present only when `indexed` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
 }
 
 /// The verified tier of a concept: its `verified` frontmatter value (string
@@ -182,11 +198,27 @@ fn verified_tier(concept: &Concept) -> String {
 
 impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     /// Builds server state over an already-opened context and index. The
-    /// caller is responsible for running [`Index::reconcile`] first (the CLI's
-    /// `mcp` verb does), so the server answers with a fresh index rather than
-    /// trusting staleness.
+    /// caller normally runs [`Index::reconcile`] first (the CLI's `mcp`
+    /// verb does), and every mutating tool re-reconciles before returning —
+    /// so the served index tracks the local argosy continuously.
     pub fn new(context: ProjectContext, index: Index<P, S>) -> Self {
         Self { context, index }
+    }
+
+    /// Brings the index back in line with disk after a mutation. The write
+    /// itself already succeeded, so a failure here is *reported*, never
+    /// fatal: `Ok(())` means searchable now, `Err` text goes to the
+    /// caller's report as `index_error`.
+    fn reindex(&mut self) -> std::result::Result<(), String> {
+        self.index
+            .reconcile(&self.context)
+            .map(|_| ())
+            .map_err(|err| {
+                format!(
+                    "{err:#}; the change is on disk but not yet indexed — \
+                     retry after fixing (e.g. run `argosy index build`)"
+                )
+            })
     }
 
     fn hit_out(hit: crate::index::SearchHit) -> SearchHitOut {
@@ -320,44 +352,64 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// Writes a memory concept (full markdown with frontmatter) to the local
-    /// argosy. Imported argosys are read-only and unreachable here by
+    /// argosy, then reconciles the index so the concept is immediately
+    /// searchable. Overwrites are the deliberate edit path — the report's
+    /// `action` says `"updated"` so silent destruction is never silent.
+    /// Imported argosys are read-only and unreachable here by
     /// construction: the local argosy is the only write target.
-    pub fn write_memory(&self, params: WriteParams) -> Result<WriteReport> {
+    pub fn write_memory(&mut self, params: WriteParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
         let concept = parse_concept(&params.content)?;
+        let existed = self.existed(&id);
         self.context.local().write_memory(&id, &concept)?;
-        Ok(self.written_report(params.path, params.content.len()))
+        let action = if existed { "updated" } else { "created" };
+        Ok(self.written_report(action, params.path, params.content.len()))
     }
 
-    /// Deletes a memory concept from the local argosy.
-    pub fn delete_memory(&self, params: ReadPathParams) -> Result<WriteReport> {
+    /// Deletes a memory concept from the local argosy, then reconciles the
+    /// index so the deletion is immediately reflected in search.
+    pub fn delete_memory(&mut self, params: ReadPathParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
         self.context.local().delete_memory(&id)?;
         Ok(self.deleted_report(params.path))
     }
 
     /// Writes a styleguide rule to the local argosy, enabling user rule
-    /// extension. The namespace contract is validated
-    /// by the library before anything touches disk.
-    pub fn write_rule(&self, params: WriteParams) -> Result<WriteReport> {
+    /// extension, then reconciles the index. The namespace contract is
+    /// validated by the library before anything touches disk.
+    pub fn write_rule(&mut self, params: WriteParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
         let concept = parse_concept(&params.content)?;
+        let existed = self.existed(&id);
         self.context.local().write_rule(&id, &concept)?;
-        Ok(self.written_report(params.path, params.content.len()))
+        let action = if existed { "updated" } else { "created" };
+        Ok(self.written_report(action, params.path, params.content.len()))
     }
 
-    /// Deletes a styleguide rule from the local argosy.
-    pub fn delete_rule(&self, params: ReadPathParams) -> Result<WriteReport> {
+    /// Deletes a styleguide rule from the local argosy, then reconciles
+    /// the index.
+    pub fn delete_rule(&mut self, params: ReadPathParams) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
         self.context.local().delete_rule(&id)?;
         Ok(self.deleted_report(params.path))
     }
 
-    /// Promotes a memory concept to a curated target. The
+    /// True iff a concept file already exists at `id` — distinguishes
+    /// `created` from `updated` in write reports.
+    fn existed(&self, id: &ConceptId) -> bool {
+        self.context
+            .local()
+            .root()
+            .join(id.to_relative_path())
+            .is_file()
+    }
+
+    /// Promotes a memory concept to a curated target, then reconciles the
+    /// index so the new concept is immediately searchable. The
     /// outcome carries the untouched source and the drafted concept for the
     /// client's confirmation step: the *client* decides whether the
     /// draft stands; this call is the hook, not the decision.
-    pub fn promote(&self, params: PromoteParams) -> Result<PromoteReport> {
+    pub fn promote(&mut self, params: PromoteParams) -> Result<PromoteReport> {
         let source = concept_id(&params.source_path)?;
         let new_id = concept_id(&params.new_path)?;
         let target = match params.target {
@@ -375,6 +427,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
             &new_id,
             params.description.as_deref(),
         )?;
+        let index_result = self.reindex();
         Ok(PromoteReport {
             source_uri: format!("argosy://{name}/{}", params.source_path),
             source_content,
@@ -384,24 +437,30 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
             },
             new_uri: format!("argosy://{name}/{}", params.new_path),
             drafted: promotion.drafted.to_string(),
+            indexed: index_result.is_ok(),
+            index_error: index_result.err(),
         })
     }
 
-    fn written_report(&self, path: String, bytes: usize) -> WriteReport {
-        let name = self.context.local().manifest().name();
+    fn written_report(&mut self, action: &'static str, path: String, bytes: usize) -> WriteReport {
+        let index_result = self.reindex();
         WriteReport {
-            action: "written",
-            uri: format!("argosy://{name}/{path}"),
+            action,
+            uri: format!("argosy://{}/{path}", self.context.local().manifest().name()),
             bytes: Some(bytes as u64),
+            indexed: index_result.is_ok(),
+            index_error: index_result.err(),
         }
     }
 
-    fn deleted_report(&self, path: String) -> WriteReport {
-        let name = self.context.local().manifest().name();
+    fn deleted_report(&mut self, path: String) -> WriteReport {
+        let index_result = self.reindex();
         WriteReport {
             action: "deleted",
-            uri: format!("argosy://{name}/{path}"),
+            uri: format!("argosy://{}/{path}", self.context.local().manifest().name()),
             bytes: None,
+            indexed: index_result.is_ok(),
+            index_error: index_result.err(),
         }
     }
 
@@ -761,31 +820,31 @@ mod rmcp_impl {
             ),
             tool::<WriteParams>(
                 "write_memory",
-                "Writes a memory concept (full markdown with frontmatter) to the local argosy; imported argosys are read-only and cannot be written. Use it to persist a session learning so future sessions can find it via search.",
+                "Writes a memory concept (full markdown with frontmatter) to the local argosy; imported argosys are read-only and cannot be written. Use it to persist a session learning so future sessions can find it via search. The index is reconciled on every write, so the concept is immediately searchable; writing over an existing path updates it (the report says which happened).",
                 false,
                 false,
             ),
             tool::<ReadPathParams>(
                 "delete_memory",
-                "Deletes a memory concept from the local argosy by bundle-relative path; imported argosys are read-only. Use it to remove a learning that is wrong or obsolete.",
+                "Deletes a memory concept from the local argosy by bundle-relative path; imported argosys are read-only. Use it to remove a learning that is wrong or obsolete. The index is reconciled on every delete, so the concept disappears from search immediately.",
                 false,
                 true,
             ),
             tool::<WriteParams>(
                 "write_rule",
-                "Writes a styleguide rule (type: Styleguide Rule, with description) to the local argosy, extending the rule set; imported argosys are read-only. Use it to codify a convention the project wants enforced.",
+                "Writes a styleguide rule (type: Styleguide Rule, with description) to the local argosy, extending the rule set; imported argosys are read-only. Use it to codify a convention the project wants enforced. The index is reconciled on every write, so the rule is immediately searchable; writing over an existing path updates it (the report says which happened).",
                 false,
                 false,
             ),
             tool::<ReadPathParams>(
                 "delete_rule",
-                "Deletes a styleguide rule from the local argosy by bundle-relative path; imported argosys are read-only. Use it to retire a rule the project no longer wants.",
+                "Deletes a styleguide rule from the local argosy by bundle-relative path; imported argosys are read-only. Use it to retire a rule the project no longer wants. The index is reconciled on every delete, so the rule disappears from search immediately.",
                 false,
                 true,
             ),
             tool::<PromoteParams>(
                 "promote",
-                "Promotes a memory concept into the curated document/ or styleguide/ namespace of the local argosy, returning the source content and the drafted concept for your confirmation (the client confirms, the server never does). Use it when a session learning has graduated to project knowledge.",
+                "Promotes a memory concept into the curated document/ or styleguide/ namespace of the local argosy, returning the source content and the drafted concept for your confirmation (the client confirms, the server never does). The index is reconciled after promotion, so the new concept is immediately searchable. Use it when a session learning has graduated to project knowledge.",
                 false,
                 false,
             ),
@@ -941,8 +1000,9 @@ mod rmcp_impl {
             let name: String = request.name.into_owned();
             let lock = Arc::clone(&self.state);
             async move {
-                let state = lock.lock().await;
-                let state = &*state;
+                // Mutating tools take `&mut self` (they reconcile the index
+                // after writing); read tools borrow through the same guard.
+                let state = &mut *lock.lock().await;
                 let known = match name.as_str() {
                     "search" => Some(dispatch!(state, args, search : SearchParams)),
                     "list_skills" => Some(match state.list_skills() {
@@ -1034,36 +1094,14 @@ mod rmcp_impl {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use tempfile::TempDir;
 
     use super::*;
+    use crate::LocalArgosy;
     use crate::context::ProjectContext;
     use crate::index::tests::{MemStore, MockEmbedder};
-
-    /// Copies a shared fixture into a fresh tempdir — tests must never
-    /// mutate `tests/fixtures/` directly.
-    fn fixture_copy(name: &str) -> TempDir {
-        fn copy_dir_all(src: &Path, dst: &Path) {
-            for entry in fs::read_dir(src).unwrap() {
-                let entry = entry.unwrap();
-                let to = dst.join(entry.file_name());
-                if entry.file_type().unwrap().is_dir() {
-                    fs::create_dir_all(&to).unwrap();
-                    copy_dir_all(&entry.path(), &to);
-                } else {
-                    fs::copy(entry.path(), to).unwrap();
-                }
-            }
-        }
-        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(name);
-        let dst = tempfile::tempdir().unwrap();
-        copy_dir_all(&src, dst.path());
-        dst
-    }
+    use crate::testutil::fixture_copy;
 
     /// An imported argosy named `acme-shared` with one verified skill.
     fn import_fixture() -> TempDir {
@@ -1106,8 +1144,6 @@ mod tests {
             state: McpState::new(context, index),
         }
     }
-
-    use crate::LocalArgosy;
 
     // --- resources ---
 
@@ -1498,7 +1534,7 @@ mod tests {
 
     #[test]
     fn write_and_read_memory_round_trip() {
-        let rig = rig();
+        let mut rig = rig();
         let content = "---\ntype: Session Note\ndescription: learned\n---\n# N\n\nBody.\n";
         let out = rig
             .state
@@ -1508,8 +1544,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(out.uri, "argosy://acme-billing/memory/rust-internals");
-        assert_eq!(out.action, "written");
+        assert_eq!(out.action, "created");
         assert_eq!(out.bytes, Some(content.len() as u64));
+        assert!(out.indexed, "write reconciles the index: {out:?}");
+        assert!(out.index_error.is_none());
 
         let read = rig
             .state
@@ -1524,9 +1562,159 @@ mod tests {
         assert!(local_root.join("memory/rust-internals.md").is_file());
     }
 
+    /// The staleness regression: a concept written through the MCP surface
+    /// is findable via search in the SAME session, no restart. A deleted
+    /// one disappears immediately.
+    #[test]
+    fn write_then_search_and_delete_then_search_are_immediately_visible() {
+        let mut rig = rig();
+        let content = "---\ntype: Session Note\ndescription: Zinc whisker relay failures.\n---\n\
+             Zinc whiskers bridge relays after humid summers.\n";
+        let out = rig
+            .state
+            .write_memory(WriteParams {
+                path: "memory/zinc-whiskers".to_string(),
+                content: content.to_string(),
+            })
+            .unwrap();
+        assert!(out.indexed, "the write reconciled the index");
+
+        let report = rig
+            .state
+            .search(SearchParams {
+                query: "zinc whisker relay failures".to_string(),
+                k: Some(10),
+                namespaces: Some(vec!["memory".to_string()]),
+                argosy: None,
+                tags: None,
+                r#type: None,
+                language: None,
+                category: None,
+            })
+            .unwrap();
+        assert!(
+            report
+                .hits
+                .iter()
+                .any(|h| h.uri.ends_with("memory/zinc-whiskers")),
+            "the fresh write is searchable now, got {:?}",
+            report.hits
+        );
+
+        let out = rig
+            .state
+            .delete_memory(ReadPathParams {
+                path: "memory/zinc-whiskers".to_string(),
+            })
+            .unwrap();
+        assert!(out.indexed);
+        let report = rig
+            .state
+            .search(SearchParams {
+                query: "zinc whisker relay failures".to_string(),
+                k: Some(10),
+                namespaces: Some(vec!["memory".to_string()]),
+                argosy: None,
+                tags: None,
+                r#type: None,
+                language: None,
+                category: None,
+            })
+            .unwrap();
+        assert!(
+            report
+                .hits
+                .iter()
+                .all(|h| !h.uri.ends_with("memory/zinc-whiskers")),
+            "the deletion is reflected now, got {:?}",
+            report.hits
+        );
+    }
+
+    /// An update must say `updated` — silent destruction is never silent.
+    #[test]
+    fn rewriting_an_existing_concept_reports_updated_not_created() {
+        let mut rig = rig();
+        let first = "---\ntype: Session Note\ndescription: one\n---\nOne.\n";
+        let out = rig
+            .state
+            .write_memory(WriteParams {
+                path: "memory/overwrite-me".to_string(),
+                content: first.to_string(),
+            })
+            .unwrap();
+        assert_eq!(out.action, "created");
+
+        let second = "---\ntype: Session Note\ndescription: two\n---\nTwo.\n";
+        let out = rig
+            .state
+            .write_memory(WriteParams {
+                path: "memory/overwrite-me".to_string(),
+                content: second.to_string(),
+            })
+            .unwrap();
+        assert_eq!(out.action, "updated", "the prior version existed");
+        assert!(out.indexed);
+    }
+
+    /// The degraded path (M1): when the embedding model is unavailable,
+    /// a write still succeeds on disk and the report says `indexed:
+    /// false` with an actionable error — the write is never lost and
+    /// never reported as fully successful.
+    #[test]
+    fn write_with_a_failing_embedder_still_writes_and_reports_not_indexed() {
+        use crate::index::Index;
+        use crate::index::tests::MemStore;
+
+        /// A provider whose embed always fails — the "model unavailable"
+        /// double.
+        struct FailingEmbedder;
+
+        impl crate::index::EmbeddingProvider for FailingEmbedder {
+            fn model_id(&self) -> &str {
+                "failing@1"
+            }
+            fn dimensions(&self) -> usize {
+                8
+            }
+            fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Err(Error::Index {
+                    reason: "embedding model unavailable (test double)".to_string(),
+                })
+            }
+        }
+
+        let local = fixture_copy("valid-acme-billing");
+        let context = ProjectContext::open(local.path(), []).unwrap();
+        let index = Index::new(FailingEmbedder, MemStore::new());
+        let mut state = McpState::new(context, index);
+
+        let content = "---\ntype: Session Note\ndescription: offline write.\n---\nBody.\n";
+        let out = state
+            .write_memory(WriteParams {
+                path: "memory/offline-write".to_string(),
+                content: content.to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(out.action, "created");
+        assert!(!out.indexed, "reconcile could not embed");
+        let note = out.index_error.expect("the failure is explained");
+        assert!(note.contains("not yet indexed"), "got {note}");
+        // The write itself stands on disk.
+        assert!(
+            state
+                .context
+                .local()
+                .root()
+                .join("memory/offline-write.md")
+                .is_file()
+        );
+    }
+
     #[test]
     fn write_memory_rejects_reserved_and_escape_paths() {
-        let rig = rig();
+        let mut rig = rig();
         rig.state
             .write_memory(WriteParams {
                 path: "../escape".to_string(),
@@ -1549,7 +1737,7 @@ mod tests {
 
     #[test]
     fn delete_memory_removes_the_concept() {
-        let rig = rig();
+        let mut rig = rig();
         let out = rig
             .state
             .delete_memory(ReadPathParams {
@@ -1557,6 +1745,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(out.action, "deleted");
+        assert!(out.indexed);
         rig.state
             .read_memory(ReadPathParams {
                 path: "memory/gotchas".to_string(),
@@ -1571,7 +1760,7 @@ mod tests {
 
     #[test]
     fn write_and_delete_rule_with_contract_checks() {
-        let rig = rig();
+        let mut rig = rig();
         let rule = "---\n\
              type: Styleguide Rule\n\
              description: Prefer sleep over polling.\n\
@@ -1586,7 +1775,8 @@ mod tests {
                 content: rule.to_string(),
             })
             .unwrap();
-        assert_eq!(out.action, "written");
+        assert_eq!(out.action, "created");
+        assert!(out.indexed);
 
         // STG-3: a rule without a description is refused by the library.
         let err = rig
@@ -1608,13 +1798,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(out.action, "deleted");
+        assert!(out.indexed);
     }
 
     // --- promote (confirmation hook) ---
 
     #[test]
     fn promote_to_document_returns_source_and_draft_untouched_source() {
-        let rig = rig();
+        let mut rig = rig();
         let before = rig
             .state
             .read_memory(ReadPathParams {
@@ -1634,6 +1825,7 @@ mod tests {
         assert_eq!(out.target, "document");
         assert_eq!(out.source_uri, "argosy://acme-billing/memory/gotchas");
         assert_eq!(out.source_content, before, "source content reported as-is");
+        assert!(out.indexed, "promotion reconciles the index");
         assert_eq!(
             out.new_uri,
             "argosy://acme-billing/document/processor-gotchas"
@@ -1656,7 +1848,7 @@ mod tests {
 
     #[test]
     fn promote_to_styleguide_requires_a_description() {
-        let rig = rig();
+        let mut rig = rig();
         let err = rig
             .state
             .promote(PromoteParams {
@@ -1683,5 +1875,6 @@ mod tests {
         assert_eq!(out.target, "styleguide");
         assert!(out.drafted.contains("type: Styleguide Rule"));
         assert!(out.drafted.contains("original timestamp"));
+        assert!(out.indexed);
     }
 }

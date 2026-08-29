@@ -298,31 +298,6 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
     }
 }
 
-// --- HTTP transport smoke (no request traffic) -----------------------------
-
-/// The `--transport http` stack composes, and a bind to an occupied address
-/// fails as an error (the CLI surfaces it as `failed to bind...` + exit 1).
-#[tokio::test]
-async fn http_bind_to_a_used_port_fails_gracefully() {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-    };
-
-    let rig = rig();
-    let server = ArgosyMcpServer::new(rig.state);
-    let service = StreamableHttpService::new(
-        move || Ok(server.clone()),
-        std::sync::Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-    let _router: axum::Router = axum::Router::new().nest_service("/mcp", service);
-
-    let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = first.local_addr().unwrap();
-    let err = tokio::net::TcpListener::bind(addr).await.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
-}
-
 // --- End-to-end over an in-process duplex ---------------------------------
 
 fn call(name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolRequestParams {
@@ -409,7 +384,8 @@ async fn end_to_end_over_in_process_duplex() {
         "qualified hits, got {search}"
     );
 
-    // write_memory → read_memory verifies the write round trips.
+    // write_memory → read_memory verifies the write round trips, and the
+    // same-session search sees it (the index reconciles on every write).
     let content = "---\ntype: Session Note\ndescription: e2e\n---\n# E2E\n\nBody.\n";
     let written = complete(
         client
@@ -423,10 +399,30 @@ async fn end_to_end_over_in_process_duplex() {
             .await
             .unwrap(),
     );
-    assert_eq!(
-        structured(&written)["uri"],
-        "argosy://acme-billing/memory/e2e-note"
+    let written = structured(&written);
+    assert_eq!(written["uri"], "argosy://acme-billing/memory/e2e-note");
+    assert_eq!(written["action"], "created");
+    assert_eq!(written["indexed"], true, "the write reconciled the index");
+
+    let fresh = complete(
+        client
+            .call_tool_once(call(
+                "search",
+                serde_json::json!({"query": "e2e note body", "namespaces": ["memory"]}),
+            ))
+            .await
+            .unwrap(),
     );
+    let fresh = structured(&fresh);
+    assert!(
+        fresh["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["uri"].as_str().unwrap().ends_with("memory/e2e-note")),
+        "the fresh write is searchable in the same session, got {fresh}"
+    );
+
     let read_back = complete(
         client
             .call_tool_once(call(

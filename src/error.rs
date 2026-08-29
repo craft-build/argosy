@@ -50,6 +50,12 @@ pub enum Error {
     #[snafu(display("{reason}"))]
     Validation { reason: String },
 
+    /// Serving infrastructure failed (async runtime startup, transport
+    /// handshake, serve loop) — distinct from validation so callers can
+    /// tell "bad input" from "the server could not run".
+    #[snafu(display("transport error: {reason}"))]
+    Transport { reason: String },
+
     /// A write or promotion targeted a concept id that already exists; the
     /// library never overwrites silently except through the deliberate
     /// `write_concept` edit path.

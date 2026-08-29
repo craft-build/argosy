@@ -150,10 +150,23 @@ impl Concept {
         format!("---\n{yaml}---\n{}", self.body)
     }
 
-    /// Writes the serialized concept to a file.
+    /// Writes the serialized concept to a file, crash-atomically: the
+    /// content is staged to a sibling temp file and renamed into place, so
+    /// a crash mid-write can never leave a truncated concept where a valid
+    /// one stood. The same-directory rename also replaces an existing
+    /// target atomically (the deliberate edit path).
     pub fn to_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        std::fs::write(path, self.to_string()).context(IoSnafu {
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        let mut tmp_name = file_name.clone();
+        tmp_name.push(format!(".tmp-{}", std::process::id()));
+        let tmp = path.with_file_name(tmp_name);
+        let write =
+            std::fs::write(&tmp, self.to_string()).and_then(|()| std::fs::rename(&tmp, path));
+        write.context(IoSnafu {
             path: path.to_path_buf(),
         })
     }

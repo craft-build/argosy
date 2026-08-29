@@ -78,6 +78,66 @@ impl FastembedProvider {
     }
 }
 
+/// A [`FastembedProvider`] that defers model construction — and the
+/// first-run ~90 MB download — to the first [`EmbeddingProvider::embed`]
+/// call. Identity and dimensionality derive from static metadata, so
+/// hash-diff reconcile and `index status`-style previews never load the
+/// model: a serving process (the MCP server) starts instantly and works
+/// fully offline except for embedding-dependent operations, which fail
+/// with an actionable hint instead of taking the whole server down.
+pub struct LazyFastembedProvider {
+    model_id: String,
+    dimensions: usize,
+    model: Mutex<Option<FastembedProvider>>,
+}
+
+impl LazyFastembedProvider {
+    /// A lazy provider over [`FastembedProvider::DEFAULT_MODEL`]. Never
+    /// downloads or constructs anything until the first `embed`.
+    pub fn new_default() -> Result<Self> {
+        Ok(Self {
+            model_id: FastembedProvider::default_model_id()?,
+            dimensions: TextEmbedding::get_model_info(&FastembedProvider::DEFAULT_MODEL)
+                .context(EmbeddingSnafu)?
+                .dim,
+            model: Mutex::new(None),
+        })
+    }
+}
+
+impl EmbeddingProvider for LazyFastembedProvider {
+    fn model_id(&self) -> &str {
+        // Static metadata: no model load, works offline.
+        &self.model_id
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut slot = self.model.lock().map_err(|_| -> crate::error::Error {
+            IndexSnafu {
+                reason: "fastembed model mutex poisoned by a panicking caller".to_string(),
+            }
+            .build()
+        })?;
+        if slot.is_none() {
+            let provider = FastembedProvider::new_default().map_err(|source| {
+                IndexSnafu {
+                    reason: format!(
+                        "embedding model unavailable: {source}; run `argosy index build` \
+                         once while online to download it (~90 MB), then retry"
+                    ),
+                }
+                .build()
+            })?;
+            *slot = Some(provider);
+        }
+        slot.as_ref().expect("populated above").embed(texts)
+    }
+}
+
 impl EmbeddingProvider for FastembedProvider {
     fn model_id(&self) -> &str {
         &self.model_id
