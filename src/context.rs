@@ -198,39 +198,49 @@ impl ProjectContext {
         &self.local
     }
 
-    /// Opens the standard argosy set of a project: the local bundle at
-    /// `<project>/.argosy/default`, other checkouts in `<project>/.argosy/`,
-    /// then the global store ([`crate::pull::global_argosy_dir`]).
-    /// Manifest-less directories and `index.db` are skipped; duplicates
-    /// hard-fail; a missing `.argosy/default` points at `argosy init`.
+    /// Opens the standard argosy set of a project: the local bundle and
+    /// any pulled checkouts under the project's directory in the user's
+    /// argosy state dir ([`crate::pull::project_argosy_dir`] — outside the
+    /// project tree), then the global store
+    /// ([`crate::pull::global_argosy_dir`]). Manifest-less directories
+    /// and `index.db` are skipped; duplicates hard-fail; a missing
+    /// `default` points at `argosy init`.
     pub fn open_project(project_root: impl AsRef<Path>) -> Result<Self> {
-        let globals = crate::pull::global_argosy_dir()?;
-        Self::open_project_with_globals(project_root, &globals)
+        let state = crate::pull::state_dir()?;
+        Self::open_project_with_state(project_root, &state)
     }
 
-    /// [`Self::open_project`] with an explicit globals tier (hosts and
-    /// tests inject a tempdir instead of touching `~/.local/state`).
-    pub fn open_project_with_globals(
+    /// [`Self::open_project`] with an explicit state root (hosts and
+    /// tests inject a tempdir instead of touching `~/.local/state`): the
+    /// project's checkouts come from `<state_root>/projects/<slug>`, the
+    /// globals from `<state_root>/global`.
+    pub fn open_project_with_state(
         project_root: impl AsRef<Path>,
-        globals_root: &Path,
+        state_root: &Path,
     ) -> Result<Self> {
-        let project_dir = project_root.as_ref().join(crate::pull::PROJECT_ARGOSY_DIR);
-        // Everything under the project dir that is a bundle (a directory
-        // holding `argosy.md`), in sorted order, minus the local checkout.
+        let project_dir = crate::pull::project_argosy_dir_at(state_root, project_root);
+        // Everything under the project's state dir that is a bundle (a
+        // directory holding `argosy.md`), in sorted order, minus the
+        // local checkout.
         let mut imported = Vec::new();
         collect_checkouts(
             &project_dir,
             Some(crate::pull::LOCAL_ARGOSY_NAME),
             &mut imported,
         );
-        collect_checkouts(globals_root, None, &mut imported);
+        collect_checkouts(&state_root.join("global"), None, &mut imported);
 
         let local = project_dir.join(crate::pull::LOCAL_ARGOSY_NAME);
         ensure!(
             local.join("argosy.md").is_file(),
             NotAnArgosySnafu {
-                path: project_dir.clone(),
-                reason: "no `.argosy/default` bundle for this project (run `argosy init`)"
+                path: local.clone(),
+                reason: format!(
+                    "no local `{}` argosy for this project under {} — run `argosy init` in \
+                     the project root (argosys live in the state dir, outside the project tree)",
+                    crate::pull::LOCAL_ARGOSY_NAME,
+                    project_dir.display()
+                )
             }
         );
         Self::open(local, imported)
@@ -445,47 +455,41 @@ mod tests {
 
     // --- open_project discovery ---
 
-    /// A project layout: `.argosy/<names>` (the local one must be named
-    /// `default`), plus a separate globals root with its own argosies.
+    /// A project plus its state layout: checkouts under
+    /// `<state>/projects/<slug>` (the local one named `default`), globals
+    /// under `<state>/global`.
     fn project_layout(names: &[&str], globals: &[&str]) -> (TempDir, TempDir) {
         let project = TempDir::new().unwrap();
-        let project_dir = project.path().join(crate::pull::PROJECT_ARGOSY_DIR);
+        let state = TempDir::new().unwrap();
+        let project_dir = crate::pull::project_argosy_dir_at(state.path(), project.path());
         for name in names {
             let manifest = format!(
                 "---\ntype: Argosy Manifest\nname: proj-{name}\nargosy_version: \"1.0.0\"\n---\n# proj-{name}\n"
             );
             write_file(&project_dir.join(name), "argosy.md", &manifest);
         }
-        let globals_root = TempDir::new().unwrap();
         for name in globals {
             let manifest = format!(
                 "---\ntype: Argosy Manifest\nname: global-{name}\nargosy_version: \"1.0.0\"\n---\n# global-{name}\n"
             );
-            write_file(&globals_root.path().join(name), "argosy.md", &manifest);
+            write_file(
+                &state.path().join("global").join(name),
+                "argosy.md",
+                &manifest,
+            );
         }
-        (project, globals_root)
+        (project, state)
     }
 
     #[test]
     fn open_project_loads_default_children_and_globals_in_precedence_order() {
-        let (project, globals) = project_layout(&["default", "beta", "alpha"], &["extra"]);
+        let (project, state) = project_layout(&["default", "beta", "alpha"], &["extra"]);
         // Non-checkout noise that discovery must ignore.
-        write_file(
-            &project.path().join(crate::pull::PROJECT_ARGOSY_DIR),
-            "index.db",
-            "not a directory",
-        );
-        write_file(
-            &project
-                .path()
-                .join(crate::pull::PROJECT_ARGOSY_DIR)
-                .join("notado"),
-            "argosy.notmd",
-            "x",
-        );
+        let project_dir = crate::pull::project_argosy_dir_at(state.path(), project.path());
+        write_file(&project_dir, "index.db", "not a directory");
+        write_file(&project_dir.join("notado"), "argosy.notmd", "x");
 
-        let ctx =
-            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap();
+        let ctx = ProjectContext::open_project_with_state(project.path(), state.path()).unwrap();
 
         assert_eq!(ctx.local().manifest().name(), "proj-default");
         let imported: Vec<&str> = ctx.imported().map(|a| a.manifest().name()).collect();
@@ -498,27 +502,63 @@ mod tests {
 
     #[test]
     fn open_project_without_default_points_at_init() {
-        let (project, globals) = project_layout(&["beta"], &[]);
+        let (project, state) = project_layout(&["beta"], &[]);
         let err =
-            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap_err();
+            ProjectContext::open_project_with_state(project.path(), state.path()).unwrap_err();
         assert!(
-            err.to_string().contains(".argosy/default") && err.to_string().contains("argosy init"),
+            err.to_string().contains("argosy init") && err.to_string().contains("default"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
     fn open_project_rejects_duplicate_manifest_names_across_tiers() {
-        let (project, globals) = project_layout(&["default"], &[]);
+        let (project, state) = project_layout(&["default"], &[]);
         // A global with the same manifest name as the local default.
         write_file(
-            &globals.path().join("rogue"),
+            &state.path().join("global/rogue"),
             "argosy.md",
             "---\ntype: Argosy Manifest\nname: proj-default\nargosy_version: \"1.0.0\"\n---\n# rogue\n",
         );
         let err =
-            ProjectContext::open_project_with_globals(project.path(), globals.path()).unwrap_err();
+            ProjectContext::open_project_with_state(project.path(), state.path()).unwrap_err();
         assert!(err.to_string().contains("proj-default"), "{err}");
+    }
+
+    #[test]
+    fn same_named_projects_get_isolated_state_dirs() {
+        // The slug hashes the absolute path, so two `craft` directories
+        // never share storage — each opens its own local bundle.
+        let state = TempDir::new().unwrap();
+        let mut guards = Vec::new();
+        let mut locals = Vec::new();
+        for parent in ["one", "two"] {
+            let project = TempDir::new().unwrap();
+            let dir = project.path().join(parent).join("craft");
+            fs::create_dir_all(&dir).unwrap();
+            write_file(
+                &crate::pull::project_argosy_dir_at(state.path(), &dir).join("default"),
+                "argosy.md",
+                &format!(
+                    "---\ntype: Argosy Manifest\nname: craft-{parent}\nargosy_version: \"1.0.0\"\n---\n# craft\n"
+                ),
+            );
+            locals.push((dir, format!("craft-{parent}")));
+            guards.push(project);
+        }
+        for (dir, name) in &locals {
+            let ctx = ProjectContext::open_project_with_state(dir, state.path()).unwrap();
+            assert_eq!(ctx.local().manifest().name(), name);
+        }
+        let slugs: Vec<String> = locals
+            .iter()
+            .map(|(dir, _)| crate::pull::project_slug(dir))
+            .collect();
+        assert_ne!(slugs[0], slugs[1], "same-named projects collide: {slugs:?}");
+        // Both live under one state root, side by side.
+        for slug in &slugs {
+            assert!(state.path().join("projects").join(slug).is_dir());
+        }
     }
 
     const SKILL_DEPLOY: &str =

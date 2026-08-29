@@ -10,7 +10,7 @@
 
 ## 1. Context
 
-The MCP server makes argosys usable by any MCP-compatible harness without embedding Rust: it is launched from the project's working directory, discovers the standard argosy set itself (`.argosy/default` local, `.argosy/<name>` checkouts, then the global user store), performs validation/index-reconcile/activation internally (life-cycle §11 steps 1–4), and exposes the result as MCP Tools and Resources (reference doc §3.1). Transport: **stdio default**, HTTP secondary (reference doc §3.3).
+The MCP server makes argosys usable by any MCP-compatible harness without embedding Rust: every tool call names its project with `cwd` (the project root); the server discovers the standard argosy set itself — the project's `default` local bundle and other checkouts under its slot in the XDG state dir, then the global user store — performs validation/index-reconcile/activation internally (life-cycle §11 steps 1–4), and exposes the result as MCP Tools and Resources (reference doc §3.1). Transport: **stdio default**, HTTP secondary (reference doc §3.3).
 
 The implementation is a translation layer: every tool/resource handler is a thin adapter over `ProjectContext`, `LocalArgosy`, `Index`, and the doc 05 `argosy://` URI support. Any logic that isn't MCP-shaped (serialization, schema, dispatch) belongs in the library — same discipline as doc 09.
 
@@ -21,7 +21,7 @@ The implementation is a translation layer: every tool/resource handler is a thin
 ### 2.1 Command and features
 
 - `argosy mcp [--transport stdio|http] [--bind 127.0.0.1:PORT]`
-  - No argosy-selection flags: the server loads the standard set discovered from its working directory — exactly what `index build` indexes — via `ProjectContext::open_project`: the local bundle at `.argosy/default`, every other checkout in `.argosy/<name>`, then every argosy in the global user store, in that precedence order. (Requiring a `--project-root` pointing at one argosy would defeat the server's purpose: one flag to keep in sync per launch, and imported argosys invisible.)
+  - No argosy-selection flags: every tool call carries `cwd` (the project root) and the server loads the standard set discovered from it — exactly what `index build` indexes — via `ProjectContext::open_project`: the local `default` bundle, every other checkout in the project's state-dir slot, then every argosy in the global user store, in that precedence order. (Requiring a `--project-root` pointing at one argosy would defeat the server's purpose: one flag to keep in sync per launch, and imported argosys invisible.)
   - Opens `ProjectContext`, builds the default backend, runs reconcile (so the server answers with a fresh index rather than trusting staleness — §11 step 3), then serves.
 - Cargo feature `mcp` (default on) gates `rmcp`; `--no-default-features` library builds stay rmcp-free (doc 00 §4). New dependencies: `rmcp` (latest stable; pin minimal features: `server`, stdio; `transport-streamable-http-server` or the SDK's current HTTP server transport for the secondary mode), `tokio` (rt-multi-thread, macros — binary only).
 - Startup failures (invalid argosy, unbuildable index) print a human-readable error to stderr and exit `1` before the transport starts — never serve a half-broken context.

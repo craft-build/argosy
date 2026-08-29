@@ -10,14 +10,14 @@
 
 ## 1. Context
 
-Doc 06 defined the capability traits and the reconcile/query engine with in-memory doubles. This chunk ships the **default backend** the binary and MCP server actually run (locked decisions, doc 00 §3): `sqlite-vec` for the store — one `.argosy/index.db` file beside the markdown, SQL covering the `IDX-9` structured-filter half — and `fastembed` (local ONNX) for embeddings, satisfying "no network dependency required to be useful out of the box" (reference doc §2.1). Both live behind the doc 06 traits and the `default-index` Cargo feature (default on), so library consumers with their own stack pay nothing.
+Doc 06 defined the capability traits and the reconcile/query engine with in-memory doubles. This chunk ships the **default backend** the binary and MCP server actually run (locked decisions, doc 00 §3): `sqlite-vec` for the store — one `index.db` file in the project's state-dir slot (relocated there 2026-08-29 so argosy data never sits in the project tree; originally `<project-root>/.argosy/index.db`), SQL covering the `IDX-9` structured-filter half — and `fastembed` (local ONNX) for embeddings, satisfying "no network dependency required to be useful out of the box" (reference doc §2.1). Both live behind the doc 06 traits and the `default-index` Cargo feature (default on), so library consumers with their own stack pay nothing.
 
 ## 2. Requirements
 
 ### 2.1 Where the index lives
 
-- Default path: `<project-root>/.argosy/index.db` — derived artifact next to the bundle, per the locked decision (doc 00 §3). `SqliteVecStore::open(path)` creates parent dirs and the schema on first use.
-- The index directory is **not bundle content**: doc 02 already ignores `.argosy/` during validation/walking; doc 08 packaging excludes it. Restate this in module docs.
+- Default path: `<state>/projects/<slug>/index.db` under the user's argosy state dir (`pull::project_argosy_dir`; relocated 2026-08-29, originally `<project-root>/.argosy/index.db`) — a derived artifact, never inside the project tree. `SqliteVecStore::open(path)` creates parent dirs and the schema on first use.
+- The index is **not bundle content**: doc 02 already ignores bundle-internal `.argosy/` during validation/walking; doc 08 packaging excludes it. Restate this in module docs.
 - One `.db` file per `ProjectContext` spans all active argosys (local + imported in one context); `QualifiedConceptId.argosy` separates their rows (`MUL-5`).
 
 ### 2.2 `SqliteVecStore` (`src/index/sqlite.rs`)

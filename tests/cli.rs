@@ -11,6 +11,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+use argosy::pull;
+
 fn argosy_bin() -> Command {
     Command::cargo_bin("argosy").expect("binary builds with the package")
 }
@@ -48,18 +50,29 @@ fn fixture_copy(name: &str, scratch: &TempDir) -> PathBuf {
     dest
 }
 
-/// A project in the standard layout: `<root>/.argosy/default` holding a
-/// copy of the valid fixture (sans its bundled `.argosy/` placeholder).
+/// A fresh XDG state home the binary can be pointed at with
+/// `XDG_STATE_HOME` (isolated from the user's real `~/.local/state`).
+fn xdg_state_home(scratch: &TempDir) -> PathBuf {
+    let home = scratch.path().join("xdg-state-home");
+    fs::create_dir_all(&home).unwrap();
+    home
+}
+
+/// A project in the standard layout: the `default` bundle holds a copy of
+/// the valid fixture, stored under the state dir (never in the project
+/// tree). Returns `(project cwd, XDG_STATE_HOME to inject)`.
 #[cfg(feature = "default-index")] // only the gated index tests build projects
-fn fixture_project(scratch: &TempDir) -> PathBuf {
+fn fixture_project(scratch: &TempDir) -> (PathBuf, PathBuf) {
     let project = scratch.path().join("project");
-    let local = project.join(".argosy/default");
+    fs::create_dir_all(&project).unwrap();
+    let xdg = xdg_state_home(scratch);
+    let local = pull::project_argosy_dir_at(&xdg.join("argosy"), &project).join("default");
     copy_dir(&fixture("valid-acme-billing"), &local);
     let cache = local.join(".argosy");
     if cache.exists() {
         fs::remove_dir_all(&cache).unwrap();
     }
-    project
+    (project, xdg)
 }
 
 /// Initializes `dir` as a git repo with one commit (for `pull` tests; git
@@ -117,14 +130,16 @@ fn init_creates_a_bundle_that_validates_clean() {
 
 #[test]
 fn init_current_directory_and_json_output() {
-    // No path: the project-local bundle at `.argosy/default`, named after
-    // the project directory.
+    // No path: the project's `default` bundle under the state dir, named
+    // after the project directory, keyed by its slug (name + path hash).
     let scratch = TempDir::new().unwrap();
     let target = scratch.path().join("cwd-test");
     fs::create_dir_all(&target).unwrap();
+    let xdg = xdg_state_home(&scratch);
     let output = argosy_bin()
         .args(["--json", "init"])
         .current_dir(&target)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .get_output()
@@ -132,11 +147,18 @@ fn init_current_directory_and_json_output() {
     let created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(created["name"], "cwd-test");
     assert_eq!(created["argosy_version"], "0.1.0");
-    assert!(target.join(".argosy/default/argosy.md").is_file());
+    let path = created["path"].as_str().unwrap();
+    assert!(
+        path.contains("argosy/projects/cwd-test-") && path.ends_with("/default"),
+        "state-dir layout: {path}"
+    );
+    assert!(Path::new(path).join("argosy.md").is_file());
+    // The project tree itself stays argosy-free.
+    assert!(!target.join(".argosy").exists());
 
-    // And the project is then indexable in exactly that layout.
+    // And the created bundle validates.
     argosy_bin()
-        .args(["validate", target.join(".argosy/default").to_str().unwrap()])
+        .args(["validate", path])
         .assert()
         .success()
         .stdout(predicate::str::contains("OK: cwd-test 0.1.0"));
@@ -523,10 +545,12 @@ fn convert_styleguide_without_yaml_files_warns_on_stderr() {
 #[test]
 fn convert_styleguide_defaults_to_project_argosy() {
     let scratch = TempDir::new().unwrap();
-    // A project in the standard layout: rules land in `.argosy/default`
-    // when no argosy path is passed.
+    // A project in the standard layout: rules land in the project's
+    // `default` bundle under the state dir when no argosy path is passed.
     let project = scratch.path().join("project");
-    let target = project.join(".argosy/default");
+    fs::create_dir_all(&project).unwrap();
+    let xdg = xdg_state_home(&scratch);
+    let target = pull::project_argosy_dir_at(&xdg.join("argosy"), &project).join("default");
     copy_dir(&fixture("valid-acme-billing"), &target);
     let cache = target.join(".argosy");
     if cache.exists() {
@@ -539,6 +563,7 @@ fn convert_styleguide_defaults_to_project_argosy() {
     argosy_bin()
         .args(["convert", "styleguide", yaml_dir.to_str().unwrap()])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("written: 2 rule(s)"));
@@ -548,22 +573,26 @@ fn convert_styleguide_defaults_to_project_argosy() {
             .join("styleguide/rust/error-handling/no-unwrap-in-prod.md")
             .is_file()
     );
+    assert!(!project.join(".argosy").exists(), "tree stays argosy-free");
 }
 
 #[test]
 fn convert_styleguide_without_project_argosy_fails() {
     let scratch = TempDir::new().unwrap();
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&project).unwrap();
     let yaml_dir = scratch.path().join("yaml");
     fs::create_dir_all(&yaml_dir).unwrap();
     fs::write(yaml_dir.join("rust.yaml"), GOOD_RULES).unwrap();
 
     argosy_bin()
         .args(["convert", "styleguide", yaml_dir.to_str().unwrap()])
-        .current_dir(scratch.path())
+        .current_dir(&project)
+        .env("XDG_STATE_HOME", xdg_state_home(&scratch))
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains(".argosy/default"));
+        .stderr(predicate::str::contains("argosy init"));
 }
 
 // -------------------------------------------------------------------- pull
@@ -575,21 +604,25 @@ fn pull_clones_a_remote_bundle_into_the_project() {
     git_commit_all(&repo);
     let project = scratch.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    let xdg = xdg_state_home(&scratch);
+    let store = pull::project_argosy_dir_at(&xdg.join("argosy"), &project);
 
     argosy_bin()
         .args(["pull", repo.to_str().unwrap(), "company-rules"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "pulled acme-billing 0.3.1 into .argosy/company-rules",
-        ));
-    assert!(project.join(".argosy/company-rules/argosy.md").is_file());
+        .stdout(predicate::str::contains("pulled acme-billing 0.3.1 into"))
+        .stdout(predicate::str::contains("company-rules"));
+    assert!(store.join("company-rules/argosy.md").is_file());
+    assert!(!project.join(".argosy").exists(), "tree stays argosy-free");
 
     // A checkout is never overwritten.
     argosy_bin()
         .args(["pull", repo.to_str().unwrap(), "company-rules"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .failure()
         .code(1)
@@ -605,15 +638,18 @@ fn pull_of_a_non_argosy_repo_leaves_no_checkout() {
     git_commit_all(&repo);
     let project = scratch.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    let xdg = xdg_state_home(&scratch);
+    let store = pull::project_argosy_dir_at(&xdg.join("argosy"), &project);
 
     argosy_bin()
         .args(["pull", repo.to_str().unwrap(), "notargosy"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .failure()
         .code(1)
         .stderr(predicate::str::contains("not an argosy"));
-    assert!(!project.join(".argosy/notargosy").exists());
+    assert!(!store.join("notargosy").exists());
 }
 
 #[test]
@@ -631,7 +667,7 @@ fn pull_global_installs_into_the_user_store() {
         .success();
     assert!(
         fake_home
-            .join(".local/state/argosy/shared-rules/argosy.md")
+            .join(".local/state/argosy/global/shared-rules/argosy.md")
             .is_file()
     );
 }
@@ -644,17 +680,17 @@ fn pull_global_installs_into_the_user_store() {
 #[test]
 fn index_status_reports_a_missing_index_without_creating_one() {
     let scratch = TempDir::new().unwrap();
-    let project = fixture_project(&scratch);
+    let (project, xdg) = fixture_project(&scratch);
     argosy_bin()
         .args(["index", "status"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("no index at"));
-    assert!(
-        !project.join(".argosy/index.db").exists(),
-        "status never writes"
-    );
+    let store = pull::project_argosy_dir_at(&xdg.join("argosy"), &project);
+    assert!(!store.join("index.db").exists(), "status never writes");
+    assert!(!project.join(".argosy").exists(), "tree stays argosy-free");
 }
 
 #[cfg(feature = "default-index")]
@@ -666,10 +702,11 @@ fn index_on_a_project_without_a_local_bundle_points_at_init() {
     argosy_bin()
         .args(["index", "status"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", xdg_state_home(&scratch))
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains(".argosy/default"))
+        .stderr(predicate::str::contains("default"))
         .stderr(predicate::str::contains("argosy init"));
 }
 
@@ -703,7 +740,8 @@ fn help_documents_the_index_default_location_and_model_download() {
         .args(["index", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(".argosy/index.db"));
+        .stdout(predicate::str::contains("index.db"))
+        .stdout(predicate::str::contains("state dir"));
 
     argosy_bin()
         .args(["index", "build", "--help"])
@@ -722,11 +760,14 @@ fn help_documents_the_index_default_location_and_model_download() {
 #[ignore = "downloads the fastembed model (needs network on first run)"]
 fn index_build_status_query_round_trip() {
     let scratch = TempDir::new().unwrap();
-    let project = fixture_project(&scratch);
+    let (project, xdg) = fixture_project(&scratch);
+    let state_root = xdg.join("argosy");
+    let store = pull::project_argosy_dir_at(&state_root, &project);
 
     argosy_bin()
         .args(["index", "build"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("index"))
@@ -735,6 +776,7 @@ fn index_build_status_query_round_trip() {
     argosy_bin()
         .args(["index", "status"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("model: fastembed/"))
@@ -745,13 +787,14 @@ fn index_build_status_query_round_trip() {
     argosy_bin()
         .args(["index", "build"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("0 upserted, 0 removed"));
 
-    // A second checkout in `.argosy/` joins the index automatically (no
-    // --import): rebuilding discovers it.
-    let vendor = project.join(".argosy/vendor-b");
+    // A second checkout in the project's store joins the index
+    // automatically (no --import): rebuilding discovers it.
+    let vendor = store.join("vendor-b");
     fs::create_dir_all(vendor.join("document")).unwrap();
     fs::write(
         vendor.join("argosy.md"),
@@ -766,12 +809,14 @@ fn index_build_status_query_round_trip() {
     argosy_bin()
         .args(["index", "build"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("1 upserted, 0 removed"));
     argosy_bin()
         .args(["index", "status"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .stdout(predicate::str::contains("vendor-b/document: 1"));
@@ -779,6 +824,7 @@ fn index_build_status_query_round_trip() {
     let output = argosy_bin()
         .args(["--json", "index", "query", "caching decisions", "-k", "3"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
         .get_output()
@@ -793,6 +839,7 @@ fn index_build_status_query_round_trip() {
     argosy_bin()
         .args(["index", "query", "caching", "--argosy", "no-such-argosy"])
         .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
         .assert()
         .failure()
         .code(1);

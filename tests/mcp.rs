@@ -659,7 +659,6 @@ async fn end_to_end_over_in_process_duplex() {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_and_read_results_carry_sep2549_cache_hints() {
     let rig = rig();
-    let cwd = rig.cwd.clone();
     let (server_io, client_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {
         use rmcp::ServiceExt;
@@ -708,20 +707,36 @@ async fn list_and_read_results_carry_sep2549_cache_hints() {
 /// isolated from each other.
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_select_their_project_by_cwd() {
-    // Real project layouts, opened by the real discovery path (globals
-    // redirected to an empty tempdir so the user store cannot leak in).
-    let globals = tempfile::tempdir().unwrap();
-    let globals_root = globals.path().to_path_buf();
+    // Real project layouts, opened by the real discovery path against an
+    // injected state root (a tempdir, so the user store cannot leak in).
+    // Each project's bundles live under `<state>/projects/<slug>` — never
+    // inside the project directory itself.
+    let state = tempfile::tempdir().unwrap();
+    let state_root = state.path().to_path_buf();
     let factory: SessionFactory<FakeEmbedder, MemVec> = Arc::new(move |root| {
-        let context = ProjectContext::open_project_with_globals(root, &globals_root)?;
+        let context = ProjectContext::open_project_with_state(root, &state_root)?;
         let mut index = Index::new(FakeEmbedder, MemVec::default());
         index.reconcile(&context)?;
         Ok(ProjectSession::new(context, index))
     });
     let alpha = tempfile::tempdir().unwrap();
     let beta = tempfile::tempdir().unwrap();
-    LocalArgosy::init(alpha.path().join(".argosy/default"), Some("alpha"), None).unwrap();
-    LocalArgosy::init(beta.path().join(".argosy/default"), Some("beta"), None).unwrap();
+    LocalArgosy::init(
+        argosy::pull::project_argosy_dir_at(state.path(), alpha.path()).join("default"),
+        Some("alpha"),
+        None,
+    )
+    .unwrap();
+    LocalArgosy::init(
+        argosy::pull::project_argosy_dir_at(state.path(), beta.path()).join("default"),
+        Some("beta"),
+        None,
+    )
+    .unwrap();
+    assert!(
+        !alpha.path().join(".argosy").exists() && !beta.path().join(".argosy").exists(),
+        "the project trees stay argosy-free"
+    );
 
     let (server_io, client_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {

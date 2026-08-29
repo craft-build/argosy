@@ -1,8 +1,16 @@
-//! Pulling external argosies into a project or the global store. A
-//! project's argosies all live in `.argosy/`: the local bundle at
-//! `.argosy/default`, pulled checkouts at `.argosy/<name>/`, the index at
-//! `.argosy/index.db` — outside every bundle, so bundles stay clean to
-//! `package` and plain `git`. Global checkouts: [`global_argosy_dir`].
+//! Pulling external argosies into a project or the global store. Argosy
+//! data never lives in the project tree — agents working the tree would
+//! just read the markdown directly, bypassing the argosy MCP tools — so
+//! everything lives under the user's argosy state dir
+//! ([`state_dir`]: `$XDG_STATE_HOME/argosy`, `~/.local/state/argosy`):
+//!
+//! - user-wide checkouts at `<state>/global/<name>/`,
+//! - a project's checkouts at `<state>/projects/<slug>/<name>/`, with the
+//!   local (writable) bundle at `<state>/projects/<slug>/default/` and the
+//!   derived index at `<state>/projects/<slug>/index.db`.
+//!
+//! `<slug>` is [`project_slug`]: the project root's directory name plus a
+//! short hash of its absolute path, so same-named projects never collide.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,26 +21,67 @@ use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use crate::bundle::Argosy;
 use crate::error::{IoSnafu, NotAnArgosySnafu, Result, ValidationSnafu};
 
-/// The project directory holding the local bundle, pulled checkouts, and
-/// the derived index (`<project>/.argosy/`).
-pub const PROJECT_ARGOSY_DIR: &str = ".argosy";
-
 /// The checkout name of a project's local (writable) bundle:
-/// `<project>/.argosy/default`.
+/// `<state>/projects/<slug>/default`.
 pub const LOCAL_ARGOSY_NAME: &str = "default";
 
-/// The directory holding argosies installed for the user, shared by every
-/// project: `$XDG_STATE_HOME/argosy` (falling back to `~/.local/state/argosy`).
-pub fn global_argosy_dir() -> Result<PathBuf> {
+/// The derived index file inside a project's state directory:
+/// `<state>/projects/<slug>/index.db`.
+pub const INDEX_DB_NAME: &str = "index.db";
+
+/// The user's argosy state root: `$XDG_STATE_HOME/argosy` (falling back
+/// to `~/.local/state/argosy`). Every argosy path — global checkouts,
+/// project checkouts, indexes — derives from here, keeping argosy data
+/// out of the project tree entirely.
+pub fn state_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .with_context(|| ValidationSnafu {
-            reason: "cannot locate the global argosy directory: set XDG_STATE_HOME or HOME"
+            reason: "cannot locate the argosy state directory: set XDG_STATE_HOME or HOME"
                 .to_string(),
         })?;
     Ok(base.join("argosy"))
+}
+
+/// The directory holding argosies installed for the user, shared by every
+/// project: `<state>/global`.
+pub fn global_argosy_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join("global"))
+}
+
+/// The state-dir slug of a project root: its final directory component
+/// plus the first 8 hex digits of the SHA-256 of its absolute path (e.g.
+/// `craft-1a2b3c4d`), so two same-named projects never share storage.
+/// The root is canonicalized first, so different spellings of one
+/// directory (symlinked or not) map to one slug.
+pub fn project_slug(project_root: impl AsRef<Path>) -> String {
+    let root = project_root.as_ref();
+    let canonical = root
+        .canonicalize()
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf());
+    let name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    let digest = crate::hash::sha256_hex(canonical.as_os_str().as_encoded_bytes());
+    format!("{name}-{}", &digest[..8])
+}
+
+/// The directory holding a project's argosy state: the local (writable)
+/// bundle at `<...>/default`, pulled checkouts at `<...>/<name>`, and the
+/// derived index at `<...>/index.db` — under
+/// `$XDG_STATE_HOME/argosy/projects/<slug>`, never in the project tree.
+pub fn project_argosy_dir(project_root: impl AsRef<Path>) -> Result<PathBuf> {
+    Ok(project_argosy_dir_at(&state_dir()?, project_root))
+}
+
+/// [`project_argosy_dir`] against an explicit state root (tests and hosts
+/// inject a tempdir instead of touching `~/.local/state`).
+pub fn project_argosy_dir_at(state_root: &Path, project_root: impl AsRef<Path>) -> PathBuf {
+    state_root.join("projects").join(project_slug(project_root))
 }
 
 /// Maps a failed `git` process spawn. A missing binary is a setup problem,
@@ -176,12 +225,62 @@ mod tests {
         assert!(matches!(err, crate::error::Error::Io { .. }), "got {err:?}");
     }
 
+    // --- state-dir layout ---
+
+    #[test]
+    fn project_slug_is_name_plus_a_short_hash_of_the_absolute_path() {
+        let a = Path::new("/home/me/Projects/craft");
+        let slug = project_slug(a);
+        assert!(
+            slug.starts_with("craft-") && slug.len() == "craft-".len() + 8,
+            "got {slug}"
+        );
+        assert!(
+            slug["craft-".len()..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "hash is lowercase hex: {slug}"
+        );
+        // Same-named projects at different paths never collide…
+        assert_ne!(slug, project_slug(Path::new("/home/you/Projects/craft")));
+        // …and one path is stable across calls.
+        assert_eq!(slug, project_slug(a));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_slug_canonicalizes_so_symlinked_spellings_share_one_slug() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real-project");
+        fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(project_slug(&real), project_slug(&link));
+    }
+
+    #[test]
+    fn project_argosy_dir_at_nests_the_slug_under_projects() {
+        let dir = project_argosy_dir_at(Path::new("/state/argosy"), "/home/me/Projects/craft");
+        assert_eq!(
+            dir.parent().unwrap(),
+            Path::new("/state/argosy/projects"),
+            "got {}",
+            dir.display()
+        );
+        assert!(
+            dir.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("craft-")),
+            "got {}",
+            dir.display()
+        );
+    }
+
     #[test]
     fn clone_pulls_a_bundle_into_a_named_checkout() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         git_repo(&repo);
-        let root = tmp.path().join("project/.argosy");
+        let root = tmp.path().join("state/projects/craft-1a2b3c4d");
 
         let argosy = clone_as_checkout(repo.to_str().unwrap(), &root, "company-rules").unwrap();
 
@@ -193,7 +292,7 @@ mod tests {
     #[test]
     fn clone_refuses_an_existing_checkout_and_bad_names() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join(".argosy");
+        let root = tmp.path().join("store");
         fs::create_dir_all(root.join("taken")).unwrap();
 
         let err = clone_as_checkout("irrelevant", &root, "taken").unwrap_err();
@@ -237,7 +336,7 @@ mod tests {
             assert!(out.status.success(), "git {args:?} failed");
         }
 
-        let root = tmp.path().join(".argosy");
+        let root = tmp.path().join("store");
         let err = clone_as_checkout(repo.to_str().unwrap(), &root, "notargosy").unwrap_err();
 
         assert!(err.to_string().contains("not an argosy"), "{err}");

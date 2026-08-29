@@ -52,16 +52,18 @@ enum Command {
 #[derive(Args)]
 struct McpArgs {}
 
-/// Clone an external argosy into this project's `.argosy/<name>`.
+/// Clone an external argosy into this project's argosy store (under the
+/// user state dir, outside the project tree).
 #[derive(Args)]
 struct PullArgs {
     /// Git URL or local path of the argosy repository.
     url: String,
 
-    /// Checkout name (`.argosy/<name>`).
+    /// Checkout name (under the project's argosy store).
     name: String,
 
-    /// Install into the user-wide argosy store instead of `.argosy/`.
+    /// Install into the user-wide global argosy store instead of this
+    /// project's.
     #[arg(long)]
     global: bool,
 }
@@ -70,7 +72,8 @@ struct PullArgs {
 /// namespace directories.
 #[derive(Args)]
 struct InitArgs {
-    /// Directory to initialize (default: `.argosy/default`).
+    /// Directory to initialize (default: this project's `default` argosy
+    /// under the user state dir).
     path: Option<PathBuf>,
 
     /// Manifest name (default: the target directory's basename).
@@ -112,7 +115,8 @@ struct PackageArgs {
     include_index: bool,
 }
 
-/// Operate on the project's semantic index (`.argosy/index.db`).
+/// Operate on the project's semantic index (`index.db` under the user
+/// state dir, outside the project tree).
 #[derive(Args)]
 struct IndexArgs {
     #[command(subcommand)]
@@ -187,7 +191,8 @@ struct ConvertStyleguideArgs {
     /// Directory of legacy YAML rule files.
     yaml_dir: PathBuf,
 
-    /// Argosy that receives the rules (default: `.argosy/default`).
+    /// Argosy that receives the rules (default: this project's `default`
+    /// argosy under the user state dir).
     argosy_path: Option<PathBuf>,
 }
 
@@ -348,20 +353,34 @@ pub fn run() -> ExitCode {
     }
 }
 
+/// The process working directory, mapped to the library's `Io` error.
+/// Project-scoped commands (init/pull/convert/index) resolve their
+/// default targets from it.
+fn current_dir() -> Result<PathBuf> {
+    std::env::current_dir().map_err(|source| argosy::error::Error::Io {
+        path: ".".into(),
+        source,
+    })
+}
+
 fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
     let default_project_path = args.path.is_none();
-    let path = args.path.clone().unwrap_or_else(|| {
-        Path::new(argosy::pull::PROJECT_ARGOSY_DIR).join(argosy::pull::LOCAL_ARGOSY_NAME)
-    });
-    // With the implicit `.argosy/default` target, the bundle is named after
-    // the project directory, not literally "default".
-    let name = args.name.clone().or_else(|| {
-        default_project_path.then(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|cwd| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
-        })?
-    });
+    // With the implicit project target, the bundle is named after the
+    // project directory, not the state-dir slug.
+    let (path, dir_name) = if default_project_path {
+        let cwd = current_dir()?;
+        let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+        (
+            argosy::pull::project_argosy_dir(&cwd)?.join(argosy::pull::LOCAL_ARGOSY_NAME),
+            name,
+        )
+    } else {
+        (
+            args.path.clone().expect("checked default_project_path"),
+            None,
+        )
+    };
+    let name = args.name.clone().or(dir_name);
     let local = LocalArgosy::init(&path, name.as_deref(), args.description.as_deref())?;
     if out.json {
         let manifest = local.manifest();
@@ -386,7 +405,7 @@ fn cmd_pull(out: &Output, args: &PullArgs) -> Result<ExitCode> {
     let root = if args.global {
         argosy::pull::global_argosy_dir()?
     } else {
-        PathBuf::from(argosy::pull::PROJECT_ARGOSY_DIR)
+        argosy::pull::project_argosy_dir(current_dir()?)?
     };
     let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
     let dest = root.join(&args.name);
@@ -505,11 +524,27 @@ fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> {
 fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> {
     match &args.format {
         ConvertFormat::Styleguide(imp) => {
-            // Implicit target is the current project's `.argosy/default`,
-            // the same path `argosy init` creates when none is given.
-            let argosy_path = imp.argosy_path.clone().unwrap_or_else(|| {
-                Path::new(argosy::pull::PROJECT_ARGOSY_DIR).join(argosy::pull::LOCAL_ARGOSY_NAME)
-            });
+            // Implicit target is the current project's `default` argosy
+            // under the user state dir, the same path `argosy init`
+            // creates when none is given; a missing one is a setup
+            // problem worth naming, not a bare I/O error on a hashed path.
+            let argosy_path = match &imp.argosy_path {
+                Some(path) => path.clone(),
+                None => {
+                    let path = argosy::pull::project_argosy_dir(current_dir()?)?
+                        .join(argosy::pull::LOCAL_ARGOSY_NAME);
+                    if !path.join("argosy.md").is_file() {
+                        return Err(argosy::error::Error::Validation {
+                            reason: format!(
+                                "no local `default` argosy for this project at {} — run \
+                                 `argosy init` in the project root",
+                                path.display()
+                            ),
+                        });
+                    }
+                    path
+                }
+            };
             let local = LocalArgosy::open(&argosy_path)?;
             let report: ImportReport =
                 argosy::package::import_styleguide_yaml(&local, &imp.yaml_dir)?;
@@ -555,10 +590,7 @@ fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
             // The project root is the working directory — the same scope
             // the index and mcp verbs use. Agent definitions are harness
             // config, so no argosy needs to exist here.
-            let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
-                path: ".".into(),
-                source,
-            })?;
+            let root = current_dir()?;
             let report = argosy::setup_reviewer(reviewer.harness.into(), &root, reviewer.force)?;
             if out.json {
                 out.json(&report)?;
@@ -594,13 +626,11 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::{Index, VectorStore, staleness_report};
 
-    // The project root is the working directory: discovery walks
-    // `.argosy/<dirs>` plus the global user store from there.
-    let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
-        path: ".".into(),
-        source,
-    })?;
-    let db = root.join(".argosy/index.db");
+    // The project root is the working directory: discovery walks the
+    // project's argosy store under the user state dir plus the global
+    // store, all keyed by that root.
+    let root = current_dir()?;
+    let db = argosy::pull::project_argosy_dir(&root)?.join(argosy::pull::INDEX_DB_NAME);
 
     match &args.verb {
         IndexVerb::Status => {
@@ -764,7 +794,9 @@ fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     // stdout is the stdio protocol channel: every diagnostic is stderr.
     let factory: SessionFactory<LazyFastembedProvider, SqliteVecStore> = Arc::new(|root| {
         let context = ProjectContext::open_project(root)?;
-        let store = SqliteVecStore::open(root.join(".argosy/index.db"))?;
+        let store = SqliteVecStore::open(
+            argosy::pull::project_argosy_dir(root)?.join(argosy::pull::INDEX_DB_NAME),
+        )?;
         // The lazy provider makes the open instant and offline-tolerant:
         // the model (and its ~90 MB first-run download) loads only when
         // something actually needs embedding.

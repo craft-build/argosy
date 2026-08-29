@@ -35,7 +35,7 @@ These were open in the reference-implementation document and are now settled. Do
 | Decision | Resolution |
 |---|---|
 | Crate count | One crate, `argosy`, lib + bin (reference doc §2.3) |
-| Default vector store | **`sqlite-vec`** — one SQLite file per argosy (`.argosy/index.db`, relative to the project root that owns the context), SQL provides the `IDX-9` structured filtering |
+| Default vector store | **`sqlite-vec`** — one SQLite file per project context (`index.db` under the project's slot in the XDG state dir — relocated there 2026-08-29 so argosy data never sits in the project tree; originally `<project-root>/.argosy/index.db`), SQL provides the `IDX-9` structured filtering |
 | Default embedding provider | **`fastembed`** (ONNX, local) behind the `EmbeddingProvider` trait; model identity recorded per `IDX-5` |
 | CLI surface | Full set from the start: `mcp`, `validate`, `package`, `index`, `convert styleguide` (reference doc §6) |
 | Precedence rule (`MUL-6`/`MUL-7`) | Local argosy first, then imported argosys in registration order. Deterministic and inspectable: every aggregate operation reports which argosy each result came from |

@@ -5,14 +5,24 @@ bundles** — directories of markdown concepts with YAML frontmatter — and
 serves them to any MCP-compatible harness (OpenCode, Claude Code, editors)
 as searchable, referenceable knowledge: `argosy://<name>/<namespace>/<id>`.
 
-A project's argosys live under `.argosy/`:
+Argosy data never lives in the project tree — agents working the tree
+would read the markdown directly, bypassing the argosy MCP tools.
+Everything lives under the user's argosy state dir (`$XDG_STATE_HOME/argosy`,
+default `~/.local/state/argosy`):
 
 ```
-.argosy/
-├── default/          the local, writable bundle (argosy init)
-├── <name>/           pulled read-only imports (argosy pull)
-└── index.db          the derived semantic index (argosy index build)
+<state>/
+├── global/                   user-wide read-only imports (argosy pull --global)
+│   └── <name>/
+└── projects/<slug>/          one slot per project, keyed by its root path
+    ├── default/              the local, writable bundle (argosy init)
+    ├── <name>/               pulled read-only imports (argosy pull)
+    └── index.db              the derived semantic index (argosy index build)
 ```
+
+`<slug>` is the project directory's name plus a short hash of its
+absolute path (e.g. `craft-1a2b3c4d`), so same-named projects never
+collide.
 
 Each bundle holds four reserved namespaces — `document/` (curated prose),
 `skill/` (harness skills), `memory/` (session learnings, never packaged),
@@ -103,8 +113,8 @@ with the harness to enable rule grounding.
 |---|---|
 | `argosy init [path]` | Create a bundle (manifest + reserved namespaces). |
 | `argosy validate <path>` | Structural + namespace-contract validation with requirement IDs (`--namespace` scopes one namespace). |
-| `argosy pull <url> <name>` | `git clone` an external argosy into `.argosy/<name>` (`--global` for the user store). |
-| `argosy index build` / `status` / `query` | Build/diff/search the semantic index at `.argosy/index.db`. |
+| `argosy pull <url> <name>` | `git clone` an external argosy into the project's argosy store under the state dir (`--global` for the user-wide store). |
+| `argosy index build` / `status` / `query` | Build/diff/search the semantic index at `<state>/projects/<slug>/index.db`. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
 | `argosy agent reviewer <harness>` | Install the read-only `reviewer` subagent definition into a harness (`opencode`, `claude`, `kiro-cli`); `--force` replaces an existing one. |
