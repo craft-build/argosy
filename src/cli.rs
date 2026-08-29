@@ -46,9 +46,9 @@ enum Command {
     Mcp(McpArgs),
 }
 
-/// Serve the current project's argosys over the Model Context Protocol
-/// (stdio; diagnostics on stderr). The first run downloads the embedding
-/// model (~90 MB).
+/// Serve argosys over the Model Context Protocol (stdio; diagnostics on
+/// stderr). Tools select the project per call via `cwd`; each project's
+/// first use opens it and downloads the embedding model (~90 MB).
 #[derive(Args)]
 struct McpArgs {}
 
@@ -748,43 +748,48 @@ fn cmd_index(_out: &Output, _args: &IndexArgs) -> Result<ExitCode> {
 
 #[cfg(all(feature = "mcp", feature = "default-index"))]
 fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
+    use std::sync::Arc;
+
     use argosy::context::ProjectContext;
     use argosy::error::Error;
     use argosy::index::Index;
     use argosy::index::fastembed::LazyFastembedProvider;
     use argosy::index::sqlite::SqliteVecStore;
-    use argosy::mcp::{ArgosyMcpServer, McpState};
+    use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
     use rmcp::ServiceExt;
 
-    // Startup runs to completion before the transport starts; the argosy
-    // set is discovered from the working directory, exactly like the
-    // index verbs. stdout is the stdio protocol channel: every
-    // diagnostic is stderr.
-    let root = std::env::current_dir().map_err(|source| argosy::error::Error::Io {
-        path: ".".into(),
-        source,
-    })?;
-    let context = ProjectContext::open_project(&root)?;
-    let db = root.join(".argosy/index.db");
-    let store = SqliteVecStore::open(&db)?;
-    // The lazy provider makes startup instant and offline-tolerant: the
-    // model (and its ~90 MB first-run download) loads only when something
-    // actually needs embedding.
-    let mut index = Index::new(LazyFastembedProvider::new_default()?, store);
-    // A failed reconcile degrades retrieval, it must not kill the server
-    // (spec §11: an out-of-date index degrades search quality, never
-    // correctness) — warn on stderr and keep serving; mutating tools
-    // re-attempt reconciliation on every write.
-    match index.reconcile(&context) {
-        Ok(report) => eprintln!(
-            "argosy mcp: index reconciled ({} upserted, {} removed, {} unchanged)",
-            report.upserted, report.removed, report.unchanged
-        ),
-        Err(err) => eprintln!(
-            "argosy mcp: warning: index reconcile failed ({err:#}); serving degraded — \
-             search may error or miss changes until `argosy index build` succeeds"
-        ),
-    }
+    // No project is opened at startup: the server runs from any directory,
+    // and every tool call names its project (`cwd`). Projects open lazily
+    // through this factory and stay cached for the process lifetime.
+    // stdout is the stdio protocol channel: every diagnostic is stderr.
+    let factory: SessionFactory<LazyFastembedProvider, SqliteVecStore> = Arc::new(|root| {
+        let context = ProjectContext::open_project(root)?;
+        let store = SqliteVecStore::open(root.join(".argosy/index.db"))?;
+        // The lazy provider makes the open instant and offline-tolerant:
+        // the model (and its ~90 MB first-run download) loads only when
+        // something actually needs embedding.
+        let mut index = Index::new(LazyFastembedProvider::new_default()?, store);
+        // A failed reconcile degrades retrieval, it must not fail the open
+        // (spec §11: an out-of-date index degrades search quality, never
+        // correctness) — warn on stderr and serve the session anyway;
+        // mutating tools re-attempt reconciliation on every write.
+        match index.reconcile(&context) {
+            Ok(report) => eprintln!(
+                "argosy mcp: {}: index reconciled ({} upserted, {} removed, {} unchanged)",
+                root.display(),
+                report.upserted,
+                report.removed,
+                report.unchanged
+            ),
+            Err(err) => eprintln!(
+                "argosy mcp: {}: warning: index reconcile failed ({err:#}); serving degraded — \
+                 search may error or miss changes until `argosy index build` succeeds",
+                root.display()
+            ),
+        }
+        Ok(ProjectSession::new(context, index))
+    });
+    let server = ArgosyMcpServer::new(McpState::new(factory));
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -793,14 +798,14 @@ fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
             reason: format!("failed to start the tokio runtime: {e}"),
         })?
         .block_on(async move {
-            let state = McpState::new(context, index);
             eprintln!("argosy mcp: serving on stdio");
-            let service = ArgosyMcpServer::new(state)
-                .serve(rmcp::transport::stdio())
-                .await
-                .map_err(|e| Error::Transport {
-                    reason: format!("MCP stdio handshake failed: {e}"),
-                })?;
+            let service =
+                server
+                    .serve(rmcp::transport::stdio())
+                    .await
+                    .map_err(|e| Error::Transport {
+                        reason: format!("MCP stdio handshake failed: {e}"),
+                    })?;
             // `cancel()` would shut the server down immediately; wait for
             // the natural end (stdin EOF / client disconnect) instead.
             service.waiting().await.map_err(|e| Error::Transport {

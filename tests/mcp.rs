@@ -9,12 +9,13 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use argosy::Namespace;
 use argosy::context::{ProjectContext, QualifiedConceptId};
 use argosy::index::{EmbeddingProvider, EmbeddingUnit, Filter, Index, SearchHit, VectorStore};
-use argosy::mcp::{ArgosyMcpServer, McpState};
+use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
 use argosy::{Concept, LocalArgosy, Result};
 use tempfile::TempDir;
 
@@ -226,19 +227,30 @@ fn import_fixture() -> TempDir {
 struct Rig {
     _local: TempDir,
     _imported: TempDir,
+    /// The cwd tool calls name: the local fixture's path (the factory maps
+    /// any root to the fixture session, so this is a stand-in root).
+    cwd: PathBuf,
     state: McpState<FakeEmbedder, MemVec>,
 }
 
 fn rig() -> Rig {
     let local = fixture_copy("valid-acme-billing");
     let imported = import_fixture();
-    let context = ProjectContext::open(local.path(), [imported.path().to_path_buf()]).unwrap();
-    let mut index = Index::new(FakeEmbedder, MemVec::default());
-    index.reconcile(&context).unwrap();
+    let factory: SessionFactory<FakeEmbedder, MemVec> = {
+        let local_root = local.path().to_path_buf();
+        let imported_root = imported.path().to_path_buf();
+        Arc::new(move |_root| {
+            let context = ProjectContext::open(&local_root, [imported_root.clone()])?;
+            let mut index = Index::new(FakeEmbedder, MemVec::default());
+            index.reconcile(&context)?;
+            Ok(ProjectSession::new(context, index))
+        })
+    };
     Rig {
+        cwd: local.path().to_path_buf(),
         _local: local,
         _imported: imported,
-        state: McpState::new(context, index),
+        state: McpState::new(factory),
     }
 }
 
@@ -349,6 +361,7 @@ fn structured(result: &rmcp::model::CallToolResult) -> serde_json::Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn end_to_end_over_in_process_duplex() {
     let rig = rig();
+    let cwd = rig.cwd.clone();
     let (server_io, client_io) = tokio::io::duplex(8192);
 
     let server = ArgosyMcpServer::new(rig.state);
@@ -368,7 +381,7 @@ async fn end_to_end_over_in_process_duplex() {
     // (machine-confirmed) skills.
     let skills = complete(
         client
-            .call_tool_once(call("list_skills", serde_json::json!({})))
+            .call_tool_once(call("list_skills", serde_json::json!({"cwd": &cwd})))
             .await
             .unwrap(),
     );
@@ -394,7 +407,7 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "search",
-                serde_json::json!({"query": "rate limit retries"}),
+                serde_json::json!({"cwd": &cwd, "query": "rate limit retries"}),
             ))
             .await
             .unwrap(),
@@ -416,6 +429,7 @@ async fn end_to_end_over_in_process_duplex() {
             .call_tool_once(call(
                 "write_memory",
                 serde_json::json!({
+                    "cwd": &cwd,
                     "path": "memory/e2e-note",
                     "content": content,
                 }),
@@ -432,7 +446,11 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "search",
-                serde_json::json!({"query": "e2e note body", "namespaces": ["memory"]}),
+                serde_json::json!({
+                    "cwd": &cwd,
+                    "query": "e2e note body",
+                    "namespaces": ["memory"]
+                }),
             ))
             .await
             .unwrap(),
@@ -451,7 +469,7 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "read_memory",
-                serde_json::json!({"path": "memory/e2e-note"}),
+                serde_json::json!({"cwd": &cwd, "path": "memory/e2e-note"}),
             ))
             .await
             .unwrap(),
@@ -471,6 +489,7 @@ async fn end_to_end_over_in_process_duplex() {
             .call_tool_once(call(
                 "write_document",
                 serde_json::json!({
+                    "cwd": &cwd,
                     "path": "document/e2e-decision",
                     "content": doc,
                 }),
@@ -490,7 +509,11 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "search",
-                serde_json::json!({"query": "e2e decision doc", "namespaces": ["document"]}),
+                serde_json::json!({
+                    "cwd": &cwd,
+                    "query": "e2e decision doc",
+                    "namespaces": ["document"]
+                }),
             ))
             .await
             .unwrap(),
@@ -512,7 +535,7 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "delete_document",
-                serde_json::json!({"path": "document/e2e-decision"}),
+                serde_json::json!({"cwd": &cwd, "path": "document/e2e-decision"}),
             ))
             .await
             .unwrap(),
@@ -525,6 +548,7 @@ async fn end_to_end_over_in_process_duplex() {
             .call_tool_once(call(
                 "promote",
                 serde_json::json!({
+                    "cwd": &cwd,
                     "source_path": "memory/e2e-note",
                     "target": "document",
                     "new_path": "document/e2e-promoted",
@@ -581,7 +605,7 @@ async fn end_to_end_over_in_process_duplex() {
         client
             .call_tool_once(call(
                 "write_memory",
-                serde_json::json!({"path": "../escape"}),
+                serde_json::json!({"cwd": &cwd, "path": "../escape"}),
             ))
             .await
             .unwrap(),
@@ -627,8 +651,132 @@ async fn end_to_end_over_in_process_duplex() {
     server_task.abort();
 }
 
-// --- Code-intelligence tools over the wire ---------------------------------
-//
+// --- Multi-project behavior over the wire ----------------------------------
+
+/// The server needs no project at startup and serves several projects from
+/// one process: each tool call's `cwd` selects (and lazily opens) its own
+/// session, an argosy-less cwd is a tool-level error, and the sessions are
+/// isolated from each other.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_select_their_project_by_cwd() {
+    // Real project layouts, opened by the real discovery path (globals
+    // redirected to an empty tempdir so the user store cannot leak in).
+    let globals = tempfile::tempdir().unwrap();
+    let globals_root = globals.path().to_path_buf();
+    let factory: SessionFactory<FakeEmbedder, MemVec> = Arc::new(move |root| {
+        let context = ProjectContext::open_project_with_globals(root, &globals_root)?;
+        let mut index = Index::new(FakeEmbedder, MemVec::default());
+        index.reconcile(&context)?;
+        Ok(ProjectSession::new(context, index))
+    });
+    let alpha = tempfile::tempdir().unwrap();
+    let beta = tempfile::tempdir().unwrap();
+    LocalArgosy::init(alpha.path().join(".argosy/default"), Some("alpha"), None).unwrap();
+    LocalArgosy::init(beta.path().join(".argosy/default"), Some("beta"), None).unwrap();
+
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        use rmcp::ServiceExt;
+        let running = ArgosyMcpServer::new(McpState::new(factory))
+            .serve(server_io)
+            .await
+            .expect("server initializes without any project");
+        let _ = running.waiting().await;
+    });
+    use rmcp::ServiceExt;
+    let client = ().serve(client_io).await.expect("initialize handshake");
+
+    // Writes land in the project named by cwd, and each project sees only
+    // its own write.
+    for (root, name) in [(alpha.path(), "alpha"), (beta.path(), "beta")] {
+        let written = complete(
+            client
+                .call_tool_once(call(
+                    "write_memory",
+                    serde_json::json!({
+                        "cwd": root,
+                        "path": "memory/who-am-i",
+                        "content": format!(
+                            "---\ntype: Session Note\ndescription: {name}\n---\n# {name}\n"
+                        ),
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            structured(&written)["uri"],
+            format!("argosy://{name}/memory/who-am-i")
+        );
+    }
+
+    for (root, name, other) in [
+        (alpha.path(), "alpha", "beta"),
+        (beta.path(), "beta", "alpha"),
+    ] {
+        let skills = complete(
+            client
+                .call_tool_once(call(
+                    "search",
+                    serde_json::json!({
+                        "cwd": root,
+                        "query": "who am i",
+                        "namespaces": ["memory"],
+                        "k": 10,
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        let skills = structured(&skills);
+        let uris: Vec<&str> = skills["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["uri"].as_str())
+            .collect();
+        assert!(
+            uris.iter()
+                .any(|u| u.starts_with(&format!("argosy://{name}/"))),
+            "{name} sees its own write, got {uris:?}"
+        );
+        assert!(
+            !uris
+                .iter()
+                .any(|u| u.starts_with(&format!("argosy://{other}/"))),
+            "{name} must not see {other}'s write, got {uris:?}"
+        );
+    }
+
+    // A cwd with no argosy: tool-level error (isError), not a protocol
+    // error, pointing at `argosy init`.
+    let nowhere = tempfile::tempdir().unwrap();
+    let result = complete(
+        client
+            .call_tool_once(call(
+                "list_skills",
+                serde_json::json!({"cwd": nowhere.path()}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "argosy-less cwd is a tool error"
+    );
+    match &result.content[0] {
+        rmcp::model::ContentBlock::Text(text) => {
+            assert!(text.text.contains("argosy init"), "got {}", text.text);
+        }
+        other => panic!("expected text error, got {other:?}"),
+    }
+
+    drop(client);
+    server_task.abort();
+}
+
+// --- Code-intelligence tools over the wire ---------------------------------//
 // The seven tools ported from Craft, driven like any MCP client would:
 // absolute paths into a tempdir workspace, structured outcomes, tool-level
 // errors with `isError`.

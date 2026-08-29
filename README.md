@@ -108,7 +108,7 @@ with the harness to enable rule grounding.
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
 | `argosy agent reviewer <harness>` | Install the read-only `reviewer` subagent definition into a harness (`opencode`, `claude`, `kiro-cli`); `--force` replaces an existing one. |
-| `argosy mcp` | Serve the project over MCP on stdio. |
+| `argosy mcp` | Serve argosys over MCP on stdio; every tool call selects its project with `cwd` (no argosy needed at startup), sessions open lazily and are cached. |
 
 Most commands print machine-readable JSON with `--json` and quiet down
 with `--quiet`; exit codes: `0` success, `1` failure, `2` usage.

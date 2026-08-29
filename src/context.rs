@@ -208,9 +208,9 @@ impl ProjectContext {
         Self::open_project_with_globals(project_root, &globals)
     }
 
-    /// [`Self::open_project`] with an explicit globals tier (tests inject a
-    /// tempdir instead of touching `~/.local/state`).
-    pub(crate) fn open_project_with_globals(
+    /// [`Self::open_project`] with an explicit globals tier (hosts and
+    /// tests inject a tempdir instead of touching `~/.local/state`).
+    pub fn open_project_with_globals(
         project_root: impl AsRef<Path>,
         globals_root: &Path,
     ) -> Result<Self> {
