@@ -568,6 +568,41 @@ async fn end_to_end_over_in_process_duplex() {
     );
     assert_eq!(bad.is_error, Some(true), "bad write is a tool error");
 
+    // Prompts: the dream memory-consolidation workflow.
+    let prompts = client.list_prompts(None).await.unwrap();
+    assert_eq!(prompts.prompts.len(), 1, "exactly one advertised prompt");
+    assert_eq!(prompts.prompts[0].name, "dream");
+    assert!(
+        prompts.prompts[0]
+            .description
+            .as_deref()
+            .is_some_and(|d| !d.is_empty()),
+        "dream carries a description"
+    );
+
+    let dream = client
+        .get_prompt(rmcp::model::GetPromptRequestParams::new("dream"))
+        .await
+        .unwrap();
+    assert_eq!(dream.messages.len(), 1);
+    assert_eq!(dream.messages[0].role, rmcp::model::Role::User);
+    match &dream.messages[0].content {
+        rmcp::model::ContentBlock::Text(text) => {
+            // Self-contained workflow: the tools it drives are all named.
+            for tool in ["search", "read_memory", "write_memory", "delete_memory"] {
+                assert!(text.text.contains(tool), "dream names `{tool}`");
+            }
+            assert!(text.text.contains("no-op is a valid outcome"));
+        }
+        other => panic!("expected text content, got {other:?}"),
+    }
+
+    // Unknown prompt name: protocol-level method-not-found, not empty content.
+    let missing_prompt = client
+        .get_prompt(rmcp::model::GetPromptRequestParams::new("nope"))
+        .await;
+    assert!(missing_prompt.is_err(), "unknown prompt must be an error");
+
     drop(client);
     server_task.abort();
 }

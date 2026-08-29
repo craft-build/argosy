@@ -58,7 +58,18 @@ Implement exactly this set — each maps 1:1 onto library APIs already built:
 - **Trust surfacing** (`SEC-1`/`SEC-2`): `list_skills` and `get_skill` include each skill's origin argosy name and its OKF `verified` tier when present (`unverified` when absent) — this is the hook §12.1 asks harnesses to surface; the server exposes the data, the client harness decides policy (`SEC-3` stays a client decision — document this in the tool description strings so downstream LLMs see it).
 - Tool descriptions must be written for LLM consumers: one sentence of what it does, one of when to use it, note the read-only nature of imported argosys on mutating tools.
 
-### 2.4 Testing (`tests/mcp.rs`)
+### 2.4 Prompts (MCP `prompts` capability)
+
+Reusable workflows the harness can run with the server's existing tools — no new server logic. The set is static (no `list_changed` notifications); unknown prompt names are protocol-level method-not-found, matching the unknown-tool policy.
+
+| Prompt | Arguments | Body |
+|---|---|---|
+| `dream` | — (craft's `/dream` is `max_args: 0`) | memory-consolidation pass over the local argosy: discover the local argosy's name from `argosy://_argosys`, enumerate `memory/` via `search` (`namespaces: ["memory"]`, local argosy, high `k`), read each via `read_memory`, then **merge / update / delete / add** via `write_memory` / `delete_memory`; rules keep entries concise, prefer fewer high-quality entries, use absolute `YYYY-MM-DD` dates, fix contradictions at the source, never touch read-only imported argosys, and end with a one-paragraph summary (an explicit no-op is valid) |
+
+- Served as a single user-role `PromptMessage`; descriptions follow the tool-description discipline (what it does, when to reach for it).
+- Handlers are pure functions (`prompt_definitions`, `get_prompt_result`) — prompts carry no server state, unlike tools.
+
+### 2.5 Testing (`tests/mcp.rs`)
 
 - Structure handlers as plain async functions over a `McpState { context: ProjectContext, index: Index<…> }` so they are unit-testable without a live transport: construct state over fixture copies + `MockEmbedder`/`MemStore` where possible (the server must be generic over provider/store like doc 06's `Index`, with the CLI's `mcp` verb instantiating the concrete backend).
 - One end-to-end rmcp test over an in-process transport (the SDK supports duplex/in-memory client-server pairs): initialize → `list_skills` → `search` → `write_memory` → `read_memory` verifies the write → `promote` → URI resource read of the promoted concept.
@@ -76,6 +87,7 @@ Implement exactly this set — each maps 1:1 onto library APIs already built:
 - [ ] Handler unit tests (fixture state, mock backend): every §2.2 resource and §2.3 tool — including error paths (unknown concept URI, write to a bad path, promote without description to styleguide, query scoped to inactive argosy name).
 - [ ] In-process rmcp end-to-end test (§2.4 flow) passes.
 - [ ] Trust fields present: `list_skills` output asserts origin argosy + `verified`/`unverified` tier from fixtures (`SEC-2`).
+- [ ] Prompt coverage: wire test asserts `list_prompts` returns exactly `dream`, `get_prompt("dream")` returns one user-role message naming the workflow's tools (`search`, `read_memory`, `write_memory`, `delete_memory`), and an unknown prompt name is a protocol error.
 - [ ] Imported read-only structural test: no tool accepts an `argosy` parameter for writes — assert at the schema level that write tools have no argosy selector (document the invariant; the type system enforces the rest).
 - [ ] `cargo build --no-default-features` and full-feature builds both compile; `fmt`/`clippy`/`cargo test` clean.
 - [ ] Manual smoke (note in PR): `argosy mcp` launched over stdio from a fixture project directory (cwd) answers an `initialize` handshake — verified once with a real MCP client or SDK example, result recorded.

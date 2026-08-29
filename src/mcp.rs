@@ -790,15 +790,17 @@ fn parse_concept(content: &str) -> Result<Concept> {
 // rmcp wrapper.
 // ---------------------------------------------------------------------------
 
-pub use rmcp_impl::{ArgosyMcpServer, tool_definitions};
+pub use rmcp_impl::{ArgosyMcpServer, get_prompt_result, prompt_definitions, tool_definitions};
 
 mod rmcp_impl {
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError, Implementation,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
-        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-        ServerCapabilities, Tool, ToolAnnotations,
+        CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError,
+        GetPromptRequestMethod, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+        Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
+        ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, Tool,
+        ToolAnnotations,
     };
     use rmcp::service::{RequestContext, RoleServer};
 
@@ -885,6 +887,70 @@ mod rmcp_impl {
                 false,
             ),
         ]
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompts: reusable workflows served as `prompts/list` / `prompts/get`.
+    // -----------------------------------------------------------------------
+
+    /// The `dream` prompt body: a memory-consolidation pass over the local
+    /// argosy, adapted from craft's `/dream`. A curation workflow, not new
+    /// logic — every step names a tool this server already exposes, so any
+    /// MCP harness can run it without special client support.
+    pub const DREAM_PROMPT: &str = r#"# Dream: Memory Consolidation
+
+Review the local argosy's memory and the recent conversation, then consolidate memory so it stays useful and current. This is a curation pass, not a work pass.
+
+## Steps
+
+1. Read the `argosy://_argosys` resource and note the argosy with `"kind": "local"` — that is the only writable argosy, and the scope of this pass.
+2. Enumerate its memory: call `search` with a broad query (e.g. "session notes, decisions, gotchas, learnings"), `namespaces: ["memory"]`, `argosy` set to the local argosy's name, and a high `k` (e.g. 200). Collect the hits' `concept_id` paths.
+3. Read each entry with `read_memory` using its path.
+4. Decide what to do with each entry:
+   - **Merge**: if two entries cover the same topic, combine them into one and delete the redundant copy.
+   - **Update**: if an entry is outdated or incomplete based on the recent conversation, rewrite it with current information.
+   - **Delete**: if an entry is stale, wrong, or no longer relevant, delete it.
+   - **Add**: if the recent conversation surfaced a non-obvious gotcha, decision, or pattern that is NOT yet in memory, add it as a new concise entry.
+5. Apply all changes with `write_memory` (full markdown with frontmatter — keep the entry's valid frontmatter, e.g. its `type`) and `delete_memory`.
+
+## Rules
+
+- Only the local argosy is writable. Imported argosys are read-only — never try to change them.
+- Keep entries concise. Each one should justify its existence.
+- Prefer fewer, higher-quality entries over many small ones.
+- Do not duplicate information that is obvious from the code or README.
+- Do not remove entries that are still relevant, even if old.
+- Convert relative dates ("yesterday", "last week") to absolute `YYYY-MM-DD` so entries stay interpretable as time passes.
+- If a memory contradicts what the recent conversation revealed, fix or delete it at the source rather than leaving both versions.
+- A merge is only done once the merged entry is written and the redundant copies are deleted in the same pass.
+- Report a one-paragraph summary of what you consolidated at the end. If nothing changed and memory is already tight, say so explicitly — a no-op is a valid outcome."#;
+
+    /// The `dream` prompt's one-line description, shared by the listing and
+    /// the resolved result.
+    const DREAM_DESCRIPTION: &str = "Consolidate and deduplicate the local argosy's memory: enumerate memory concepts via search, read them, then merge, update, delete, or add entries with write_memory and delete_memory. Use it after a long session or whenever memory feels redundant.";
+
+    /// The advertised prompt set. Descriptions follow the tool-description
+    /// discipline: what the workflow does and when to reach for it, written
+    /// for LLM consumers. The set is static — no `list_changed`
+    /// notifications.
+    pub fn prompt_definitions() -> Vec<Prompt> {
+        vec![Prompt::new("dream", Some(DREAM_DESCRIPTION), None)]
+    }
+
+    /// Resolves one prompt by name to its messages, or `None` when the name
+    /// is unknown. Pure and stateless: prompts are static workflows, so
+    /// unlike tools they never touch [`McpState`]. The dream workflow runs
+    /// as a single user-role message — the harness sends it as the next
+    /// user turn and the model executes it with the server's tools.
+    pub fn get_prompt_result(name: &str) -> Option<GetPromptResult> {
+        if name == "dream" {
+            Some(
+                GetPromptResult::new(vec![PromptMessage::new_text(Role::User, DREAM_PROMPT)])
+                    .with_description(DREAM_DESCRIPTION),
+            )
+        } else {
+            None
+        }
     }
 
     // The list_skills tool takes no parameters; an empty-schema definition.
@@ -999,6 +1065,7 @@ mod rmcp_impl {
             rmcp::model::ServerInfo::new(
                 ServerCapabilities::builder()
                     .enable_tools()
+                    .enable_prompts()
                     .enable_resources()
                     .build(),
             )
@@ -1024,6 +1091,34 @@ mod rmcp_impl {
 
         fn get_tool(&self, name: &str) -> Option<Tool> {
             tool_definitions().into_iter().find(|t| t.name == name)
+        }
+
+        fn list_prompts(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = std::result::Result<ListPromptsResult, McpError>> + '_
+        {
+            // Static definitions, so no state lock is needed here — unlike
+            // call_tool, whose handlers reconcile the index.
+            std::future::ready(Ok(ListPromptsResult::with_all_items(prompt_definitions())))
+        }
+
+        fn get_prompt(
+            &self,
+            request: GetPromptRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = std::result::Result<GetPromptResponse, McpError>> + '_
+        {
+            match get_prompt_result(&request.name) {
+                // An unknown prompt name is unroutable — the same policy as
+                // call_tool's unknown tool name. Arguments are ignored: the
+                // dream workflow takes none and declares none.
+                None => {
+                    std::future::ready(Err(McpError::method_not_found::<GetPromptRequestMethod>()))
+                }
+                Some(result) => std::future::ready(Ok(GetPromptResponse::Complete(result))),
+            }
         }
 
         fn call_tool(
@@ -2075,5 +2170,55 @@ mod tests {
         assert!(out.drafted.contains("type: Styleguide Rule"));
         assert!(out.drafted.contains("original timestamp"));
         assert!(out.indexed);
+    }
+
+    // --- prompts ---
+
+    #[test]
+    fn prompt_definitions_list_exactly_dream_with_an_llm_description() {
+        let prompts = prompt_definitions();
+        assert_eq!(prompts.len(), 1, "exactly the documented prompt set");
+        let dream = &prompts[0];
+        assert_eq!(dream.name, "dream");
+        assert!(
+            dream.description.as_deref().is_some_and(|d| d.len() > 40),
+            "prompt `dream` needs a real description"
+        );
+        // The dream workflow takes no arguments (craft's /dream is max_args 0).
+        assert!(dream.arguments.is_none());
+    }
+
+    #[test]
+    fn get_prompt_result_returns_one_user_message_naming_the_workflow_tools() {
+        let result = get_prompt_result("dream").expect("dream resolves");
+        assert_eq!(
+            result.description.as_deref(),
+            prompt_definitions()[0].description.as_deref()
+        );
+        assert_eq!(result.messages.len(), 1);
+        let message = &result.messages[0];
+        assert_eq!(message.role, rmcp::model::Role::User);
+        match &message.content {
+            rmcp::model::ContentBlock::Text(text) => {
+                // Self-contained: every tool the workflow drives is named.
+                for tool in ["search", "read_memory", "write_memory", "delete_memory"] {
+                    assert!(text.text.contains(tool), "dream prompt must name `{tool}`");
+                }
+                assert!(
+                    text.text.contains("no-op is a valid outcome"),
+                    "the summary/no-op rule survives"
+                );
+                assert!(
+                    text.text.contains("read-only"),
+                    "imported-argosys read-only rule present"
+                );
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_prompt_result_unknown_name_is_none() {
+        assert!(get_prompt_result("nope").is_none());
     }
 }

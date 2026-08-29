@@ -60,7 +60,10 @@ resources, skill listing with trust tiers, and write tools for the local
 argosy's `document/`, `memory/`, and `styleguide/` namespaces. Writes
 reconcile the index immediately — a concept written through MCP is
 searchable in the same session. The embedding model loads lazily: until
-the first `search`, startup is instant and works offline.
+the first `search`, startup is instant and works offline. It also serves
+a `dream` prompt: a guided memory-consolidation pass (merge, update,
+delete, deduplicate) that harnesses can run whenever the local memory
+feels redundant.
 
 ## Commands
 
