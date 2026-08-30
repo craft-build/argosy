@@ -1179,28 +1179,71 @@ Review the local argosy's memory and the recent conversation, then consolidate m
     /// the resolved result.
     const DREAM_DESCRIPTION: &str = "Consolidate and deduplicate the local argosy's memory: enumerate memory concepts via search, read them, then merge, update, delete, or add entries with write_memory and delete_memory. Use it after a long session or whenever memory feels redundant.";
 
+    /// The `scan` prompt body: a project-documentation pass that investigates
+    /// the project at `cwd` and writes the core document set into the local
+    /// argosy. Like `dream`, a curation workflow: investigation is done with
+    /// the harness's own file tools, while every persistence step names a
+    /// tool this server exposes, so any MCP harness can run it without
+    /// special client support.
+    pub const SCAN_PROMPT: &str = r#"# Scan: Project Documentation
+
+Investigate the project at `cwd` and write what you learn into the local argosy as curated documents, so future sessions start oriented instead of re-reading the whole tree. This is a documentation pass — do not change any project files.
+
+## Steps
+
+0. Every tool call below takes `cwd` — pass the project's absolute root directory on each call (argosys live outside the project tree, keyed by that root).
+1. Read the `argosy://_argosys` resource and note the argosy with `"kind": "local"` — that is the only writable argosy, and where these documents go. Then check what already exists: call `search` with a broad query (e.g. "project summary architecture tech stack development"), `namespaces: ["document"]`, `argosy` set to the local argosy's name, and a high `k` (e.g. 50). Read the hits with `read_memory` — an existing document is updated in place, never duplicated.
+2. Investigate the project with your own file tools (list, read, grep) over the project root; if this server exposes the code-intelligence tools (`repomap`, `outline`, `inspect`), start there for the lay of the land. Prioritize: README and docs, package manifests (`Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, …), entry points and module layout, build/CI config (`Makefile`, `.github/workflows`, `justfile`, …), and tests.
+3. Write the core set with `write_document` (paths are bundle-relative concept paths; the `.md` extension is implicit — `document/summary` lands at `document/summary.md`):
+   - `document/summary` — what the project is, what it does, and for whom; the one-page orientation.
+   - `document/architecture` — the major components, how they connect, where the code lives (real paths), and the flow of a typical request or run.
+   - `document/tech` — languages, frameworks, runtime, and key dependencies with versions taken from the manifests, not from memory.
+   - `document/development` — how to build, test, lint, and run: the actual commands, taken from CI, Makefile, or docs.
+4. Add further documents only when the project clearly warrants them — e.g. `document/decisions/<slug>` (one dated concept per major architectural decision), `document/glossary` (domain terms), `document/conventions` (patterns the codebase consistently follows). Skip anything that would be padding.
+5. If step 1 found a document the project has outgrown, delete it with `delete_document`.
+6. Report a one-paragraph summary of what you wrote, updated, skipped, and deleted.
+
+## Rules
+
+- Every document needs YAML frontmatter with a `type` (e.g. `type: Reference`) and a one-line `description` — unlike memory, an untyped document is rejected, not auto-filled.
+- Ground every claim in something you actually read: real paths, real commands, versions from the manifests. If you are not sure, say so or leave it out.
+- Write for a newcomer session that knows nothing about this project: lead with what matters, keep each document tight, prefer tables of facts over prose.
+- Distill, don't copy: point at canonical files (README, docs) for the long version instead of transcribing them.
+- Re-runs are updates: reuse the same paths so `write_document` reports `updated`, never create near-duplicates under new names.
+- Only the local argosy is writable. Imported argosys are read-only — never try to change them.
+- Record no secrets or credentials.
+- Do not modify the project itself — this pass writes only to the argosy."#;
+
+    /// The `scan` prompt's one-line description, shared by the listing and
+    /// the resolved result.
+    const SCAN_DESCRIPTION: &str = "Investigate the project at cwd and write its core documents (summary, architecture, tech stack, development guide) into the local argosy with write_document, updating existing documents in place. Use it when onboarding a project whose argosy is empty or its documents have drifted from the code.";
+
     /// The advertised prompt set. Descriptions follow the tool-description
     /// discipline: what the workflow does and when to reach for it, written
     /// for LLM consumers. The set is static — no `list_changed`
     /// notifications.
     pub fn prompt_definitions() -> Vec<Prompt> {
-        vec![Prompt::new("dream", Some(DREAM_DESCRIPTION), None)]
+        vec![
+            Prompt::new("dream", Some(DREAM_DESCRIPTION), None),
+            Prompt::new("scan", Some(SCAN_DESCRIPTION), None),
+        ]
     }
 
     /// Resolves one prompt by name to its messages, or `None` when the name
     /// is unknown. Pure and stateless: prompts are static workflows, so
-    /// unlike tools they never touch [`McpState`]. The dream workflow runs
-    /// as a single user-role message — the harness sends it as the next
-    /// user turn and the model executes it with the server's tools.
+    /// unlike tools they never touch [`McpState`]. Each workflow runs as a
+    /// single user-role message — the harness sends it as the next user
+    /// turn and the model executes it with the server's tools.
     pub fn get_prompt_result(name: &str) -> Option<GetPromptResult> {
-        if name == "dream" {
-            Some(
-                GetPromptResult::new(vec![PromptMessage::new_text(Role::User, DREAM_PROMPT)])
-                    .with_description(DREAM_DESCRIPTION),
-            )
-        } else {
-            None
-        }
+        let (body, description) = match name {
+            "dream" => (DREAM_PROMPT, DREAM_DESCRIPTION),
+            "scan" => (SCAN_PROMPT, SCAN_DESCRIPTION),
+            _ => return None,
+        };
+        Some(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                .with_description(description),
+        )
     }
 
     // Every tool takes typed parameters now (list_skills: just `cwd`), so
@@ -2806,17 +2849,19 @@ mod tests {
     // --- prompts ---
 
     #[test]
-    fn prompt_definitions_list_exactly_dream_with_an_llm_description() {
+    fn prompt_definitions_list_exactly_dream_and_scan_with_llm_descriptions() {
         let prompts = prompt_definitions();
-        assert_eq!(prompts.len(), 1, "exactly the documented prompt set");
-        let dream = &prompts[0];
-        assert_eq!(dream.name, "dream");
-        assert!(
-            dream.description.as_deref().is_some_and(|d| d.len() > 40),
-            "prompt `dream` needs a real description"
-        );
-        // The dream workflow takes no arguments (craft's /dream is max_args 0).
-        assert!(dream.arguments.is_none());
+        let names: Vec<_> = prompts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["dream", "scan"], "exactly the documented set");
+        for prompt in &prompts {
+            assert!(
+                prompt.description.as_deref().is_some_and(|d| d.len() > 40),
+                "prompt `{}` needs a real description",
+                prompt.name
+            );
+            // Neither workflow takes arguments (craft's /dream is max_args 0).
+            assert!(prompt.arguments.is_none());
+        }
     }
 
     #[test]
@@ -2838,6 +2883,49 @@ mod tests {
                 assert!(
                     text.text.contains("no-op is a valid outcome"),
                     "the summary/no-op rule survives"
+                );
+                assert!(
+                    text.text.contains("read-only"),
+                    "imported-argosys read-only rule present"
+                );
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_prompt_result_scan_names_the_core_documents_and_write_tools() {
+        let result = get_prompt_result("scan").expect("scan resolves");
+        assert_eq!(
+            result.description.as_deref(),
+            prompt_definitions()
+                .into_iter()
+                .find(|p| p.name == "scan")
+                .expect("scan is listed")
+                .description
+                .as_deref()
+        );
+        assert_eq!(result.messages.len(), 1);
+        let message = &result.messages[0];
+        assert_eq!(message.role, rmcp::model::Role::User);
+        match &message.content {
+            rmcp::model::ContentBlock::Text(text) => {
+                // Self-contained: every tool the workflow drives is named.
+                for tool in ["search", "read_memory", "write_document", "delete_document"] {
+                    assert!(text.text.contains(tool), "scan prompt must name `{tool}`");
+                }
+                // The core document set the workflow promises.
+                for path in [
+                    "document/summary",
+                    "document/architecture",
+                    "document/tech",
+                    "document/development",
+                ] {
+                    assert!(text.text.contains(path), "scan prompt must name `{path}`");
+                }
+                assert!(
+                    text.text.contains("frontmatter"),
+                    "the DOC-1 frontmatter `type` requirement is taught"
                 );
                 assert!(
                     text.text.contains("read-only"),

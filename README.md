@@ -73,7 +73,10 @@ searchable in the same session. The embedding model loads lazily: until
 the first `search`, startup is instant and works offline. It also serves
 a `dream` prompt: a guided memory-consolidation pass (merge, update,
 delete, deduplicate) that harnesses can run whenever the local memory
-feels redundant.
+feels redundant — and a `scan` prompt: a project-documentation pass that
+investigates the codebase and writes the core document set (`summary`,
+`architecture`, `tech`, `development`) into the local argosy, updating
+existing documents in place.
 
 ### Code-intelligence tools
 

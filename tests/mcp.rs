@@ -612,17 +612,18 @@ async fn end_to_end_over_in_process_duplex() {
     );
     assert_eq!(bad.is_error, Some(true), "bad write is a tool error");
 
-    // Prompts: the dream memory-consolidation workflow.
+    // Prompts: the dream memory-consolidation and scan project-documentation
+    // workflows.
     let prompts = client.list_prompts(None).await.unwrap();
-    assert_eq!(prompts.prompts.len(), 1, "exactly one advertised prompt");
-    assert_eq!(prompts.prompts[0].name, "dream");
-    assert!(
-        prompts.prompts[0]
-            .description
-            .as_deref()
-            .is_some_and(|d| !d.is_empty()),
-        "dream carries a description"
-    );
+    let names: Vec<_> = prompts.prompts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["dream", "scan"], "exactly the advertised set");
+    for prompt in &prompts.prompts {
+        assert!(
+            prompt.description.as_deref().is_some_and(|d| !d.is_empty()),
+            "{} carries a description",
+            prompt.name
+        );
+    }
 
     let dream = client
         .get_prompt(rmcp::model::GetPromptRequestParams::new("dream"))
@@ -637,6 +638,24 @@ async fn end_to_end_over_in_process_duplex() {
                 assert!(text.text.contains(tool), "dream names `{tool}`");
             }
             assert!(text.text.contains("no-op is a valid outcome"));
+        }
+        other => panic!("expected text content, got {other:?}"),
+    }
+
+    let scan = client
+        .get_prompt(rmcp::model::GetPromptRequestParams::new("scan"))
+        .await
+        .unwrap();
+    assert_eq!(scan.messages.len(), 1);
+    assert_eq!(scan.messages[0].role, rmcp::model::Role::User);
+    match &scan.messages[0].content {
+        rmcp::model::ContentBlock::Text(text) => {
+            for tool in ["search", "read_memory", "write_document", "delete_document"] {
+                assert!(text.text.contains(tool), "scan names `{tool}`");
+            }
+            for path in ["document/summary", "document/architecture", "document/tech"] {
+                assert!(text.text.contains(path), "scan names `{path}`");
+            }
         }
         other => panic!("expected text content, got {other:?}"),
     }
