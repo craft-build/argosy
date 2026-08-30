@@ -89,18 +89,11 @@ impl FastembedProvider {
     }
 }
 
-/// Where the ONNX model weights are cached. fastembed's own default is
-/// `.fastembed_cache/` **relative to the current directory** — a fresh copy
-/// in every project where argosy first embeds (an MCP server runs with each
-/// project as its CWD). Instead, one shared user-level cache:
-///
-/// - `$FASTEMBED_CACHE_DIR` when set (fastembed's own escape hatch, honored
-///   verbatim), else
-/// - `$XDG_CACHE_HOME/argosy/fastembed`, falling back to
-///   `~/.cache/argosy/fastembed`.
-///
-/// `$HF_HOME`, when set, overrides all of the above inside fastembed itself
-/// (hf-hub's convention) and is honored unchanged.
+/// Where the ONNX model weights are cached. fastembed's default is a
+/// cwd-relative `.fastembed_cache/` — a fresh copy per project; argosy
+/// instead uses one shared user-level cache: `$FASTEMBED_CACHE_DIR` when
+/// set, else `$XDG_CACHE_HOME/argosy/fastembed` (falling back to
+/// `~/.cache/argosy/fastembed`). `$HF_HOME` overrides inside fastembed.
 pub fn model_cache_dir() -> Result<PathBuf> {
     cache_dir_from(
         std::env::var_os("FASTEMBED_CACHE_DIR"),
@@ -136,10 +129,8 @@ fn cache_dir_from(
 /// A [`FastembedProvider`] that defers model construction — and the
 /// first-run ~90 MB download — to the first [`EmbeddingProvider::embed`]
 /// call. Identity and dimensionality derive from static metadata, so
-/// hash-diff reconcile and `index status`-style previews never load the
-/// model: a serving process (the MCP server) starts instantly and works
-/// fully offline except for embedding-dependent operations, which fail
-/// with an actionable hint instead of taking the whole server down.
+/// hash-diff previews never load the model and a serving process starts
+/// instantly; embedding-dependent ops fail with an actionable hint.
 pub struct LazyFastembedProvider {
     model_id: String,
     dimensions: usize,

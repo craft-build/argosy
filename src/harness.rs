@@ -127,13 +127,10 @@ const REVIEWER_DESCRIPTION: &str = "Reviews code against argosy styleguide rules
      to review code, changes, or a diff.";
 
 /// The reviewer subagent's base system prompt: Craft's built-in reviewer
-/// adapted for an MCP harness. Craft-specific machinery (the
-/// `report_finding` tool, `callgraph`, prompt slots) is generalized —
-/// findings are reported in the final message, rule grounding goes
-/// through the argosy MCP tools, and reachability checks use the
-/// harness's own code search. The defect classes, priorities, and
-/// verdict contract are carried over verbatim in spirit so reviews mean
-/// the same thing everywhere argosy is installed.
+/// adapted for an MCP harness — findings go in the final message, rule
+/// grounding goes through the argosy MCP tools, and reachability checks
+/// use the harness's own code search. Defect classes, priorities, and the
+/// verdict contract carry over so reviews mean the same thing everywhere.
 const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against styleguide rules and best practices. Report findings with clear priority levels. Be thorough but constructive.
 
 # Critical rules
