@@ -101,7 +101,8 @@ impl Harness {
                 "name: reviewer\n\
                  description: {REVIEWER_DESCRIPTION}\n\
                  tools: Read, Glob, Grep, mcp__argosy__search, \
-                 mcp__argosy__search_rules, mcp__argosy__read_memory\n\
+                 mcp__argosy__search_rules, mcp__argosy__read, \
+                 mcp__argosy__read_memory\n\
                  model: inherit\n"
             ),
             // Kiro: tool tags — `read` (file reads, listing, search) plus
@@ -147,9 +148,10 @@ const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against st
 
 This project's rules live in its argosy, served over MCP. The argosy is stored outside the project tree (under the user's argosy state dir), so the MCP tools are the way to read it — do not hunt for rule files on disk. When the argosy MCP server is connected, ground the review in it. Every argosy tool call takes `cwd` — pass the project's absolute root directory on every call, or the call is rejected:
 
-- `search_rules` — semantic match of styleguide rules against a natural-language description of the code under review (narrow by `language`/`category`).
+- `search_rules` — semantic match of styleguide rules against a natural-language description of the code under review (narrow by `language`/`category`); each hit carries the rule's `## Good`/`## Bad` sections when present.
 - `search` — semantic search over every concept (documents, skills, rules, memory) for wider context.
-- `read_memory` — direct read of a known concept by bundle-relative path.
+- `read` — direct read of a known concept by bundle-relative path, from any active argosy (`argosy` selects an import; defaults to the local argosy).
+- `read_memory` — direct read of a known concept in the local argosy.
 
 When no rules match, review against general best practices and say that the finding is ungrounded. Never invent rule IDs.
 

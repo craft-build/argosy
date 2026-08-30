@@ -59,6 +59,12 @@ pub struct CodeTools {
     /// One `RepoMap` per canonical root so the tags/render caches survive
     /// across calls (they are signature-checked against disk mtimes anyway).
     repo_maps: Mutex<HashMap<PathBuf, RepoMap>>,
+    /// Serializes mutating runs (`astgrep` apply, `conflicts` resolve). The
+    /// stale-read guard alone is check-then-act over shared files: two
+    /// concurrent applies both pass the check and the second write silently
+    /// wins. Holding this lock across a whole mutating run closes that
+    /// window; read-only runs never take it.
+    write_lock: Mutex<()>,
 }
 
 impl CodeTools {
@@ -73,6 +79,13 @@ impl CodeTools {
         self.tracker
             .check_before_edit(path)
             .map_err(|message| Error::CodeTool { message })
+    }
+
+    /// Takes the mutating-run lock for the duration of the returned guard —
+    /// mutating handlers call this before touching files so concurrent
+    /// mutating runs serialize instead of racing their check-then-write.
+    pub(crate) fn begin_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The cached [`RepoMap`] for `root`, creating it on first use. A

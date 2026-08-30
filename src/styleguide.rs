@@ -89,6 +89,13 @@ impl StyleguideRule {
             && concept.description().is_some_and(|d| !d.trim().is_empty())
     }
 
+    /// A rule view over an already-read concept, without re-walking the
+    /// namespace (the search-enrichment path). Section extraction works on
+    /// any concept; the hard contract is not re-checked here.
+    pub fn from_parts(id: ConceptId, concept: Concept) -> Self {
+        Self { id, concept }
+    }
+
     /// The rule's concept id (e.g. `styleguide/rust/naming/snake-case-vars`).
     pub fn id(&self) -> &ConceptId {
         &self.id

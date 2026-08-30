@@ -55,6 +55,11 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
     let scope_path = resolve_path(&scope)?;
 
     if let Some(choice) = params.resolve.as_deref() {
+        if params.index == Some(0) {
+            return Err(tool_error(
+                "index is 1-indexed; pass 1 for the first conflict, or omit it to resolve all",
+            ));
+        }
         let side = match choice {
             THEIRS => ConflictSide::Theirs,
             OURS => ConflictSide::Ours,
@@ -65,28 +70,41 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
                 )));
             }
         };
-        let (resolved_files, total_conflicts, remaining) =
-            resolve_in_scope(code, &scope_path, side, params.index);
+        // Mutating runs serialize against each other (see
+        // `CodeTools::begin_write`) so the per-file stale-read check cannot
+        // race a concurrent resolve's write.
+        let _write_guard = code.begin_write();
+        let scope = resolve_in_scope(code, &scope_path, side, params.index);
 
-        let text = if resolved_files.is_empty() {
-            format!("no conflicts resolved ({total_conflicts} found, {remaining} remaining)")
+        let mut text = if scope.resolved_files.is_empty() {
+            format!(
+                "no conflicts resolved ({} found, {} remaining)",
+                scope.total_resolved, scope.remaining
+            )
         } else {
             let mut out = format!(
-                "resolved {total_conflicts} conflict(s) as {choice} in {} file(s):\n",
-                resolved_files.len()
+                "resolved {} conflict(s) as {choice} in {} file(s):\n",
+                scope.total_resolved,
+                scope.resolved_files.len()
             );
-            for f in &resolved_files {
+            for f in &scope.resolved_files {
                 out.push_str(&format!("  {f}\n"));
             }
-            if remaining > 0 {
-                out.push_str(&format!("{remaining} conflict(s) remain unresolved\n"));
+            if scope.remaining > 0 {
+                out.push_str(&format!(
+                    "{} conflict(s) remain unresolved\n",
+                    scope.remaining
+                ));
             }
             out
         };
+        for warning in &scope.skipped {
+            text.push_str(&format!("warning: {warning}\n"));
+        }
         return Ok(ConflictsReport {
             path: relative_path(&scope_path),
             text,
-            resolved: Some(total_conflicts),
+            resolved: Some(scope.total_resolved),
         });
     }
 
@@ -126,7 +144,8 @@ fn parse_conflicts(content: &str) -> Vec<ConflictMarker> {
     let mut markers = Vec::new();
     let mut current: Option<ConflictMarker> = None;
 
-    for (i, line) in content.lines().enumerate() {
+    for (i, raw) in content.lines().enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
         if let Some(branch) = line.strip_prefix(CONFLICT_START) {
             current = Some(ConflictMarker {
                 start_line: i + 1,
@@ -154,21 +173,41 @@ enum ConflictSide {
     Base,
 }
 
+/// One file's resolution outcome.
+struct ResolvedFile {
+    /// The rewritten content; meaningful only when `unterminated` is `None`.
+    content: String,
+    /// Number of complete conflicts resolved.
+    resolved: usize,
+    /// 1-based line of a conflict opener that never reached its `>>>>>>> `
+    /// end marker. When set, the rewrite is abandoned: everything from the
+    /// stray opener to EOF is ambiguous, so the file must be left untouched
+    /// rather than silently truncated.
+    unterminated_at: Option<usize>,
+}
+
 /// Rewrite a file's content, resolving conflict markers according to `side`.
 /// `index` selects only the Nth (1-indexed) conflict; `None` resolves all.
-/// Returns the new content and the number of conflicts resolved.
-fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> (String, usize) {
+/// Conflicts outside the selection are re-emitted verbatim, original branch
+/// labels included.
+fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> ResolvedFile {
     let mut out = String::with_capacity(content.len());
     let mut state = 0u8;
     let mut ours = String::new();
     let mut theirs = String::new();
+    let mut opener_line = String::new();
+    let mut separator_line = String::new();
+    let mut opener_at = 0usize;
     let mut count = 0usize;
     let mut resolved = 0usize;
-    let want = index.is_some();
-    let want_n = index.unwrap_or(0);
 
-    for line in content.split_inclusive('\n') {
+    for (i, line) in content.split_inclusive('\n').enumerate() {
+        // Tolerate CRLF checkouts: the markers compare on the bare line, the
+        // original bytes are re-emitted verbatim when a block is preserved.
+        // Each strip falls back to its own input — falling back to `line`
+        // would re-attach the stripped newline.
         let bare = line.strip_suffix('\n').unwrap_or(line);
+        let bare = bare.strip_suffix('\r').unwrap_or(bare);
         match state {
             0 => {
                 if bare.starts_with(CONFLICT_START) {
@@ -176,43 +215,37 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> (
                     state = 1;
                     ours.clear();
                     theirs.clear();
+                    opener_line = line.to_string();
+                    opener_at = i + 1;
                 } else {
                     out.push_str(line);
                 }
             }
             1 => {
                 if bare == CONFLICT_SEPARATOR {
+                    separator_line = line.to_string();
                     state = 2;
                 } else {
                     ours.push_str(line);
                 }
             }
             _ => {
-                if let Some(_branch) = bare.strip_prefix(CONFLICT_END) {
-                    let target = if want && want_n != count {
-                        None
+                if bare.starts_with(CONFLICT_END) {
+                    let keep = index.is_some_and(|n| n != count);
+                    if keep {
+                        out.push_str(&opener_line);
+                        out.push_str(&ours);
+                        out.push_str(&separator_line);
+                        out.push_str(&theirs);
+                        out.push_str(line);
                     } else {
-                        Some(match side {
+                        let target = match side {
                             ConflictSide::Ours => ours.as_str(),
                             ConflictSide::Theirs => theirs.as_str(),
                             ConflictSide::Base => "",
-                        })
-                    };
-                    match target {
-                        Some(t) => {
-                            out.push_str(t);
-                            resolved += 1;
-                        }
-                        None => {
-                            out.push_str(CONFLICT_START);
-                            out.push_str(" ours\n");
-                            out.push_str(&ours);
-                            out.push_str(CONFLICT_SEPARATOR);
-                            out.push('\n');
-                            out.push_str(&theirs);
-                            out.push_str(CONFLICT_END);
-                            out.push_str(" theirs\n");
-                        }
+                        };
+                        out.push_str(target);
+                        resolved += 1;
                     }
                     state = 0;
                 } else {
@@ -221,8 +254,27 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> (
             }
         }
     }
-    let _ = want;
-    (out, resolved)
+    if state != 0 {
+        return ResolvedFile {
+            content: String::new(),
+            resolved: 0,
+            unterminated_at: Some(opener_at),
+        };
+    }
+    ResolvedFile {
+        content: out,
+        resolved,
+        unterminated_at: None,
+    }
+}
+
+/// Files resolved, counts for the summary, and warnings for files skipped
+/// because they end inside an unterminated conflict block.
+struct ScopeResolution {
+    resolved_files: Vec<String>,
+    total_resolved: usize,
+    remaining: usize,
+    skipped: Vec<String>,
 }
 
 fn resolve_in_scope(
@@ -230,17 +282,33 @@ fn resolve_in_scope(
     scope_path: &str,
     side: ConflictSide,
     index: Option<usize>,
-) -> (Vec<String>, usize, usize) {
+) -> ScopeResolution {
     let files = collect_conflict_files(scope_path);
-    let mut resolved_files = Vec::new();
-    let mut total_resolved = 0usize;
-    let mut remaining = 0usize;
+    let mut out = ScopeResolution {
+        resolved_files: Vec::new(),
+        total_resolved: 0,
+        remaining: 0,
+        skipped: Vec::new(),
+    };
 
     for (path, content) in files {
-        let (new_content, resolved) = resolve_content(&content, side, index);
+        let file = resolve_content(&content, side, index);
         let marker_count = parse_conflicts(&content).len();
-        remaining += marker_count.saturating_sub(resolved);
-        if resolved > 0 {
+        if let Some(line) = file.unterminated_at {
+            tracing::warn!(
+                path = %path,
+                opener_line = line,
+                "conflicts resolve: unterminated conflict block, leaving file untouched"
+            );
+            out.skipped.push(format!(
+                "{}: conflict opener at line {line} has no >>>>>>> end marker; file left untouched — fix the marker or resolve manually",
+                relative_path(&path)
+            ));
+            out.remaining += marker_count;
+            continue;
+        }
+        out.remaining += marker_count.saturating_sub(file.resolved);
+        if file.resolved > 0 {
             // The stale-read guard compares against the last read from an
             // earlier tool call (zoom, ...); this scan deliberately does not
             // record its reads first, so the guard stays meaningful.
@@ -250,20 +318,20 @@ fn resolve_in_scope(
                     %message,
                     "conflicts resolve: skipping file"
                 );
-                remaining += resolved;
+                out.remaining += file.resolved;
                 continue;
             }
-            if let Err(e) = std::fs::write(&path, &new_content) {
+            if let Err(e) = std::fs::write(&path, &file.content) {
                 tracing::warn!(path = %path, error = %e, "conflicts resolve: write failed");
-                remaining += resolved;
+                out.remaining += file.resolved;
                 continue;
             }
             code.record_read(std::path::Path::new(&path));
-            total_resolved += resolved;
-            resolved_files.push(relative_path(&path));
+            out.total_resolved += file.resolved;
+            out.resolved_files.push(relative_path(&path));
         }
     }
-    (resolved_files, total_resolved, remaining)
+    out
 }
 
 fn collect_conflict_files(scope_path: &str) -> Vec<(String, String)> {
@@ -378,20 +446,90 @@ end";
     #[test_case(ConflictSide::Theirs, "top\ntheirs-line\nbottom\nsecond-theirs\nend" ; "resolve_all_theirs")]
     #[test_case(ConflictSide::Base, "top\nbottom\nend" ; "resolve_all_base")]
     fn resolve_content_all(side: ConflictSide, expected: &str) {
-        let (out, count) = resolve_content(CONFLICT_TEXT, side, None);
-        assert_eq!(count, 2);
-        assert_eq!(out, expected);
+        let file = resolve_content(CONFLICT_TEXT, side, None);
+        assert_eq!(file.resolved, 2);
+        assert!(file.unterminated_at.is_none());
+        assert_eq!(file.content, expected);
     }
 
     #[test]
     fn resolve_content_only_nth_keeps_others() {
-        let (out, count) = resolve_content(CONFLICT_TEXT, ConflictSide::Theirs, Some(2));
-        assert_eq!(count, 1);
+        let file = resolve_content(CONFLICT_TEXT, ConflictSide::Theirs, Some(2));
+        assert_eq!(file.resolved, 1);
         assert!(
-            out.contains("ours-line"),
+            file.content.contains("ours-line"),
             "first conflict should be untouched"
         );
-        assert!(out.contains("second-theirs"));
+        assert!(file.content.contains("second-theirs"));
+    }
+
+    #[test]
+    fn resolve_content_only_nth_preserves_original_labels() {
+        let file = resolve_content(CONFLICT_TEXT, ConflictSide::Theirs, Some(2));
+        assert!(
+            file.content
+                .contains("<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> feature\n"),
+            "preserved conflict should re-emit the original markers verbatim, got:\n{}",
+            file.content
+        );
+    }
+
+    #[test]
+    fn resolve_content_aborts_on_unterminated_block() {
+        let content = "\
+top
+<<<<<<< HEAD
+ours-line
+=======
+theirs-line
+>>>>>>> feature
+bottom
+<<<<<<< HEAD
+stray-ours
+";
+        let file = resolve_content(content, ConflictSide::Theirs, None);
+        assert_eq!(file.unterminated_at, Some(8), "opener at line 8 never ends");
+        assert_eq!(file.resolved, 0);
+    }
+
+    #[test]
+    fn run_leaves_unterminated_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        let content = "\
+top
+<<<<<<< HEAD
+ours-line
+=======
+theirs-line
+>>>>>>> feature
+bottom
+<<<<<<< HEAD
+stray-ours
+";
+        std::fs::write(&file, content).unwrap();
+
+        let tools = CodeTools::default();
+        let report = run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: Some("@theirs".into()),
+                index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            content,
+            "file with an unterminated block must be left byte-identical"
+        );
+        assert_eq!(report.resolved, Some(0));
+        assert!(
+            report.text.contains("no >>>>>>> end marker"),
+            "report should name the unterminated block: {}",
+            report.text
+        );
     }
 
     #[test]
@@ -455,6 +593,39 @@ end";
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("theirs-line"), "got {after}");
         assert!(after.contains("second-ours"), "got {after}");
+    }
+
+    #[test]
+    fn run_rejects_index_zero() {
+        let tools = CodeTools::default();
+        let err = run(
+            &tools,
+            ConflictsParams {
+                path: None,
+                resolve: Some("@ours".into()),
+                index: Some(0),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("1-indexed"), "{err}");
+    }
+
+    #[test]
+    fn resolve_content_handles_crlf_files() {
+        let content =
+            "top\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> feature\r\nend\r\n";
+        let file = resolve_content(content, ConflictSide::Theirs, None);
+        assert!(file.unterminated_at.is_none());
+        assert_eq!(file.resolved, 1);
+        assert_eq!(file.content, "top\r\ntheirs\r\nend\r\n");
+
+        // Preserved (index-mode) blocks keep their CRLF bytes verbatim.
+        let kept = resolve_content(content, ConflictSide::Theirs, Some(99));
+        assert_eq!(
+            kept.content,
+            "top\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> feature\r\nend\r\n",
+            "nothing selected, nothing rewritten"
+        );
     }
 
     #[test]

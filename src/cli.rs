@@ -716,7 +716,7 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        IndexVerb::Build | IndexVerb::Query(_) => {
+        IndexVerb::Build => {
             let context = ProjectContext::open_project(&root)?;
             let store = SqliteVecStore::open(&db)?;
             // Loading the model takes a moment (and a ~90 MB download on a
@@ -726,43 +726,56 @@ fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             let provider = FastembedProvider::new_default()?;
             let mut index = Index::new(provider, store);
             let report = index.reconcile(&context)?;
-            match &args.verb {
-                IndexVerb::Build => {
-                    if out.json {
-                        out.json(&report)?;
-                    } else {
-                        let how = if report.rebuilt { "rebuilt" } else { "updated" };
-                        out.note(&format!(
-                            "index {how}: {} upserted, {} removed, {} unchanged [{}]",
-                            report.upserted, report.removed, report.unchanged, report.model_id
-                        ));
-                    }
-                    Ok(ExitCode::SUCCESS)
-                }
-                IndexVerb::Query(q) => {
-                    let query = Query {
-                        text: q.text.clone(),
-                        k: q.k,
-                        filter: build_filter(q),
-                    };
-                    let hits = index.search(&context, &query)?;
-                    if out.json {
-                        out.json(&hits)?;
-                    } else {
-                        for hit in &hits {
-                            let description = hit.meta.description.as_deref().unwrap_or("");
-                            println!(
-                                "{:.4}  {}  —  {}",
-                                hit.score,
-                                hit.concept.to_uri(),
-                                description
-                            );
-                        }
-                    }
-                    Ok(ExitCode::SUCCESS)
-                }
-                IndexVerb::Status => unreachable!("handled above"),
+            if out.json {
+                out.json(&report)?;
+            } else {
+                let how = if report.rebuilt { "rebuilt" } else { "updated" };
+                out.note(&format!(
+                    "index {how}: {} upserted, {} removed, {} unchanged [{}]",
+                    report.upserted, report.removed, report.unchanged, report.model_id
+                ));
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        IndexVerb::Query(q) => {
+            let context = ProjectContext::open_project(&root)?;
+            if !db.is_file() {
+                out.note(&format!(
+                    "no index at {} — run `argosy index build`",
+                    db.display()
+                ));
+                if out.json {
+                    out.json(&serde_json::json!({"hits": [], "db": db}))?;
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            // `query` is a read-only verb like `status`: it searches the
+            // index as built (the query text is embedded in-process, never
+            // in the store) and must work on a read-only index.
+            let store = SqliteVecStore::open_read_only(&db)?;
+            eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+            let provider = FastembedProvider::new_default()?;
+            let index = Index::new(provider, store);
+            let query = Query {
+                text: q.text.clone(),
+                k: q.k,
+                filter: build_filter(q),
+            };
+            let hits = index.search(&context, &query)?;
+            if out.json {
+                out.json(&hits)?;
+            } else {
+                for hit in &hits {
+                    let description = hit.meta.description.as_deref().unwrap_or("");
+                    println!(
+                        "{:.4}  {}  —  {}",
+                        hit.score,
+                        hit.concept.to_uri(),
+                        description
+                    );
+                }
+            }
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

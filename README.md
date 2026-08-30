@@ -4,6 +4,12 @@ Knowledge book system for coding harnesses. Argosy manages **OKF knowledge
 bundles** — directories of markdown concepts with YAML frontmatter — and
 serves them to any MCP-compatible harness (OpenCode, Claude Code, editors)
 as searchable, referenceable knowledge: `argosy://<name>/<namespace>/<id>`.
+The bundle format follows the [Open Knowledge Format][okf]
+([spec][okf-spec]); argosy's own requirements are in
+[`docs/specification.md`](docs/specification.md).
+
+[okf]: https://github.com/GoogleCloudPlatform/open-knowledge-format
+[okf-spec]: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
 
 Argosy data never lives in the project tree — agents working the tree
 would read the markdown directly, bypassing the argosy MCP tools.
@@ -30,6 +36,14 @@ and `styleguide/` (lintable rules) — plus any producer-defined custom ones.
 
 ## Install
 
+From crates.io:
+
+```sh
+cargo install argosy
+```
+
+Or from a checkout:
+
 ```sh
 cargo install --path .
 ```
@@ -53,7 +67,7 @@ argosy index build
 argosy mcp
 ```
 
-Wire it into a harness, e.g. OpenCode (`opencode.json`):
+Wire it into a harness. OpenCode (`opencode.json`):
 
 ```json
 {
@@ -65,12 +79,36 @@ Wire it into a harness, e.g. OpenCode (`opencode.json`):
 }
 ```
 
+Claude Code:
+
+```sh
+claude mcp add argosy -- argosy mcp
+```
+
+or in an `.mcp.json` at the project root (or `~/.claude.json` for all
+projects):
+
+```json
+{
+  "mcpServers": {
+    "argosy": { "command": "argosy", "args": ["mcp"] }
+  }
+}
+```
+
+The same `mcpServers` shape works for Cursor and ZCode; any MCP client that
+can spawn a stdio server can host argosy.
+
 The server exposes semantic `search` / `search_rules` tools, `argosy://`
-resources, skill listing with trust tiers, and write tools for the local
-argosy's `document/`, `memory/`, and `styleguide/` namespaces. Writes
+resources, a `read` tool for concepts in any active argosy (including
+read-only imports), skill listing with trust tiers, and write tools for the
+local argosy's `document/`, `memory/`, and `styleguide/` namespaces. `search`
+hits carry each concept's frontmatter `description`; `search_rules` hits
+additionally carry the rule's `## Good` / `## Bad` sections, so a review
+sees the examples in one call. Writes
 reconcile the index immediately — a concept written through MCP is
-searchable in the same session. The embedding model loads lazily: until
-the first `search`, startup is instant and works offline. It also serves
+searchable in the same session. The embedding model loads lazily: until the
+first `search`, startup is instant and works offline. It also serves
 a `dream` prompt: a guided memory-consolidation pass (merge, update,
 delete, deduplicate) that harnesses can run whenever the local memory
 feels redundant — and a `scan` prompt: a project-documentation pass that

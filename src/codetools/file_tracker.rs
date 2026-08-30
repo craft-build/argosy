@@ -38,7 +38,7 @@ impl FileReadTracker {
         let normalized = normalize_path(path);
         match get_mtime(&normalized) {
             Some(mtime) => {
-                self.0.lock().unwrap().insert(normalized, mtime);
+                self.lock().insert(normalized, mtime);
             }
             None => warn!(
                 path = %path.display(),
@@ -49,7 +49,7 @@ impl FileReadTracker {
 
     pub fn check_before_edit(&self, path: &Path) -> Result<(), String> {
         let normalized = normalize_path(path);
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = self.lock();
         let Some(&recorded) = guard.get(&normalized) else {
             return Ok(());
         };
@@ -67,7 +67,16 @@ impl FileReadTracker {
     }
 
     pub fn read_paths(&self) -> Vec<PathBuf> {
-        self.0.lock().unwrap().keys().cloned().collect()
+        self.lock().keys().cloned().collect()
+    }
+}
+
+impl FileReadTracker {
+    /// A poisoned lock only means some other call panicked mid-edit; the
+    /// map itself is still consistent, so recover the guard instead of
+    /// panicking on every later call (`NO-UNWRAP-IN-PROD`).
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, SystemTime>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

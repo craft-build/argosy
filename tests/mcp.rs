@@ -269,6 +269,7 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         "get_skill",
         "search_rules",
         "read_memory",
+        "read",
         "write_memory",
         "delete_memory",
         "write_rule",
@@ -292,9 +293,9 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         assert!(names.contains(&expected), "missing tool `{expected}`");
     }
     #[cfg(feature = "code-tools")]
-    let expected_total = 19;
+    let expected_total = 20;
     #[cfg(not(feature = "code-tools"))]
-    let expected_total = 12;
+    let expected_total = 13;
     assert_eq!(
         tools.len(),
         expected_total,
@@ -322,8 +323,12 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
                 "mutating tool `{}` must not take an argosy selector",
                 tool.name
             );
-        } else if tool.name.as_ref() == "search" {
-            assert!(props.contains_key("argosy"), "search scopes by argosy");
+        } else if matches!(tool.name.as_ref(), "search" | "read") {
+            assert!(
+                props.contains_key("argosy"),
+                "{} scopes by argosy",
+                tool.name
+            );
         }
         // Every tool carries an LLM-facing description.
         assert!(
@@ -479,6 +484,55 @@ async fn end_to_end_over_in_process_duplex() {
             .as_str()
             .unwrap()
             .contains("# E2E")
+    );
+
+    // `read` with an `argosy` selector reaches an imported argosy — the
+    // tool-side path for imported concepts (resources serve only the
+    // process working directory's project).
+    let imported_read = complete(
+        client
+            .call_tool_once(call(
+                "read",
+                serde_json::json!({
+                    "cwd": &cwd,
+                    "path": "skill/shared-audit",
+                    "argosy": "acme-shared",
+                }),
+            ))
+            .await
+            .unwrap(),
+    );
+    let imported_read = structured(&imported_read);
+    assert_eq!(imported_read["kind"], "imported");
+    assert_eq!(
+        imported_read["uri"],
+        "argosy://acme-shared/skill/shared-audit"
+    );
+    assert!(
+        imported_read["content"]
+            .as_str()
+            .unwrap()
+            .contains("Steps."),
+        "imported content round-trips, got {imported_read}"
+    );
+
+    let unknown_argosy = complete(
+        client
+            .call_tool_once(call(
+                "read",
+                serde_json::json!({
+                    "cwd": &cwd,
+                    "path": "skill/shared-audit",
+                    "argosy": "not-active",
+                }),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        unknown_argosy.is_error,
+        Some(true),
+        "unknown argosy is a tool error"
     );
 
     // write_document → same-session search sees it → delete_document makes

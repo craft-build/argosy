@@ -129,7 +129,10 @@ impl Manifest {
     ];
 
     /// Builds a manifest from the parsed root concept. Fails if `name` is
-    /// missing/empty or `argosy_version` is missing/malformed.
+    /// missing/empty or outside the URI charset `[A-Za-z0-9._-]` (the name
+    /// appears in `argosy://` URIs — a name the resolver would reject must
+    /// fail at open, not at first use), or if `argosy_version` is
+    /// missing/malformed.
     pub fn parse(concept: &Concept) -> Result<Self> {
         let name = concept
             .get_str("name")
@@ -140,6 +143,15 @@ impl Manifest {
             })?
             .trim()
             .to_string();
+        ensure!(
+            is_safe_bundle_name(&name),
+            ValidationSnafu {
+                reason: format!(
+                    "manifest `name` `{name}` is outside the URI charset [A-Za-z0-9._-]; \
+                     the name appears in argosy:// URIs, so rename the argosy before using it"
+                )
+            }
+        );
 
         let raw_version = concept
             .get("argosy_version")
@@ -639,6 +651,21 @@ impl Argosy {
                 Some("STR-5"),
                 Some(manifest_rel.clone()),
                 "manifest must declare a non-empty `name` field (§4.2)",
+            ));
+        } else if let Some(name) = concept.get_str("name").map(str::trim)
+            && !is_safe_bundle_name(name)
+        {
+            // `Manifest::parse` refuses the same names, so `validate` must
+            // report them — a conformant bundle always opens.
+            report.push(Finding::new(
+                Severity::Error,
+                Some("STR-5"),
+                Some(manifest_rel.clone()),
+                format!(
+                    "manifest `name` `{name}` is outside the URI charset [A-Za-z0-9._-]; \
+                     the name appears in argosy:// URIs, so the argosy cannot be opened \
+                     as named (§4.2)"
+                ),
             ));
         }
         match concept.get("argosy_version").and_then(scalar_str) {
@@ -1165,6 +1192,50 @@ mod tests {
         )
         .unwrap();
         assert!(Manifest::parse(&concept).is_err());
+    }
+
+    /// A name outside the URI charset must fail at parse/open, not surface
+    /// later as `argosy://` URIs the resolver rejects.
+    #[test]
+    fn manifest_parse_rejects_unsafe_name_charset() {
+        for bad in ["my bundle", "acme/billing", "ünïcode", ".."] {
+            let concept = Concept::from_str(&format!(
+                "---\ntype: Argosy Manifest\nname: {bad}\nargosy_version: \"1.0.0\"\n---\nbody\n"
+            ))
+            .unwrap();
+            let err = Manifest::parse(&concept).unwrap_err();
+            assert!(
+                err.to_string().contains("URI charset"),
+                "name `{bad}` should fail with a charset error, got: {err}"
+            );
+        }
+        let concept = Concept::from_str(
+            "---\ntype: Argosy Manifest\nname: acme-billing.v2\nargosy_version: \"1.0.0\"\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(Manifest::parse(&concept).is_ok());
+    }
+
+    /// `validate` and `open` must agree: a name outside the URI charset
+    /// fails to open (STR-5), so `validate` reports it as an error finding
+    /// instead of passing a bundle nothing else can use.
+    #[test]
+    fn validate_reports_unsafe_manifest_name_as_str5() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: my bundle\nargosy_version: \"1.0.0\"\n---\n# t\n",
+        )
+        .unwrap();
+        let report = Argosy::validate(root);
+        let str5: Vec<_> = report.errors().filter(|f| f.id == Some("STR-5")).collect();
+        assert_eq!(str5.len(), 1, "one finding, got {report:?}");
+        assert!(
+            str5[0].message.contains("URI charset"),
+            "unexpected message: {}",
+            str5[0].message
+        );
     }
 
     #[test]

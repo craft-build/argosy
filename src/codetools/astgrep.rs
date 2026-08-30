@@ -71,6 +71,14 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
     let pattern_str = params.pattern.as_str();
     let rewrite_str = params.rewrite.as_deref();
 
+    // Mutating runs serialize against each other (see `CodeTools::begin_write`)
+    // so the stale-read check below cannot race a concurrent apply's write.
+    let _write_guard = if apply {
+        Some(code.begin_write())
+    } else {
+        None
+    };
+
     let search_path = resolve_path(params.path.as_deref().unwrap_or("."))?;
     let globs = params.globs.clone().unwrap_or_default();
     let lang_types = lang.file_types();
