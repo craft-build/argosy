@@ -30,19 +30,35 @@ pub const LOCAL_ARGOSY_NAME: &str = "default";
 pub const INDEX_DB_NAME: &str = "index.db";
 
 /// The user's argosy state root: `$XDG_STATE_HOME/argosy` (falling back
-/// to `~/.local/state/argosy`). Every argosy path — global checkouts,
-/// project checkouts, indexes — derives from here, keeping argosy data
-/// out of the project tree entirely.
+/// to `~/.local/state/argosy`, and on Windows — where neither
+/// `$XDG_STATE_HOME` nor `$HOME` is set by default — to
+/// `%USERPROFILE%\AppData\Local\argosy`). Every argosy path — global
+/// checkouts, project checkouts, indexes — derives from here, keeping
+/// argosy data out of the project tree entirely.
 pub fn state_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| home_state_base(PathBuf::from(home)))
+        })
         .with_context(|| ValidationSnafu {
             reason: "cannot locate the argosy state directory: set XDG_STATE_HOME or HOME"
                 .to_string(),
         })?;
     Ok(base.join("argosy"))
+}
+
+/// The per-user state base under `home`: `~/.local/state` on Unix,
+/// `<home>\AppData\Local` on Windows (which has no POSIX home layout).
+fn home_state_base(home: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        home.join("AppData").join("Local")
+    } else {
+        home.join(".local").join("state")
+    }
 }
 
 /// The directory holding argosies installed for the user, shared by every
@@ -108,6 +124,19 @@ fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
 /// [`crate::bundle::is_safe_bundle_name`]). All-or-nothing: a failed or
 /// non-bundle clone leaves no partial checkout behind.
 pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
+    // The URL reaches `git` verbatim: a leading dash would be parsed as a
+    // git option (`--upload-pack=<cmd>` executes commands), and `ext::`
+    // transports execute local commands by design. The CLI caller is the
+    // local user, but this is a public library API — refuse option-shaped
+    // URLs up front rather than trusting every future caller.
+    ensure!(
+        !url.is_empty() && !url.starts_with('-'),
+        ValidationSnafu {
+            reason: format!(
+                "invalid clone url `{url}`: pass a git URL or remote name, not an option"
+            )
+        }
+    );
     ensure!(
         crate::bundle::is_safe_bundle_name(name),
         ValidationSnafu {
@@ -223,6 +252,28 @@ mod tests {
             std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         );
         assert!(matches!(err, crate::error::Error::Io { .. }), "got {err:?}");
+    }
+
+    /// Option-shaped URLs must be refused before they reach `git clone`:
+    /// `--upload-pack=<cmd>` (or an `ext::` transport) executes commands.
+    #[test]
+    fn clone_as_checkout_refuses_option_like_urls() {
+        for bad in ["--upload-pack=touch /tmp/pwned", "-", ""] {
+            let err = clone_as_checkout(bad, Path::new("/tmp/none"), "name").unwrap_err();
+            assert!(
+                err.to_string().contains("invalid clone url"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn home_state_base_is_posix_local_state() {
+        assert_eq!(
+            home_state_base(PathBuf::from("/home/u")),
+            PathBuf::from("/home/u/.local/state")
+        );
     }
 
     // --- state-dir layout ---

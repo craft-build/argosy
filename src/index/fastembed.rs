@@ -98,7 +98,7 @@ pub fn model_cache_dir() -> Result<PathBuf> {
     cache_dir_from(
         std::env::var_os("FASTEMBED_CACHE_DIR"),
         std::env::var_os("XDG_CACHE_HOME"),
-        std::env::var_os("HOME"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
     )
 }
 
@@ -117,7 +117,18 @@ fn cache_dir_from(
     let base = xdg_cache_home
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| home.map(|home| PathBuf::from(home).join(".cache")))
+        // `~/.cache` on Unix; on Windows `home` arrives via USERPROFILE
+        // (HOME is unset there) and the per-user cache is AppData\Local.
+        .or_else(|| {
+            home.map(|home| {
+                let home = PathBuf::from(home);
+                if cfg!(windows) {
+                    home.join("AppData").join("Local")
+                } else {
+                    home.join(".cache")
+                }
+            })
+        })
         .context(IndexSnafu {
             reason: "cannot locate the embedding-model cache: set FASTEMBED_CACHE_DIR, \
                      XDG_CACHE_HOME, or HOME"
