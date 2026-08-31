@@ -145,8 +145,13 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
             let rel = relative_path(&path.to_string_lossy());
 
             if apply {
+                // Roll back only when the replacement INTRODUCES errors: a
+                // file that already carried error nodes (WIP code) must not
+                // have every rewrite rejected for damage it did not cause.
                 let repl_grep = lang.ast_grep(&new_content);
-                if has_error_or_missing(&repl_grep.root()) {
+                if has_error_or_missing(&repl_grep.root())
+                    && !has_error_or_missing(&grep.root())
+                {
                     rolled_back = true;
                     results.push(format!(
                         "{rel}: ROLLED BACK — replacement introduces syntax errors"
@@ -471,6 +476,29 @@ mod tests {
         assert_eq!(report.rolled_back, Some(true));
         // The file must be untouched.
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    /// The rollback guard blames the replacement only: a file that already
+    /// carried error nodes (WIP code) must still accept valid rewrites.
+    #[test]
+    fn run_apply_tolerates_pre_existing_syntax_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/main.rs"),
+            "fn broken() { struct }\nfn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+
+        let tools = CodeTools::default();
+        let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
+        assert_eq!(report.files_changed, Some(1));
+        assert_eq!(report.rolled_back, Some(false));
+        assert!(
+            std::fs::read_to_string(dir.path().join("src/main.rs"))
+                .unwrap()
+                .contains("eprintln!")
+        );
     }
 
     #[test]
