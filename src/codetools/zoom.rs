@@ -95,10 +95,9 @@ fn zoom_by_symbol(
             .iter()
             .map(|s| {
                 format!(
-                    "{}::{}:{} ({}-{})",
+                    "{}::{} (lines {}-{})",
                     s.kind.label(),
                     s.name,
-                    s.range.start_row + 1,
                     s.range.start_row + 1,
                     s.range.end_row + 1
                 )
@@ -288,6 +287,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
+        // Each candidate carries its line range — the discriminator the
+        // caller needs to pick one.
+        assert!(err.to_string().contains("(lines "), "{err}");
     }
 
     #[test]

@@ -152,14 +152,39 @@ fn inspect_git_status(scope: &str) -> Result<String> {
         path
     };
 
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "--"])
+    // Resolve the actual worktree root first: the scope can then be passed
+    // as a pathspec (status from a subdirectory of the repo would otherwise
+    // report the whole tree, ignoring the scope), and "not a repo" stays
+    // distinguishable from other git failures.
+    let toplevel = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
         .current_dir(repo_dir)
+        .output()
+        .map_err(|e| tool_error(format!("git status failed: {e}")))?;
+    if !toplevel.status.success() {
+        return Ok("git_status: (not a git repo)\n".to_string());
+    }
+    let root = String::from_utf8_lossy(&toplevel.stdout).trim().to_string();
+    // Canonicalize so the strip works even when the scope reached the repo
+    // through a symlinked path (e.g. /tmp on macOS).
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let rel = canonical
+        .strip_prefix(&root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain=v1"]).current_dir(&root);
+    if !rel.is_empty() {
+        cmd.arg("--").arg(&rel);
+    }
+    let output = cmd
         .output()
         .map_err(|e| tool_error(format!("git status failed: {e}")))?;
 
     if !output.status.success() {
-        return Ok("git_status: (not a git repo)\n".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Ok(format!("git_status: (git failed: {stderr})\n"));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -257,5 +282,28 @@ mod tests {
             "got {}",
             report.text
         );
+    }
+
+    /// The scope is honored as a pathspec: status for one file does not
+    /// report the whole repository.
+    #[test]
+    fn git_status_scopes_to_the_pathspec() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+
+        let scoped =
+            inspect_git_status(root.join("b.txt").to_string_lossy().into_owned().as_str()).unwrap();
+        assert!(scoped.contains("b.txt"), "got {scoped}");
+        assert!(!scoped.contains("a.txt"), "got {scoped}");
     }
 }

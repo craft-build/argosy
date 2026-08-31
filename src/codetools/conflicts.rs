@@ -311,7 +311,7 @@ fn resolve_in_scope(
     side: ConflictSide,
     index: Option<usize>,
 ) -> ScopeResolution {
-    let (files, skipped, mut remaining) = collect_conflict_files(scope_path);
+    let (files, skipped, remaining) = collect_conflict_files(scope_path);
     let mut out = ScopeResolution {
         resolved_files: Vec::new(),
         total_resolved: 0,
