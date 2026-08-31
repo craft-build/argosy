@@ -276,6 +276,18 @@ impl FromStr for ConceptId {
                     }
                     .fail();
                 }
+                // The walk skips `.argosy/` at every depth, so an id with
+                // such a segment would write a concept no read path can
+                // ever see — listing, validation, and the index all miss it.
+                ".argosy" => {
+                    return ValidationSnafu {
+                        reason: format!(
+                            "invalid concept id `{raw}`: `.argosy` is reserved for the \
+                             bundle-local index"
+                        ),
+                    }
+                    .fail();
+                }
                 s => {
                     if !id.is_empty() {
                         id.push('/');
@@ -454,6 +466,17 @@ mod tests {
     fn concept_id_rejects_colons() {
         assert!("C:/evil".parse::<ConceptId>().is_err());
         assert!("a:b".parse::<ConceptId>().is_err());
+    }
+
+    /// `.argosy` segments would write concepts the walk can never list
+    /// (it skips `.argosy/` at every depth), so they are rejected up front.
+    #[test]
+    fn concept_id_rejects_argosy_segments() {
+        assert!("document/.argosy/foo".parse::<ConceptId>().is_err());
+        assert!(".argosy/foo".parse::<ConceptId>().is_err());
+        // The string is only reserved as a whole segment.
+        assert!("document/foo.argosy".parse::<ConceptId>().is_ok());
+        assert!("document/argosy/foo".parse::<ConceptId>().is_ok());
     }
 
     #[test]
