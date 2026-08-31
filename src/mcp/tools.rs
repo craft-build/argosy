@@ -127,7 +127,7 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::conflicts::ConflictsParams>(
             "conflicts",
-            "Find and resolve git merge conflicts. Scans tracked files for conflict markers (<<<<<<<, =======, >>>>>>>) and returns each conflicting file with marker locations and branch names. Resolve by passing resolve: \"@theirs\" keeps the incoming (their branch) side, \"@ours\" keeps the current (our branch) side, \"@base\" drops both sides; omit resolve to list only. index (1-indexed) resolves a single conflict within each file; omit it to resolve all conflicts in scope. Resolution writes are refused when a file changed since you last read it through these tools.",
+            "Find and resolve git merge conflicts. Scans files under the path (respecting gitignore, tracked or not) for conflict markers (<<<<<<<, =======, >>>>>>>) and returns each conflicting file with marker locations and branch names. Resolve by passing resolve: \"@theirs\" keeps the incoming (their branch) side, \"@ours\" keeps the current (our branch) side, \"@base\" drops both sides; omit resolve to list only. index (1-indexed) resolves a single conflict within each file; omit it to resolve all conflicts in scope. Resolution writes are refused when a file changed since you last read it through these tools.",
             false,
             false,
         ),

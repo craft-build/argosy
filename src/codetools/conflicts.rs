@@ -109,9 +109,9 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
         });
     }
 
-    let conflicts = collect_conflicts(code, &scope_path);
+    let (conflicts, warnings) = collect_conflicts(code, &scope_path);
 
-    let text = if conflicts.is_empty() {
+    let text = if conflicts.is_empty() && warnings.is_empty() {
         "no merge conflicts found".to_string()
     } else {
         let mut out = format!("merge conflicts in {} file(s):\n", conflicts.len());
@@ -123,6 +123,9 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
                     m.start_line, m.end_line, m.our_branch, m.their_branch
                 ));
             }
+        }
+        for warning in &warnings {
+            out.push_str(&format!("warning: {warning}\n"));
         }
         out
     };
@@ -308,12 +311,12 @@ fn resolve_in_scope(
     side: ConflictSide,
     index: Option<usize>,
 ) -> ScopeResolution {
-    let files = collect_conflict_files(scope_path);
+    let (files, skipped, mut remaining) = collect_conflict_files(scope_path);
     let mut out = ScopeResolution {
         resolved_files: Vec::new(),
         total_resolved: 0,
-        remaining: 0,
-        skipped: Vec::new(),
+        remaining,
+        skipped,
     };
 
     for (path, content) in files {
@@ -359,49 +362,103 @@ fn resolve_in_scope(
     out
 }
 
-fn collect_conflict_files(scope_path: &str) -> Vec<(String, String)> {
+/// Files with conflict markers in scope, split by readability: UTF-8 files
+/// (resolvable here) and files whose raw bytes carry markers but which are
+/// not valid UTF-8 — those stay conflicted and unresolvable by this tool,
+/// so they must be surfaced, never silently dropped.
+#[derive(Default)]
+struct ScannedConflicts {
+    files: Vec<(String, String)>,
+    non_utf8: Vec<(String, usize)>,
+}
+
+fn scan_conflict_files(code: Option<&CodeTools>, scope_path: &str) -> ScannedConflicts {
     let builder = ignore::WalkBuilder::new(scope_path)
         .hidden(true)
         .git_ignore(true)
         .build();
-    let mut out = Vec::new();
+    let mut out = ScannedConflicts::default();
     for entry in builder.flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.path();
-        if let Ok(content) = std::fs::read_to_string(path)
-            && content.contains(CONFLICT_START)
-        {
-            out.push((path.to_string_lossy().into_owned(), content));
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                // Listing mode records its reads (feeding the stale-read
+                // guard); resolve mode deliberately does not, so its guard
+                // keeps comparing against the last read from an earlier
+                // tool call.
+                if let Some(code) = code {
+                    code.record_read(path);
+                }
+                if content.contains(CONFLICT_START) {
+                    out.files
+                        .push((path.to_string_lossy().into_owned(), content));
+                }
+            }
+            Err(_) => {
+                // Not valid UTF-8 (or unreadable): check the raw bytes so a
+                // conflicted file in another encoding or a mangled checkout
+                // cannot hide behind the failed read.
+                let Ok(bytes) = std::fs::read(path) else {
+                    continue;
+                };
+                let marker = CONFLICT_START.as_bytes();
+                let count = bytes.windows(marker.len()).filter(|w| *w == marker).count();
+                if count > 0 {
+                    out.non_utf8
+                        .push((path.to_string_lossy().into_owned(), count));
+                }
+            }
         }
     }
     out
 }
 
-fn collect_conflicts(code: &CodeTools, scope_path: &str) -> Vec<(String, Vec<ConflictMarker>)> {
-    let builder = ignore::WalkBuilder::new(scope_path)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
+/// Resolve-mode view of the scan: resolvable files plus warnings and a
+/// remaining-count contribution for the non-UTF-8 ones.
+fn collect_conflict_files(scope_path: &str) -> (Vec<(String, String)>, Vec<String>, usize) {
+    let scanned = scan_conflict_files(None, scope_path);
+    let mut remaining = 0usize;
+    let skipped = scanned
+        .non_utf8
+        .iter()
+        .map(|(path, count)| {
+            remaining += count;
+            format!(
+                "{}: contains conflict markers but is not valid UTF-8; resolve manually",
+                relative_path(path)
+            )
+        })
+        .collect();
+    (scanned.files, skipped, remaining)
+}
 
+fn collect_conflicts(
+    code: &CodeTools,
+    scope_path: &str,
+) -> (Vec<(String, Vec<ConflictMarker>)>, Vec<String>) {
+    let scanned = scan_conflict_files(Some(code), scope_path);
     let mut conflicts = Vec::new();
-    for entry in builder.flatten() {
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        code.record_read(path);
+    for (path, content) in scanned.files {
         let markers = parse_conflicts(&content);
         if !markers.is_empty() {
-            let rel = relative_path(&path.to_string_lossy());
+            let rel = relative_path(&path);
             conflicts.push((rel, markers));
         }
     }
-    conflicts
+    let warnings = scanned
+        .non_utf8
+        .iter()
+        .map(|(path, _)| {
+            format!(
+                "{}: contains conflict markers but is not valid UTF-8; resolve manually",
+                relative_path(path)
+            )
+        })
+        .collect();
+    (conflicts, warnings)
 }
 
 #[cfg(test)]
@@ -706,5 +763,54 @@ stray-ours
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown resolve choice"), "{err}");
+    }
+
+    /// A conflicted file that is not valid UTF-8 cannot be resolved here,
+    /// but it must not silently vanish from either report.
+    #[test]
+    fn non_utf8_conflicted_file_is_surfaced_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        // Invalid UTF-8 byte inside otherwise marker-bearing content.
+        let mut bytes = b"<<<<<<< HEAD\nours\n".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\n=======\ntheirs\n>>>>>>> feature\n");
+        std::fs::write(dir.path().join("blob.txt"), bytes).unwrap();
+
+        let tools = CodeTools::default();
+        let listed = run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: None,
+                index: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            listed.text.contains("not valid UTF-8"),
+            "listing must warn: {}",
+            listed.text
+        );
+
+        let resolved = run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: Some("@theirs".into()),
+                index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.resolved, Some(0));
+        assert!(
+            resolved.text.contains("not valid UTF-8"),
+            "resolve must warn: {}",
+            resolved.text
+        );
+        assert!(
+            resolved.text.contains("(0 found, 1 remaining)"),
+            "the unresolvable conflict must count as remaining: {}",
+            resolved.text
+        );
     }
 }
