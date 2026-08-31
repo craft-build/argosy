@@ -191,17 +191,17 @@ impl LocalArgosy {
             && inner.components().count() == 2
             && is_skill_entry_point(inner)
         {
+            // No argosy write API removes a whole skill directory (delete
+            // is concept-file shaped), so the error must say what to do
+            // out-of-band, not point at an API that does not exist.
+            let skill_dir = path.parent().unwrap_or(&path);
             return NamespaceContractViolationSnafu {
                 requirement: "SKL-2",
                 detail: format!(
                     "deleting `{rel:?}` alone would orphan the directory-form skill; \
-                     delete the whole skill directory `skill/{}/` instead",
-                    inner.components().next().map_or("", |c| {
-                        match c {
-                            Component::Normal(s) => s.to_str().unwrap_or(""),
-                            _ => "",
-                        }
-                    })
+                     remove the whole directory `{}` instead (out-of-band — no argosy \
+                     API deletes skill directories)",
+                    skill_dir.display()
                 ),
             }
             .fail();
@@ -344,7 +344,18 @@ impl LocalArgosy {
         };
         match frontmatter.get_mut("sources") {
             Some(Value::Sequence(sources)) => sources.push(provenance),
-            _ => {
+            // A hand-edited `sources` scalar must be surfaced, not
+            // silently replaced with a fresh one-element list.
+            Some(_) => {
+                return ValidationSnafu {
+                    reason: format!(
+                        "cannot promote `{source}`: its `sources` frontmatter is not a \
+                         list — fix the memory concept before promoting"
+                    ),
+                }
+                .fail();
+            }
+            None => {
                 frontmatter.insert(
                     Value::String("sources".to_string()),
                     Value::Sequence(vec![provenance]),

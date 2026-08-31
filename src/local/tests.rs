@@ -478,6 +478,55 @@ fn promote_preserves_preseeded_sources() {
     );
 }
 
+/// Provenance is append, never replace: a hand-edited scalar `sources`
+/// must error, not silently become a fresh one-element list.
+#[test]
+fn promote_refuses_non_list_sources_instead_of_replacing() {
+    let tmp = fixture_copy("valid-acme-billing");
+    let local = LocalArgosy::open(tmp.path()).unwrap();
+    let concept = Concept::from_str(
+        "---\ntype: Session Note\ndescription: d\nsources: jira-123\n---\nBody.\n",
+    )
+    .unwrap();
+    local
+        .write_memory(&id("memory/bad-sources"), &concept)
+        .unwrap();
+
+    let err = local
+        .promote_memory(
+            &id("memory/bad-sources"),
+            PromotionTarget::Document,
+            &id("document/promoted-bad-sources"),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("`sources` frontmatter is not a list"),
+        "{err}"
+    );
+    assert!(!tmp.path().join("document/promoted-bad-sources.md").exists());
+}
+
+/// The refusal names the concrete directory to remove out-of-band, since
+/// no argosy API deletes skill directories.
+#[test]
+fn deleting_a_directory_skill_entry_point_names_the_directory() {
+    let tmp = fixture_copy("valid-acme-billing");
+    let local = LocalArgosy::open(tmp.path()).unwrap();
+    let err = local
+        .delete_concept(Namespace::Skill, &id("skill/rotate-api-keys/rotate-api-keys"))
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no argosy API deletes skill directories"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("rotate-api-keys"),
+        "must name the skill directory: {msg}"
+    );
+}
+
 #[test]
 fn promote_leaves_source_and_tree_conformant() {
     let tmp = fixture_copy("valid-acme-billing");
