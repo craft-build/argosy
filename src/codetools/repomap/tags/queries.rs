@@ -25,6 +25,7 @@ fn lang_tags_query(lang: LangId) -> &'static LazyLock<Option<Query>> {
     match lang {
         LangId::Rust => &RUST_TAGS_QUERY,
         LangId::TypeScript => &TS_TAGS_QUERY,
+        LangId::Tsx => &TSX_TAGS_QUERY,
         LangId::Python => &PY_TAGS_QUERY,
         LangId::Go => &GO_TAGS_QUERY,
         LangId::Java => &JAVA_TAGS_QUERY,
@@ -87,6 +88,16 @@ static TS_TAGS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
     build_tags_query(
         "typescript",
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        TS_TAGS_SRC,
+    )
+});
+
+// Same query source against the TSX grammar: JSX files parse with it, and
+// the captured node kinds are shared with plain TypeScript.
+static TSX_TAGS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_tags_query(
+        "tsx",
+        &tree_sitter_typescript::LANGUAGE_TSX.into(),
         TS_TAGS_SRC,
     )
 });

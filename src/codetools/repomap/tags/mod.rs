@@ -33,6 +33,7 @@ pub struct FileTags {
 pub enum LangId {
     Rust,
     TypeScript,
+    Tsx,
     Python,
     Go,
     Java,
@@ -63,7 +64,10 @@ impl LangId {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
-            "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some(Self::TypeScript),
+            // JSX-bearing files need the TSX grammar; plain TypeScript
+            // chokes on JSX and yields error-ridden tags.
+            "ts" | "js" | "mjs" | "cjs" => Some(Self::TypeScript),
+            "tsx" | "jsx" => Some(Self::Tsx),
             "py" | "pyi" => Some(Self::Python),
             "go" => Some(Self::Go),
             "java" => Some(Self::Java),
@@ -96,6 +100,7 @@ impl LangId {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
             Self::Java => tree_sitter_java::LANGUAGE.into(),
