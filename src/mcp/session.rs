@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bundle::Namespace;
-use crate::concept::ConceptId;
+use crate::concept::{Concept, ConceptId};
 use crate::context::{ProjectContext, QualifiedConceptId};
 use crate::error::{Error, Result};
 use crate::index::{EmbeddingProvider, Filter, Index, Query, VectorStore};
-use crate::local::PromotionTarget;
+use crate::local::{LocalArgosy, PromotionTarget};
 
 use super::params::*;
 use super::reports::*;
@@ -264,40 +264,26 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// `type: Memory`. Overwrites report `action: "updated"` so silent
     /// destruction is never silent. Only the local argosy is writable.
     pub fn write_memory(&mut self, params: WriteParams) -> Result<WriteReport> {
-        let id = concept_id(&params.path)?;
-        let concept = parse_concept(&params.content)?;
-        let existed = self.existed(&id);
-        self.context.local().write_memory(&id, &concept)?;
-        let action = if existed { "updated" } else { "created" };
-        Ok(self.written_report(action, params.path, &id))
+        self.write_ns(params, LocalArgosy::write_memory)
     }
 
     /// Deletes a memory concept from the local argosy, then reconciles the
     /// index so the deletion is immediately reflected in search.
     pub fn delete_memory(&mut self, params: ReadPathParams) -> Result<WriteReport> {
-        let id = concept_id(&params.path)?;
-        self.context.local().delete_memory(&id)?;
-        Ok(self.deleted_report(params.path))
+        self.delete_ns(params, LocalArgosy::delete_memory)
     }
 
     /// Writes a styleguide rule to the local argosy, enabling user rule
     /// extension, then reconciles the index. The namespace contract is
     /// validated by the library before anything touches disk.
     pub fn write_rule(&mut self, params: WriteParams) -> Result<WriteReport> {
-        let id = concept_id(&params.path)?;
-        let concept = parse_concept(&params.content)?;
-        let existed = self.existed(&id);
-        self.context.local().write_rule(&id, &concept)?;
-        let action = if existed { "updated" } else { "created" };
-        Ok(self.written_report(action, params.path, &id))
+        self.write_ns(params, LocalArgosy::write_rule)
     }
 
     /// Deletes a styleguide rule from the local argosy, then reconciles the
     /// index.
     pub fn delete_rule(&mut self, params: ReadPathParams) -> Result<WriteReport> {
-        let id = concept_id(&params.path)?;
-        self.context.local().delete_rule(&id)?;
-        Ok(self.deleted_report(params.path))
+        self.delete_ns(params, LocalArgosy::delete_rule)
     }
 
     /// Writes a document concept (full markdown with frontmatter) to the
@@ -305,19 +291,41 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// immediately searchable. Overwrites report `action: "updated"`.
     /// Only the local argosy is writable.
     pub fn write_document(&mut self, params: WriteParams) -> Result<WriteReport> {
-        let id = concept_id(&params.path)?;
-        let concept = parse_concept(&params.content)?;
-        let existed = self.existed(&id);
-        self.context.local().write_document(&id, &concept)?;
-        let action = if existed { "updated" } else { "created" };
-        Ok(self.written_report(action, params.path, &id))
+        self.write_ns(params, LocalArgosy::write_document)
     }
 
     /// Deletes a document concept from the local argosy, then reconciles
     /// the index so the deletion is immediately reflected in search.
     pub fn delete_document(&mut self, params: ReadPathParams) -> Result<WriteReport> {
+        self.delete_ns(params, LocalArgosy::delete_document)
+    }
+
+    /// The shared write path behind the three write tools: identical
+    /// except for the [`LocalArgosy`] method each namespace delegates to,
+    /// so the id parsing, `created`/`updated` detection, and reporting
+    /// cannot drift between them.
+    fn write_ns(
+        &mut self,
+        params: WriteParams,
+        write: impl FnOnce(&LocalArgosy, &ConceptId, &Concept) -> Result<PathBuf>,
+    ) -> Result<WriteReport> {
         let id = concept_id(&params.path)?;
-        self.context.local().delete_document(&id)?;
+        let concept = parse_concept(&params.content)?;
+        let existed = self.existed(&id);
+        write(self.context.local(), &id, &concept)?;
+        let action = if existed { "updated" } else { "created" };
+        Ok(self.written_report(action, params.path, &id))
+    }
+
+    /// The shared delete path behind the three delete tools; see
+    /// [`ProjectSession::write_ns`].
+    fn delete_ns(
+        &mut self,
+        params: ReadPathParams,
+        delete: impl FnOnce(&LocalArgosy, &ConceptId) -> Result<()>,
+    ) -> Result<WriteReport> {
+        let id = concept_id(&params.path)?;
+        delete(self.context.local(), &id)?;
         Ok(self.deleted_report(params.path))
     }
 
