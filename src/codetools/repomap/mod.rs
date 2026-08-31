@@ -197,7 +197,10 @@ impl RepoMap {
         let defs = graph::top_defs_for_files(&file_tags, &ranked, &mentioned_idents, max_defs);
 
         let budget = if context_files.is_empty() {
-            self.max_tokens * NO_CONTEXT_MULTIPLIER
+            // `max_tokens` is client-supplied; saturate rather than
+            // overflow (a panic in debug builds, a wrapped near-empty
+            // budget in release).
+            self.max_tokens.saturating_mul(NO_CONTEXT_MULTIPLIER)
         } else {
             self.max_tokens
         };
@@ -305,6 +308,19 @@ mod tests {
         let first = map.get_repo_map(&[], &[], "same message");
         let second = map.get_repo_map(&[], &[], "same message");
         assert_eq!(first, second);
+    }
+
+    /// `max_tokens` is a client-supplied u32; the ×8 no-context widening
+    /// must saturate instead of overflowing.
+    #[test]
+    fn repomap_saturates_token_budget_instead_of_overflowing() {
+        let dir = TempDir::new().unwrap();
+        init_git_repo(dir.path());
+        fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
+
+        let map = RepoMap::new(dir.path()).with_max_tokens(u32::MAX);
+        let rendered = map.get_repo_map(&[], &[], "");
+        assert!(rendered.contains("hello"), "got {rendered}");
     }
 
     #[test]
