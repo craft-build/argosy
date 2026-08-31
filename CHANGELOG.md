@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/craft-build/argosy/compare/v0.2.0...v0.2.1) - 2026-08-31
+
+### Added
+
+- add MCP read tool, fix tool/conflict edge cases, add CI
+- *(mcp)* add `scan` project-documentation prompt
+
+### Fixed
+
+- assorted small robustness cleanups
+- *(local)* error on non-list promote sources; name the directory in skill delete
+- refuse option-like clone urls; fall back to USERPROFILE for home
+- *(zoom,inspect)* clearer ambiguity candidates; scoped, honest git status
+- *(callgraph)* mark recursive edges and cap the rendered tree
+- *(conflicts)* surface conflicted files that are not valid UTF-8
+- *(repomap)* parse tsx and jsx files with the tsx grammar
+- *(outline)* call a Rust function a method only inside impl or trait
+- *(outline)* size-check before reading, track reads, cap single files
+- *(outline)* markdown headings span their sections; html headings are h1-h6 only
+- *(concept)* unique staging files and clean them up on failed renames
+- *(convert)* reconcile the index after a styleguide import
+- *(repomap)* saturate the token budget instead of overflowing
+- *(astgrep)* roll back only rewrites that introduce new syntax errors
+- *(astgrep)* skip stale or unwritable files per-file in apply
+- reject .argosy path segments in concept ids
+- *(conflicts)* handle diff3/zdiff3 base sections in resolve
+- *(outline)* floor the 30KB truncation cut to a char boundary
+- never read bundle concepts through symlinks
+
+### Other
+
+- update stale-read e2e to per-file skip contract; fmt
+- *(mcp)* collapse the triplicated write and delete handlers
+- restructure crate into per-module directories
+
 ## [0.2.0](https://github.com/craft-build/argosy/compare/v0.1.2...v0.2.0) - 2026-08-29
 
 ### Added
