@@ -598,3 +598,66 @@ fn run_missing_path_errors() {
     .unwrap_err();
     assert!(err.to_string().contains("does not exist"), "{err}");
 }
+
+/// Directory mode records its reads like every other code tool, so the
+/// stale-read guard covers files an agent last saw through an outline.
+#[test]
+fn run_dir_mode_records_reads_for_the_stale_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+
+    let tools = super::CodeTools::default();
+    let report = run(
+        &tools,
+        OutlineParams {
+            path: dir.path().to_string_lossy().into_owned(),
+            files: None,
+        },
+    )
+    .unwrap();
+    assert!(report.text.contains("a.rs"), "got {}", report.text);
+
+    let file = dir.path().join("a.rs");
+    std::fs::write(&file, "fn a() { changed }\n").unwrap();
+    assert!(
+        tools.check_before_edit(std::path::Path::new(&file)).is_err(),
+        "the outline's read must feed the stale-read guard"
+    );
+}
+
+#[test]
+fn run_dir_mode_labels_oversize_files_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("big.rs"), "x".repeat(MAX_FILE_BYTES + 10)).unwrap();
+    std::fs::write(dir.path().join("ok.rs"), "fn ok() {}\n").unwrap();
+
+    let tools = super::CodeTools::default();
+    let report = run(
+        &tools,
+        OutlineParams {
+            path: dir.path().to_string_lossy().into_owned(),
+            files: Some(true),
+        },
+    )
+    .unwrap();
+    assert!(report.text.contains("big.rs (too large)"), "got {}", report.text);
+    assert!(report.text.contains("ok.rs"));
+}
+
+#[test]
+fn run_single_oversize_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.rs");
+    std::fs::write(&big, "x".repeat(MAX_FILE_BYTES + 1)).unwrap();
+
+    let tools = super::CodeTools::default();
+    let err = run(
+        &tools,
+        OutlineParams {
+            path: big.to_string_lossy().into_owned(),
+            files: None,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("too large"), "{err}");
+}

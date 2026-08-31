@@ -62,12 +62,12 @@ pub struct OutlineReport {
 
 /// Runs the `outline` tool: one file renders its symbol tree; a directory
 /// renders per-file trees (or a flat file table with `files`).
-pub fn run(_code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
+pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
     let path = resolve_path(&params.path)?;
     let p = Path::new(&path);
 
     if p.is_dir() {
-        let (text, truncated) = outline_dir(&path, params.files.unwrap_or(false));
+        let (text, truncated) = outline_dir(code, &path, params.files.unwrap_or(false));
         return Ok(OutlineReport {
             path: relative_path(&path),
             text,
@@ -82,8 +82,19 @@ pub fn run(_code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
         )));
     }
 
+    // A single explicit file gets the same size cap as directory walks,
+    // checked before the read so a giant file is never fully loaded.
+    let size = std::fs::metadata(p)
+        .map_err(|e| tool_error(format!("read error: {e}")))?
+        .len();
+    if size > MAX_FILE_BYTES as u64 {
+        return Err(tool_error(format!(
+            "file is too large to outline ({size} bytes; the limit is {MAX_FILE_BYTES})"
+        )));
+    }
+
     let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
-    _code.record_read(p);
+    code.record_read(p);
 
     let Some(lang) = LangId::from_path(p) else {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
@@ -106,13 +117,23 @@ pub fn run(_code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
     })
 }
 
-fn outline_dir(path: &str, files_mode: bool) -> (String, bool) {
+fn outline_dir(code: &CodeTools, path: &str, files_mode: bool) -> (String, bool) {
     let mut entries: Vec<DirEntry> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut total_bytes: usize = 0;
 
     for entry in walk_source_files(path) {
         let p = Path::new(&entry);
+        // Size-check before reading: a giant file must not be fully loaded
+        // (a giant non-UTF-8 one not read at all) just to be labeled
+        // "(too large)".
+        let too_large = std::fs::metadata(p)
+            .map(|m| m.len() > MAX_FILE_BYTES as u64)
+            .unwrap_or(false);
+        if too_large {
+            skipped.push(format!("{} (too large)", relative_path(&entry)));
+            continue;
+        }
         let content = match std::fs::read_to_string(p) {
             Ok(c) => c,
             Err(_) => {
@@ -120,21 +141,16 @@ fn outline_dir(path: &str, files_mode: bool) -> (String, bool) {
                 continue;
             }
         };
+        // Recorded like every other code-tool read, so `astgrep` apply and
+        // `conflicts` resolve refuse to edit a file that changed since this
+        // outline saw it.
+        code.record_read(p);
         total_bytes += content.len();
 
         let Some(lang) = LangId::from_path(p) else {
-            if content.len() > MAX_FILE_BYTES {
-                skipped.push(format!("{} (too large)", relative_path(&entry)));
-            } else {
-                skipped.push(format!("{} (unsupported)", relative_path(&entry)));
-            }
+            skipped.push(format!("{} (unsupported)", relative_path(&entry)));
             continue;
         };
-
-        if content.len() > MAX_FILE_BYTES {
-            skipped.push(format!("{} (too large)", relative_path(&entry)));
-            continue;
-        }
 
         let symbols = extract_symbols(&content, lang);
         let tree = build_outline_tree(&symbols);
