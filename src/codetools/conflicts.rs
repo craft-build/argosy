@@ -16,6 +16,7 @@ use crate::error::Result;
 
 const CONFLICT_START: &str = "<<<<<<< ";
 const CONFLICT_SEPARATOR: &str = "=======";
+const CONFLICT_BASE: &str = "|||||||";
 const CONFLICT_END: &str = ">>>>>>> ";
 const THEIRS: &str = "@theirs";
 const OURS: &str = "@ours";
@@ -192,9 +193,16 @@ struct ResolvedFile {
 /// labels included.
 fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> ResolvedFile {
     let mut out = String::with_capacity(content.len());
+    // 0 = outside a conflict, 1 = ours, 2 = theirs, 3 = diff3 base.
     let mut state = 0u8;
     let mut ours = String::new();
     let mut theirs = String::new();
+    // diff3 and zdiff3 conflict styles (`merge.conflictStyle = diff3`)
+    // interpose a `|||||||` base section between ours and the separator.
+    // Every side choice drops it (`@base` drops the whole conflict), but
+    // a preserved block re-emits it verbatim, original label included.
+    let mut base = String::new();
+    let mut base_marker_line = String::new();
     let mut opener_line = String::new();
     let mut separator_line = String::new();
     let mut opener_at = 0usize;
@@ -215,6 +223,8 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> R
                     state = 1;
                     ours.clear();
                     theirs.clear();
+                    base.clear();
+                    base_marker_line.clear();
                     opener_line = line.to_string();
                     opener_at = i + 1;
                 } else {
@@ -225,8 +235,19 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> R
                 if bare == CONFLICT_SEPARATOR {
                     separator_line = line.to_string();
                     state = 2;
+                } else if bare.starts_with(CONFLICT_BASE) {
+                    base_marker_line = line.to_string();
+                    state = 3;
                 } else {
                     ours.push_str(line);
+                }
+            }
+            3 => {
+                if bare == CONFLICT_SEPARATOR {
+                    separator_line = line.to_string();
+                    state = 2;
+                } else {
+                    base.push_str(line);
                 }
             }
             _ => {
@@ -235,6 +256,10 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> R
                     if keep {
                         out.push_str(&opener_line);
                         out.push_str(&ours);
+                        if !base_marker_line.is_empty() {
+                            out.push_str(&base_marker_line);
+                            out.push_str(&base);
+                        }
                         out.push_str(&separator_line);
                         out.push_str(&theirs);
                         out.push_str(line);
@@ -472,6 +497,46 @@ end";
             "preserved conflict should re-emit the original markers verbatim, got:\n{}",
             file.content
         );
+    }
+
+    /// A diff3/zdiff3-style conflict (`merge.conflictStyle = diff3`) carries
+    /// a `|||||||` base section that must never leak into a resolution.
+    const DIFF3_TEXT: &str = "\
+top
+<<<<<<< HEAD
+ours-line
+||||||| merged common ancestors
+base-line
+=======
+theirs-line
+>>>>>>> feature
+bottom";
+
+    #[test_case(ConflictSide::Ours, "top\nours-line\nbottom" ; "diff3_resolve_ours")]
+    #[test_case(ConflictSide::Theirs, "top\ntheirs-line\nbottom" ; "diff3_resolve_theirs")]
+    #[test_case(ConflictSide::Base, "top\nbottom" ; "diff3_resolve_base")]
+    fn resolve_content_diff3_drops_base_section(side: ConflictSide, expected: &str) {
+        let file = resolve_content(DIFF3_TEXT, side, None);
+        assert_eq!(file.resolved, 1);
+        assert!(file.unterminated_at.is_none());
+        assert_eq!(file.content, expected);
+    }
+
+    #[test]
+    fn resolve_content_diff3_preserved_block_is_verbatim() {
+        let file = resolve_content(DIFF3_TEXT, ConflictSide::Ours, Some(2));
+        assert_eq!(file.resolved, 0);
+        assert_eq!(file.content, DIFF3_TEXT);
+    }
+
+    #[test]
+    fn parse_conflicts_handles_diff3_sections() {
+        let markers = parse_conflicts(DIFF3_TEXT);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].start_line, 2);
+        assert_eq!(markers[0].end_line, 8);
+        assert_eq!(markers[0].our_branch, "HEAD");
+        assert_eq!(markers[0].their_branch, "feature");
     }
 
     #[test]
