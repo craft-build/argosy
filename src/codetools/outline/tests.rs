@@ -661,3 +661,17 @@ fn run_single_oversize_file_is_refused() {
     .unwrap_err();
     assert!(err.to_string().contains("too large"), "{err}");
 }
+
+/// A Rust function is a method only inside `impl`/`trait` — a named
+/// enclosing scope alone (`mod tests`) must not relabel it.
+#[test]
+fn rust_functions_inside_mods_stay_functions() {
+    let src = "mod tests {\n    fn helper() {}\n}\nimpl Foo {\n    fn method(&self) {}\n}\nfn free() {}\n";
+    let symbols = extract_symbols(src, LangId::Rust);
+    let helper = symbols.iter().find(|s| s.name == "helper").unwrap();
+    assert_eq!(helper.kind, SymbolKind::Function);
+    let method = symbols.iter().find(|s| s.name == "method").unwrap();
+    assert_eq!(method.kind, SymbolKind::Method);
+    let free = symbols.iter().find(|s| s.name == "free").unwrap();
+    assert_eq!(free.kind, SymbolKind::Function);
+}

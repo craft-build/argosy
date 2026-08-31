@@ -88,6 +88,18 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
         let exported = is_exported(def_node, lang, content.as_bytes());
         let scope_chain = build_scope_chain(def_node, content.as_bytes());
 
+        // Rust: a function is a method only inside an `impl`/`trait`, not
+        // merely because it has a named enclosing scope — `mod tests { fn
+        // helper() {} }` must stay a function.
+        let kind = if matches!(lang, LangId::Rust)
+            && kind == SymbolKind::Function
+            && in_impl_or_trait(def_node)
+        {
+            SymbolKind::Method
+        } else {
+            kind
+        };
+
         let import_segments = if kind == SymbolKind::Import {
             parse_import_segments(&sig, import_sep)
         } else {
@@ -124,7 +136,7 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
         symbols.retain(|s| s.kind != SymbolKind::Heading || is_hn_heading(&s.name));
     }
 
-    if matches!(lang, LangId::Rust | LangId::Python) {
+    if matches!(lang, LangId::Python) {
         for sym in &mut symbols {
             if sym.kind == SymbolKind::Function && sym.scope_chain.iter().any(|s| !s.is_empty()) {
                 sym.kind = SymbolKind::Method;
@@ -133,6 +145,18 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
     }
 
     symbols
+}
+
+/// True iff some ancestor of `node` is a Rust `impl` or `trait` block.
+fn in_impl_or_trait(node: tree_sitter::Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if matches!(parent.kind(), "impl_item" | "trait_item") {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 /// A markdown heading's ATX level, read off its signature (`## Setup` → 2).
