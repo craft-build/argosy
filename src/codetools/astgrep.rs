@@ -105,9 +105,19 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
         // it compares against the last read from an earlier tool call
         // (zoom, a previous astgrep, ...). Craft checked after recording,
         // which made its own check a no-op; checking first implements the
-        // documented intent.
-        if apply {
-            code.check_before_edit(&path)?;
+        // documented intent. A stale file skips that file's apply only —
+        // rewrites already written to other files must be reported, not
+        // buried by one opaque error — and its read stays unrecorded so
+        // the guard keeps comparing against the earlier, now-stale view.
+        let stale = if apply {
+            code.check_before_edit(&path).err()
+        } else {
+            None
+        };
+        if let Some(message) = stale {
+            let rel = relative_path(&path.to_string_lossy());
+            results.push(format!("{rel}: SKIPPED — {message}"));
+            continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -144,8 +154,12 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
                     continue;
                 }
                 let diff_count = count_changes(&content, &new_content);
-                std::fs::write(&path, &new_content)
-                    .map_err(|e| tool_error(format!("write error: {e}")))?;
+                // A per-file write failure skips that file only; the rest
+                // of the run (and its report) must survive it.
+                if let Err(e) = std::fs::write(&path, &new_content) {
+                    results.push(format!("{rel}: SKIPPED — write error: {e}"));
+                    continue;
+                }
                 code.record_read(&path);
                 files_changed += 1;
                 results.push(format!("{rel}: {diff_count} replacement(s) applied"));
@@ -460,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn run_apply_refuses_stale_read() {
+    fn run_apply_skips_stale_read() {
         let dir = write_fixture();
         let file = dir.path().join("src/main.rs");
 
@@ -468,10 +482,47 @@ mod tests {
         // First call records the read (dry-run), then the file changes
         // externally before the apply.
         run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
-        std::fs::write(&file, "fn main() {\n    println!(\"changed\");\n}\n").unwrap();
+        let changed = "fn main() {\n    println!(\"changed\");\n}\n";
+        std::fs::write(&file, changed).unwrap();
 
-        let err = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap_err();
-        assert!(err.to_string().contains("changed since last read"), "{err}");
+        // The stale file is skipped and reported, not a whole-run error.
+        let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
+        assert_eq!(report.files_changed, Some(0));
+        assert!(
+            report.text.contains("changed since last read"),
+            "got {}",
+            report.text
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), changed);
+    }
+
+    /// One stale file must not bury rewrites already written to others:
+    /// apply is per-file, and the report says exactly which file skipped.
+    #[test]
+    fn run_apply_skips_stale_file_and_applies_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() { println!(\"a\"); }\n").unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), "fn b() { println!(\"b\"); }\n").unwrap();
+
+        let tools = CodeTools::default();
+        run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
+        let changed = "fn b() { println!(\"changed\"); }\n";
+        std::fs::write(dir.path().join("src/b.rs"), changed).unwrap();
+
+        let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
+        assert_eq!(report.files_changed, Some(1));
+        assert!(
+            report.text.contains("src/b.rs") && report.text.contains("SKIPPED"),
+            "got {}",
+            report.text
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("src/a.rs"))
+                .unwrap()
+                .contains("eprintln!")
+        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("src/b.rs")).unwrap(), changed);
     }
 
     #[test]
