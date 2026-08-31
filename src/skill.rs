@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use snafu::ResultExt;
 
-use crate::bundle::{Argosy, Finding, Namespace, Severity};
+use crate::bundle::{Argosy, Finding, Namespace, Severity, is_real_dir, is_real_file};
 use crate::concept::{Concept, ConceptId};
 use crate::error::{IoSnafu, Result};
 
@@ -122,7 +122,10 @@ fn candidates(ns_dir: &Path) -> Result<Vec<Candidate>> {
 /// entry-point contract (tolerant listing: breakage belongs to validation).
 fn load(candidate: &Candidate, ns_dir: &Path, root: &Path) -> Option<Skill> {
     let path = root.join(&candidate.entry_rel);
-    if !path.is_file() {
+    // Reads never follow symlinks: a symlinked entry point (file-form
+    // candidates are already filtered by `file_type`; directory-form ones
+    // land here) is not a skill.
+    if !is_real_file(&path) {
         return None;
     }
     let concept = Concept::from_file(&path).ok()?;
@@ -153,7 +156,10 @@ fn load(candidate: &Candidate, ns_dir: &Path, root: &Path) -> Option<Skill> {
 /// attested computations are optional, so they have no check.
 pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     let ns_dir = root.join("skill");
-    if !ns_dir.is_dir() {
+    // Only a real directory counts — a symlinked namespace must read as
+    // absent here exactly as it does in listing, or validation would
+    // report on files outside the bundle.
+    if !is_real_dir(&ns_dir) {
         return Vec::new();
     }
     let mut findings = Vec::new();
@@ -177,6 +183,12 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         let Ok(ty) = entry.file_type() else {
             continue;
         };
+        // A symlinked entry is the structural layer's finding (reads
+        // never follow symlinks); contract checks on it would read
+        // through the link.
+        if ty.is_symlink() {
+            continue;
+        }
 
         if ty.is_file() {
             if Namespace::is_listing_file(&name) {
@@ -210,10 +222,14 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             // `deploy.md` does not satisfy the entry-point contract. An
             // entry whose own metadata failed to stat falls to the
             // structural layer, so guessing here would only add noise —
-            // treat it as seen.
-            let entry_point_file = dir_entries.iter().any(|e| {
-                e.file_name() == *OsStr::new(&entry_name)
-                    && e.file_type().map_or(true, |t| t.is_file())
+            // treat it as seen. A symlinked entry point is likewise the
+            // structural layer's finding; claiming it is missing here
+            // would double-report one root cause.
+            let entry_point = dir_entries
+                .iter()
+                .find(|e| e.file_name() == *OsStr::new(&entry_name));
+            let entry_point_file = entry_point.is_some_and(|e| {
+                e.file_type().map_or(true, |t| t.is_file() || t.is_symlink())
             });
             if !entry_point_file {
                 findings.push(Finding::new(
@@ -225,6 +241,9 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
                          `{entry_name}`"
                     ),
                 ));
+                continue;
+            }
+            if entry_point.is_some_and(|e| e.file_type().is_ok_and(|t| t.is_symlink())) {
                 continue;
             }
             if let Ok(concept) = Concept::from_file(root.join(&entry_rel)) {
@@ -515,5 +534,47 @@ mod tests {
             ("skill/deploy/index.md", "# skill index\n"),
         ]);
         assert_eq!(validate(bundle.path()), vec![]);
+    }
+
+    /// Symlinked entry points — file-form and directory-form — are not
+    /// skills: reads never follow symlinks, whatever the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_entry_points_are_not_skills() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("skill.md");
+        std::fs::write(&secret, VALID_SKILL).unwrap();
+
+        let bundle = temp_bundle(&[("skill/real.md", VALID_SKILL)]);
+        std::os::unix::fs::symlink(&secret, bundle.path().join("skill/leak.md")).unwrap();
+        std::fs::create_dir_all(bundle.path().join("skill/deploy")).unwrap();
+        std::os::unix::fs::symlink(&secret, bundle.path().join("skill/deploy/deploy.md")).unwrap();
+
+        let argosy = Argosy::open(bundle.path()).unwrap();
+        let skills = Skill::list(&argosy).unwrap();
+        let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["real"]);
+        // The namespace pass stays out of symlink reporting entirely
+        // (the structural layer owns it), so it reports nothing here.
+        assert_eq!(validate(bundle.path()), vec![]);
+    }
+
+    /// A symlinked `skill/` namespace reads as absent everywhere:
+    /// validation does not read through the link.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_namespace_reads_as_absent_in_validation() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("notes")).unwrap();
+        std::fs::write(outside.path().join("notes/stray.txt"), "x\n").unwrap();
+
+        let bundle = temp_bundle(&[]);
+        std::os::unix::fs::symlink(outside.path(), bundle.path().join("skill")).unwrap();
+
+        assert!(validate(bundle.path()).is_empty());
+        // The structural layer owns the symlinked-namespace finding (STR-7).
+        let report = Argosy::validate(bundle.path());
+        let ids: Vec<_> = report.errors().map(|f| f.id).collect();
+        assert_eq!(ids, vec![Some("STR-7")]);
     }
 }

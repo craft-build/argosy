@@ -55,10 +55,22 @@ impl Argosy {
         }
 
         let manifest_path = root.join("argosy.md");
-        if !manifest_path.is_file() {
+        // Reads never follow symlinks: a symlinked root manifest could
+        // live outside the bundle, so it is refused like a missing one.
+        let manifest_meta = fs::symlink_metadata(&manifest_path);
+        if !manifest_meta.as_ref().is_ok_and(|m| m.file_type().is_file()) {
+            let symlinked = manifest_meta
+                .as_ref()
+                .is_ok_and(|m| m.file_type().is_symlink());
             return NotAnArgosySnafu {
                 path: root.to_path_buf(),
-                reason: "no `argosy.md` manifest at the bundle root (STR-2)".to_string(),
+                reason: if symlinked {
+                    "root `argosy.md` is a symlink; bundle content must live inside the \
+                     bundle (STR-2)"
+                        .to_string()
+                } else {
+                    "no `argosy.md` manifest at the bundle root (STR-2)".to_string()
+                },
             }
             .fail();
         }
@@ -176,6 +188,21 @@ impl Argosy {
                 Some("STR-2"),
                 None,
                 "no `argosy.md` manifest at the bundle root",
+            ));
+            return;
+        }
+        // A symlinked root manifest is refused for the same reason `open`
+        // refuses it; reading through it could pull content from outside
+        // the bundle.
+        if entries
+            .iter()
+            .any(|e| !e.is_dir && e.is_symlink && e.rel == manifest_rel)
+        {
+            report.push(Finding::new(
+                Severity::Error,
+                Some("STR-2"),
+                Some(manifest_rel),
+                "root `argosy.md` is a symlink; bundle content must live inside the bundle",
             ));
             return;
         }
@@ -353,6 +380,19 @@ impl Argosy {
                 continue;
             }
             let id = ns_conformance_id(&ns);
+            // Symlinked concepts are invisible to listing and the index
+            // (reads never follow symlinks); validation is where that
+            // becomes visible instead of silently dropping content.
+            if entry.is_symlink {
+                report.push(Finding::new(
+                    Severity::Error,
+                    id,
+                    Some(entry.rel.clone()),
+                    "concept is a symlink; bundle content must live inside the bundle, \
+                     so listing and the index skip it",
+                ));
+                continue;
+            }
             match Concept::from_file(root.join(&entry.rel)) {
                 Err(e) => report.push(Finding::new(
                     Severity::Error,
@@ -444,10 +484,9 @@ impl Argosy {
         let entries = walk.entries;
 
         let mut out = Vec::new();
-        for entry in entries
-            .iter()
-            .filter(|e| !e.is_dir && e.rel.extension() == Some(std::ffi::OsStr::new("md")))
-        {
+        for entry in entries.iter().filter(|e| {
+            !e.is_dir && !e.is_symlink && e.rel.extension() == Some(std::ffi::OsStr::new("md"))
+        }) {
             let name = entry.rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if Namespace::is_listing_file(name) {
                 continue;

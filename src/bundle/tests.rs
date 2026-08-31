@@ -291,6 +291,66 @@ fn symlinked_namespace_is_not_entered() {
     assert!(argosy.concepts(&Namespace::Skill).unwrap().is_empty());
 }
 
+/// Reads never follow symlinks: a symlinked concept *file* is skipped by
+/// listing (never ingested from outside the bundle) and reported by
+/// validation, so its invisibility is not silent.
+#[cfg(unix)]
+#[test]
+fn symlinked_concept_file_is_skipped_and_reported() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.md");
+    std::fs::write(&secret, "---\ntype: Document\n---\nleak\n").unwrap();
+    let bundle = tempfile::tempdir().unwrap();
+    let root = bundle.path();
+    std::fs::write(
+        root.join("argosy.md"),
+        "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+         okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("document")).unwrap();
+    std::fs::write(
+        root.join("document/real.md"),
+        "---\ntype: Document\n---\nbody\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&secret, root.join("document/leak.md")).unwrap();
+
+    let argosy = Argosy::open(root).unwrap();
+    let concepts = argosy.concepts(&Namespace::Document).unwrap();
+    let ids: Vec<_> = concepts.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, vec!["document/real"]);
+
+    let report = Argosy::validate(root);
+    let findings: Vec<_> = report
+        .errors()
+        .filter(|f| f.path.as_deref() == Some(Path::new("document/leak.md")))
+        .collect();
+    assert_eq!(findings.len(), 1, "one finding, got {report:?}");
+    assert_eq!(findings[0].id, Some("DOC-1"));
+    assert!(findings[0].message.contains("symlink"));
+}
+
+/// A symlinked root `argosy.md` must not be read through: `open` refuses
+/// the bundle and `validate` reports STR-2.
+#[cfg(unix)]
+#[test]
+fn symlinked_root_manifest_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    let manifest = outside.path().join("argosy.md");
+    std::fs::write(
+        &manifest,
+        "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n---\n# t\n",
+    )
+    .unwrap();
+    let bundle = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&manifest, bundle.path().join("argosy.md")).unwrap();
+
+    assert!(Argosy::open(bundle.path()).is_err());
+    let report = Argosy::validate(bundle.path());
+    assert_eq!(error_ids(&report), vec![Some("STR-2")]);
+}
+
 #[test]
 fn namespace_names_round_trip() {
     for name in Namespace::RESERVED {

@@ -15,7 +15,7 @@ mod tests;
 
 pub use argosy::Argosy;
 pub use manifest::Manifest;
-pub(crate) use manifest::is_safe_bundle_name;
+pub(crate) use manifest::{is_real_dir, is_real_file, is_safe_bundle_name};
 pub use namespace::Namespace;
 pub use validation::{Finding, Severity, ValidationReport};
 

@@ -144,8 +144,17 @@ pub(crate) fn is_safe_bundle_name(name: &str) -> bool {
 /// used so a symlink pointing outside the bundle is refused — entering a
 /// namespace through a symlink would bypass the walk's no-follow policy and
 /// let bundle content live outside the bundle root.
-pub(super) fn is_real_dir(path: &Path) -> bool {
+pub(crate) fn is_real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// True iff `path` is a real file. `symlink_metadata` (not `is_file`) is
+/// used so a concept can never be read through a symlink — the walk's
+/// no-follow policy must hold for files too, or a symlinked concept would
+/// let bundle content live outside (or outside content leak into) the
+/// bundle root.
+pub(crate) fn is_real_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// Extracts a string-ish scalar, tolerating unquoted YAML numbers/bools (an

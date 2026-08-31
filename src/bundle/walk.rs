@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 pub(crate) struct WalkEntry {
     pub(crate) rel: PathBuf,
     pub(crate) is_dir: bool,
+    /// True for symlink entries (to files or directories): the walk never
+    /// resolves them, and readers use this to skip them so bundle content
+    /// cannot live outside — or leak in from outside — the bundle root.
+    pub(crate) is_symlink: bool,
 }
 
 /// The outcome of a recursive walk: the entries found, plus every directory
@@ -56,9 +60,11 @@ pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
         if is_dir && name == ".argosy" {
             continue;
         }
+        let is_symlink = entry.file_type().is_ok_and(|ty| ty.is_symlink());
         walk.entries.push(WalkEntry {
             rel: rel.clone(),
             is_dir,
+            is_symlink,
         });
         if is_dir {
             walk_bundle(root, &rel, walk);

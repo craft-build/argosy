@@ -7,7 +7,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use crate::bundle::{Argosy, Finding, Namespace, Severity, sorted_walk};
+use crate::bundle::{Argosy, Finding, Namespace, Severity, is_real_dir, sorted_walk};
 use crate::concept::{Concept, ConceptId};
 use crate::error::{Error, Result};
 
@@ -48,6 +48,7 @@ impl StyleguideRule {
             .iter()
             .filter(|e| {
                 !e.is_dir
+                    && !e.is_symlink
                     && e.rel.extension() == Some(OsStr::new("md"))
                     && !Namespace::is_listing_file(
                         e.rel.file_name().and_then(|n| n.to_str()).unwrap_or(""),
@@ -218,13 +219,21 @@ fn is_any_heading(line: &str) -> bool {
 /// `type`. Unreadable directories are the structural layer's findings.
 pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     let ns_dir = root.join("styleguide");
-    if !ns_dir.is_dir() {
+    // Only a real directory counts — a symlinked namespace must read as
+    // absent here exactly as it does in listing, or validation would
+    // report on files outside the bundle.
+    if !is_real_dir(&ns_dir) {
         return Vec::new();
     }
     let walk = sorted_walk(root, Path::new("styleguide"));
     let mut findings = Vec::new();
     for entry in &walk.entries {
         if entry.is_dir || entry.rel.extension() != Some(OsStr::new("md")) {
+            continue;
+        }
+        // Symlinked concepts are the structural layer's finding; running
+        // contract checks on them would read through the link.
+        if entry.is_symlink {
             continue;
         }
         let name = entry.rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -544,5 +553,77 @@ mod tests {
     fn validate_styleguide_stays_silent_on_valid_fixture() {
         let argosy = Argosy::open(fixture("valid-acme-billing")).unwrap();
         assert!(argosy.validate_styleguide().is_empty());
+    }
+
+    /// Symlinked rule files are skipped: listing must not read through a
+    /// symlink into content outside the bundle, and the namespace
+    /// validator stays out of it (the structural layer owns the finding).
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_symlinked_rule_files() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("rule.md");
+        std::fs::write(
+            &secret,
+            "---\ntype: Styleguide Rule\ndescription: leaked\n---\nbody\n",
+        )
+        .unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        std::fs::write(
+            root.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+             okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("styleguide")).unwrap();
+        std::fs::write(
+            root.join("styleguide/good.md"),
+            "---\ntype: Styleguide Rule\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("styleguide/leak.md")).unwrap();
+
+        let argosy = Argosy::open(root).unwrap();
+        let rules = StyleguideRule::list(&argosy).unwrap();
+        let ids: Vec<_> = rules.iter().map(|r| r.id().as_str()).collect();
+        assert_eq!(ids, vec!["styleguide/good"]);
+        // The namespace validator stays out of symlink reporting (the
+        // structural layer owns the finding); the unfaceted `good.md`
+        // warning is unrelated and still fine.
+        assert!(
+            argosy
+                .validate_styleguide()
+                .iter()
+                .all(|f| f.path.as_deref() != Some(Path::new("styleguide/leak.md"))),
+            "the symlinked rule must not be reported by the namespace pass"
+        );
+    }
+
+    /// A symlinked `styleguide/` namespace reads as absent everywhere:
+    /// validation does not read through the link.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_styleguide_namespace_reads_as_absent_in_validation() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("x.md"),
+            "---\ntype: Styleguide Rule\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bundle.path().join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+             okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), bundle.path().join("styleguide")).unwrap();
+
+        assert!(validate(bundle.path()).is_empty());
+        // The structural layer owns the symlinked-namespace finding (STR-7).
+        let report = Argosy::validate(bundle.path());
+        let ids: Vec<_> = report.errors().map(|f| f.id).collect();
+        assert_eq!(ids, vec![Some("STR-7")]);
     }
 }
