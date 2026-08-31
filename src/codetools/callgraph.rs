@@ -224,6 +224,9 @@ fn calls_in_range(calls: &[RawCall], range: &Range) -> Vec<usize> {
 struct CallTreeNode {
     name: String,
     line: usize,
+    /// True when this edge closes a cycle back to a symbol already on the
+    /// path — rendered as a marked leaf rather than silently pruned.
+    recursive: bool,
     children: Vec<CallTreeNode>,
 }
 
@@ -245,8 +248,12 @@ fn build_call_tree_inner(
 ) -> CallTreeNode {
     let in_scope_calls = calls_in_range(calls, &symbol.range);
 
+    // A symbol already on the current path marks a cycle: keep the edge
+    // (dropping it would hide the recursion) but do not descend.
+    let fresh = visited.insert(symbol.name.clone());
+    let recursive = remaining > 0 && !fresh;
     let mut children = Vec::new();
-    if remaining > 0 && visited.insert(symbol.name.clone()) {
+    if remaining > 0 && fresh {
         for &idx in &in_scope_calls {
             let call = &calls[idx];
             if let Some(called) = symbols.iter().find(|s| s.name == call.name) {
@@ -261,6 +268,7 @@ fn build_call_tree_inner(
                 children.push(CallTreeNode {
                     name: call.name.clone(),
                     line: call.line,
+                    recursive: false,
                     children: Vec::new(),
                 });
             }
@@ -271,6 +279,7 @@ fn build_call_tree_inner(
     CallTreeNode {
         name: symbol.name.clone(),
         line: symbol.range.start_row,
+        recursive,
         children,
     }
 }
@@ -313,21 +322,40 @@ fn find_impact<'a>(target: &Symbol, symbols: &'a [Symbol], calls: &[RawCall]) ->
     impacted
 }
 
+/// Like every other code tool, the rendered tree is capped; with a deep
+/// `depth` and diamond call patterns the tree is exponential, so rendering
+/// also stops early once past the cap instead of building it all first.
+const MAX_OUTPUT_BYTES: usize = 30_000;
+
 fn render_call_tree(node: &CallTreeNode, depth: usize) -> String {
     let mut out = String::new();
-    render_call_tree_inner(node, depth, &mut out);
+    let stopped = render_call_tree_inner(node, depth, &mut out);
+    if stopped || out.len() > MAX_OUTPUT_BYTES {
+        let hint = "\n… (output truncated, narrow the depth to see more)";
+        let cut = out.floor_char_boundary(MAX_OUTPUT_BYTES.saturating_sub(hint.len()));
+        out.truncate(cut);
+        out.push_str(hint);
+    }
     out
 }
 
-fn render_call_tree_inner(node: &CallTreeNode, depth: usize, out: &mut String) {
+/// Returns true once past the output cap, so callers stop rendering.
+fn render_call_tree_inner(node: &CallTreeNode, depth: usize, out: &mut String) -> bool {
+    if out.len() > MAX_OUTPUT_BYTES {
+        return true;
+    }
     let indent = "  ".repeat(depth);
+    let marker = if node.recursive { " [recursive]" } else { "" };
     let _ = std::fmt::write(
         out,
-        format_args!("{}{} (line {})\n", indent, node.name, node.line + 1),
+        format_args!("{}{} (line {}){}\n", indent, node.name, node.line + 1, marker),
     );
     for child in &node.children {
-        render_call_tree_inner(child, depth + 1, out);
+        if render_call_tree_inner(child, depth + 1, out) {
+            return true;
+        }
     }
+    false
 }
 
 fn render_symbol_list(label: &str, target_name: &str, symbols: &[&Symbol]) -> String {
@@ -443,6 +471,44 @@ fn baz() {
             child_names.contains(&"bar"),
             "expected bar in call tree children"
         );
+    }
+
+    /// A self-recursive call must render as a marked leaf, not silently
+    /// disappear or masquerade as a plain leaf.
+    #[test]
+    fn recursive_calls_render_as_marked_leaves() {
+        let src = "fn walk(n: u32) {\n    if n > 0 {\n        walk(n - 1);\n    }\n}\n";
+        let syms = extract_symbols(src, LangId::Rust);
+        let calls = extract_calls(src, LangId::Rust);
+        let target = find_symbol(&syms, "walk").unwrap();
+        let tree = build_call_tree(target, &syms, &calls, 5);
+        let rendered = render_call_tree(&tree, 0);
+        assert!(
+            rendered.contains("walk (line 1) [recursive]"),
+            "got {rendered}"
+        );
+    }
+
+    /// The rendered tree is capped like every other code tool's output.
+    #[test]
+    fn call_tree_render_caps_output() {
+        let children: Vec<CallTreeNode> = (0..30_000)
+            .map(|i| CallTreeNode {
+                name: format!("function_with_a_long_name_{i}"),
+                line: i,
+                recursive: false,
+                children: Vec::new(),
+            })
+            .collect();
+        let node = CallTreeNode {
+            name: "root".into(),
+            line: 0,
+            recursive: false,
+            children,
+        };
+        let text = render_call_tree(&node, 0);
+        assert!(text.len() < MAX_OUTPUT_BYTES + 200, "got {}", text.len());
+        assert!(text.contains("output truncated"), "got:\n{text}");
     }
 
     #[test]
