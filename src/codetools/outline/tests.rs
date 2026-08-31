@@ -107,6 +107,37 @@ fn outline_truncation_lands_on_char_boundaries() {
     assert!(text.len() <= 30_000);
 }
 
+/// A markdown heading's range must cover its whole section, not just the
+/// heading line: zoom promises "section content under a heading".
+#[test]
+fn markdown_heading_range_covers_its_section() {
+    let src = "# Title\n\nintro\n\n## Setup\n\nstep one\nstep two\n\n## Usage\n\nuse it\n\n# Next\n";
+    let symbols = extract_symbols(src, LangId::Markdown);
+    let setup = symbols.iter().find(|s| s.name == "Setup").unwrap();
+    assert_eq!(setup.range.start_row, 4);
+    // Runs until the `## Usage` heading (row 9), exclusive.
+    assert_eq!(setup.range.end_row, 8);
+
+    let title = symbols.iter().find(|s| s.name == "Title").unwrap();
+    // An h1 section ends only at the next h1 — `# Next` on row 13.
+    assert_eq!(title.range.end_row, 12);
+
+    let next = symbols.iter().find(|s| s.name == "Next").unwrap();
+    // The last heading runs to EOF.
+    assert_eq!(next.range.end_row, 13);
+}
+
+/// Only h1-h6 are headings in HTML-family grammars; the raw query captures
+/// every element.
+#[test]
+fn html_outline_only_takes_h1_to_h6_headings() {
+    let src =
+        "<html><body><h1>Title</h1><div>content</div><span>x</span><h2>Sub</h2></body></html>\n";
+    let symbols = extract_symbols(src, LangId::Html);
+    let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["h1", "h2"]);
+}
+
 #[test]
 fn python_outline_extracts_class_and_fn() {
     let src = "class Foo:\n    def bar(self):\n        pass\n\ndef baz():\n    pass\n";

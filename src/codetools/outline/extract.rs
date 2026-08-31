@@ -113,6 +113,17 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
 
     symbols.sort_by_key(|s| (s.range.start_row, s.range.start_col));
 
+    // Markdown heading nodes cover only the heading line, but zoom promises
+    // the section's content — extend each heading to the next same-or-higher
+    // level heading. The HTML-family queries capture *every* element as a
+    // "heading"; only h1-h6 are.
+    if matches!(lang, LangId::Markdown) {
+        extend_markdown_heading_sections(&mut symbols, content);
+    }
+    if matches!(lang, LangId::Html | LangId::SvelteNext) {
+        symbols.retain(|s| s.kind != SymbolKind::Heading || is_hn_heading(&s.name));
+    }
+
     if matches!(lang, LangId::Rust | LangId::Python) {
         for sym in &mut symbols {
             if sym.kind == SymbolKind::Function && sym.scope_chain.iter().any(|s| !s.is_empty()) {
@@ -122,6 +133,52 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
     }
 
     symbols
+}
+
+/// A markdown heading's ATX level, read off its signature (`## Setup` → 2).
+/// Zero for anything unhashlike, which never terminates another section.
+fn markdown_heading_level(signature: &str) -> usize {
+    signature.chars().take_while(|c| *c == '#').count()
+}
+
+/// Extends each heading symbol's range to its whole section: from the
+/// heading line to just before the next heading of the same or higher
+/// level (or EOF).
+fn extend_markdown_heading_sections(symbols: &mut [Symbol], content: &str) {
+    let last_row = content.lines().count().saturating_sub(1);
+    let headings: Vec<(usize, usize, usize)> = symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.kind == SymbolKind::Heading)
+        .map(|(i, s)| {
+            (
+                i,
+                s.range.start_row,
+                s.signature
+                    .as_deref()
+                    .map_or(0, markdown_heading_level),
+            )
+        })
+        .collect();
+    for (pos, &(i, start_row, level)) in headings.iter().enumerate() {
+        let end_row = headings[pos + 1..]
+            .iter()
+            .find(|&&(_, _, next_level)| next_level <= level && next_level > 0)
+            .map(|&(_, next_start, _)| next_start.saturating_sub(1))
+            .unwrap_or(last_row)
+            .max(start_row);
+        symbols[i].range.end_row = end_row;
+        symbols[i].range.end_col = content.lines().nth(end_row).map(str::len).unwrap_or(0);
+    }
+}
+
+/// True iff `name` is an h1-h6 tag name — the only HTML elements treated
+/// as headings.
+fn is_hn_heading(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() == 2
+        && matches!(bytes[0], b'h' | b'H')
+        && (b'1'..=b'6').contains(&bytes[1])
 }
 
 fn extract_yaml_symbols(content: &str, lang: LangId) -> Vec<Symbol> {

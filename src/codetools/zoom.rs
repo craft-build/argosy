@@ -268,6 +268,19 @@ mod tests {
         assert!(result.text.contains("1 |"));
     }
 
+    /// Zooming a markdown heading returns the section's content, not just
+    /// the heading line plus context.
+    #[test]
+    fn zoom_markdown_heading_returns_section_content() {
+        let content =
+            "# Guide\n\n## Error Handling\n\nfirst line of section\n\nmore detail\n\n## Next Section\n\nbye\n";
+        let result = zoom_by_symbol(content, "/readme.md", "Error Handling", 0).unwrap();
+        assert!(result.text.contains("Error Handling"));
+        assert!(result.text.contains("first line of section"));
+        assert!(result.text.contains("more detail"));
+        assert!(!result.text.contains("bye"));
+    }
+
     #[test]
     fn ambiguous_symbol_returns_candidates() {
         let content = "struct Foo {\n    x: i32,\n}\nimpl Foo {\n    fn foo() {}\n}\nfn foo() {}";
