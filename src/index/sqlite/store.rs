@@ -24,7 +24,7 @@ impl VectorStore for SqliteVecStore {
                 "UPDATE meta SET model_id = ?1, updated_at = datetime('now') WHERE id = 1",
                 params![id],
             )
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
         self.model_id = Some(id.to_string());
         Ok(())
     }
@@ -49,7 +49,7 @@ impl VectorStore for SqliteVecStore {
             }
         }
 
-        let tx = self.conn.transaction().context(SqliteSnafu)?;
+        let tx = self.conn.transaction().context(SqliteSnafu { path: self.path.clone() })?;
         // Stamp the store's dimensionality inside the batch transaction, so a
         // rolled-back insert never leaves `meta.dimensions` against an empty
         // store.
@@ -58,8 +58,8 @@ impl VectorStore for SqliteVecStore {
                 "UPDATE meta SET dimensions = ?1, updated_at = datetime('now') WHERE id = 1",
                 params![dims as i64],
             )
-            .context(SqliteSnafu)?;
-            ensure_vec_table(&tx, dims)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
+            ensure_vec_table(&tx, &self.path, dims)?;
         }
         {
             let mut delete_vec = tx
@@ -69,13 +69,13 @@ impl VectorStore for SqliteVecStore {
                      WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3
                  )",
                 )
-                .context(SqliteSnafu)?;
+                .context(SqliteSnafu { path: self.path.clone() })?;
             let mut delete_units = tx
                 .prepare_cached(
                     "DELETE FROM units
                      WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3",
                 )
-                .context(SqliteSnafu)?;
+                .context(SqliteSnafu { path: self.path.clone() })?;
             let mut insert_units = tx
                 .prepare_cached(
                     "INSERT INTO units (argosy, namespace, concept_id, chunk_ordinal,
@@ -83,10 +83,10 @@ impl VectorStore for SqliteVecStore {
                                         language, category)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )
-                .context(SqliteSnafu)?;
+                .context(SqliteSnafu { path: self.path.clone() })?;
             let mut insert_vec = tx
                 .prepare_cached("INSERT INTO unit_vectors (rowid, vector) VALUES (?1, ?2)")
-                .context(SqliteSnafu)?;
+                .context(SqliteSnafu { path: self.path.clone() })?;
 
             // vec0 has no UPDATE: re-upserting is delete-then-insert of the
             // concept's units and vec rows. The delete runs once per
@@ -98,8 +98,8 @@ impl VectorStore for SqliteVecStore {
                 let concept_id = unit.concept.id.as_str();
                 let key: &[&dyn ToSql] = &[&unit.concept.argosy, &namespace, &concept_id];
                 if deleted.insert((&unit.concept.argosy, namespace, concept_id)) {
-                    delete_vec.execute(key).context(SqliteSnafu)?;
-                    delete_units.execute(key).context(SqliteSnafu)?;
+                    delete_vec.execute(key).context(SqliteSnafu { path: self.path.clone() })?;
+                    delete_units.execute(key).context(SqliteSnafu { path: self.path.clone() })?;
                 }
                 let tags = serde_json::to_string(&unit.meta.tags).map_err(|e| -> Error {
                     IndexSnafu {
@@ -120,14 +120,14 @@ impl VectorStore for SqliteVecStore {
                         unit.meta.language,
                         unit.meta.category,
                     ])
-                    .context(SqliteSnafu)?;
+                    .context(SqliteSnafu { path: self.path.clone() })?;
                 let rowid = tx.last_insert_rowid();
                 insert_vec
                     .execute(params![rowid, vec_to_bytes(&unit.vector)])
-                    .context(SqliteSnafu)?;
+                    .context(SqliteSnafu { path: self.path.clone() })?;
             }
         }
-        tx.commit().context(SqliteSnafu)?;
+        tx.commit().context(SqliteSnafu { path: self.path.clone() })?;
         if self.dimensions.is_none() {
             self.dimensions = Some(dims);
         }
@@ -141,7 +141,7 @@ impl VectorStore for SqliteVecStore {
         // One transaction: a partially applied pair would leave units rows
         // whose vectors are gone — `unit_hashes` would still report such a
         // concept while search can never return it (silently unsearchable).
-        let tx = self.conn.transaction().context(SqliteSnafu)?;
+        let tx = self.conn.transaction().context(SqliteSnafu { path: self.path.clone() })?;
         tx.execute(
             "DELETE FROM unit_vectors WHERE rowid IN (
                      SELECT rowid FROM units
@@ -149,14 +149,14 @@ impl VectorStore for SqliteVecStore {
                  )",
             key,
         )
-        .context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: self.path.clone() })?;
         tx.execute(
             "DELETE FROM units
                  WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3",
             key,
         )
-        .context(SqliteSnafu)?;
-        tx.commit().context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: self.path.clone() })?;
+        tx.commit().context(SqliteSnafu { path: self.path.clone() })?;
         Ok(())
     }
 
@@ -169,7 +169,7 @@ impl VectorStore for SqliteVecStore {
                 "SELECT argosy, namespace, concept_id, text_hash FROM units
                  GROUP BY argosy, namespace, concept_id",
             )
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -179,9 +179,9 @@ impl VectorStore for SqliteVecStore {
                     row.get::<_, String>(3)?,
                 ))
             })
-            .context(SqliteSnafu)?
+            .context(SqliteSnafu { path: self.path.clone() })?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
         rows.into_iter()
             .map(|(argosy, namespace, concept_id, text_hash)| {
                 Ok((row_key(argosy, namespace, concept_id)?, text_hash))
@@ -195,15 +195,15 @@ impl VectorStore for SqliteVecStore {
         // a width-changing model upgrade rebuilds via the ordinary reconcile
         // path. One transaction — a partial clear would leave `meta`
         // claiming hashes while the data is gone, silently emptying search.
-        let tx = self.conn.transaction().context(SqliteSnafu)?;
+        let tx = self.conn.transaction().context(SqliteSnafu { path: self.path.clone() })?;
         tx.execute_batch("DROP TABLE IF EXISTS unit_vectors; DELETE FROM units;")
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
         tx.execute(
             "UPDATE meta SET model_id = NULL, dimensions = NULL, updated_at = datetime('now') WHERE id = 1",
             [],
         )
-        .context(SqliteSnafu)?;
-        tx.commit().context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: self.path.clone() })?;
+        tx.commit().context(SqliteSnafu { path: self.path.clone() })?;
         self.model_id = None;
         self.dimensions = None;
         Ok(())
@@ -236,7 +236,7 @@ impl VectorStore for SqliteVecStore {
         let sql_k: i64 = if filter_is_active(filter) {
             self.conn
                 .query_row("SELECT COUNT(*) FROM units", [], |row| row.get(0))
-                .context(SqliteSnafu)?
+                .context(SqliteSnafu { path: self.path.clone() })?
         } else {
             k as i64
         };
@@ -302,7 +302,7 @@ impl VectorStore for SqliteVecStore {
             values.push(category.clone().into());
         }
 
-        let mut stmt = self.conn.prepare(&sql).context(SqliteSnafu)?;
+        let mut stmt = self.conn.prepare(&sql).context(SqliteSnafu { path: self.path.clone() })?;
         let rows = stmt
             .query_map(params_from_iter(values.iter()), |row| {
                 Ok((
@@ -319,9 +319,9 @@ impl VectorStore for SqliteVecStore {
                     -row.get::<_, f64>(8)? as f32,
                 ))
             })
-            .context(SqliteSnafu)?
+            .context(SqliteSnafu { path: self.path.clone() })?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: self.path.clone() })?;
 
         let mut hits = rows
             .into_iter()

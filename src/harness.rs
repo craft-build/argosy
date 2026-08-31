@@ -243,7 +243,19 @@ pub fn setup_reviewer(harness: Harness, project_root: &Path, force: bool) -> Res
             path: parent.to_path_buf(),
         })?;
     }
-    fs::write(&dest, harness.reviewer_definition()).context(IoSnafu { path: dest.clone() })?;
+    // Crash-atomic like every other argosy write: stage then rename, so a
+    // crash mid-write can never leave a truncated harness definition the
+    // harness would happily load.
+    let tmp = dest.with_file_name(format!(
+        "{}.tmp",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("reviewer")
+    ));
+    let staged = fs::write(&tmp, harness.reviewer_definition())
+        .and_then(|()| fs::rename(&tmp, &dest));
+    if staged.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    staged.context(IoSnafu { path: dest.clone() })?;
     Ok(ReviewerSetup {
         harness: harness.as_id().to_string(),
         path: dest,

@@ -134,8 +134,8 @@ pub enum Error {
 
     /// The sqlite-vec index store failed on a database operation.
     #[cfg(feature = "default-index")]
-    #[snafu(display("SQLite index operation failed: {source}"))]
-    Sqlite { source: rusqlite::Error },
+    #[snafu(display("SQLite index operation failed at `{}`: {source}", path.display()))]
+    Sqlite { path: PathBuf, source: rusqlite::Error },
 
     /// A code-intelligence tool (`outline`, `zoom`, `astgrep`, `conflicts`,
     /// `inspect`, `callgraph`, `repomap`) failed on caller input: an

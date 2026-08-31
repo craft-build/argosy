@@ -550,5 +550,4 @@ fn concept_id(id: &str) -> crate::concept::ConceptId {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 pub(crate) mod tests;

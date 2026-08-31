@@ -9,7 +9,7 @@
 
 use std::ffi::{c_char, c_int};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -71,6 +71,7 @@ pub(super) fn vec_to_bytes(vector: &[f32]) -> Vec<u8> {
 ///
 /// See the module docs for the schema, scoring convention, and limitations.
 pub struct SqliteVecStore {
+    path: PathBuf,
     conn: Connection,
     model_id: Option<String>,
     dimensions: Option<usize>,
@@ -89,24 +90,24 @@ impl SqliteVecStore {
                 path: parent.to_path_buf(),
             })?;
         }
-        let conn = Connection::open(path).context(SqliteSnafu)?;
+        let conn = Connection::open(path).context(SqliteSnafu { path: path.to_path_buf() })?;
         // WAL: crash-safe single-writer operation (module docs: no
         // multi-process guarantees).
         conn.pragma_update(None, "journal_mode", "WAL")
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: path.to_path_buf() })?;
         // Wait briefly instead of failing instantly when another process
         // (e.g. `argosy index build` while `argosy mcp` serves) holds the
         // write lock: "database is locked" after 0 ms is cryptic, after
         // 5 s it means something is genuinely stuck.
         conn.pragma_update(None, "busy_timeout", 5_000)
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: path.to_path_buf() })?;
         // Stamp the schema version on fresh databases only; refuse dbs from a
         // newer argosy rather than silently misreading their layout (and
         // never clobber a higher version, so a future migration can notice).
-        let existing_version = Self::check_schema_version(&conn)?;
+        let existing_version = Self::check_schema_version(&conn, path)?;
         if existing_version == 0 {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-                .context(SqliteSnafu)?;
+                .context(SqliteSnafu { path: path.to_path_buf() })?;
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
@@ -131,13 +132,14 @@ impl SqliteVecStore {
                 PRIMARY KEY (argosy, namespace, concept_id, chunk_ordinal)
             );",
         )
-        .context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: path.to_path_buf() })?;
 
-        let (model_id, dimensions) = Self::read_meta(&conn)?;
+        let (model_id, dimensions) = Self::read_meta(&conn, path)?;
         if let Some(dims) = dimensions {
-            ensure_vec_table(&conn, dims)?;
+            ensure_vec_table(&conn, path, dims)?;
         }
         Ok(Self {
+            path: path.to_path_buf(),
             conn,
             model_id,
             dimensions,
@@ -151,15 +153,17 @@ impl SqliteVecStore {
     /// [`Self::open`] would fail before reading a single row.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         register_extension();
+        let path = path.as_ref();
         let conn =
-            Connection::open_with_flags(path.as_ref(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .context(SqliteSnafu)?;
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .context(SqliteSnafu { path: path.to_path_buf() })?;
         // Readers hit locks too (WAL checkpoints); the same wait applies.
         conn.pragma_update(None, "busy_timeout", 5_000)
-            .context(SqliteSnafu)?;
-        Self::check_schema_version(&conn)?;
-        let (model_id, dimensions) = Self::read_meta(&conn)?;
+            .context(SqliteSnafu { path: path.to_path_buf() })?;
+        Self::check_schema_version(&conn, path)?;
+        let (model_id, dimensions) = Self::read_meta(&conn, path)?;
         Ok(Self {
+            path: path.to_path_buf(),
             conn,
             model_id,
             dimensions,
@@ -168,10 +172,10 @@ impl SqliteVecStore {
 
     /// Refuses databases stamped with a newer schema than this build; returns
     /// the on-disk `user_version` otherwise (read-only).
-    fn check_schema_version(conn: &Connection) -> Result<i64> {
+    fn check_schema_version(conn: &Connection, db: &Path) -> Result<i64> {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .context(SqliteSnafu)?;
+            .context(SqliteSnafu { path: db.to_path_buf() })?;
         if version > SCHEMA_VERSION as i64 {
             return IndexSnafu {
                 reason: format!(
@@ -185,7 +189,7 @@ impl SqliteVecStore {
 
     /// Reads the recorded model identity and vector dimensionality from
     /// `meta` (read-only).
-    fn read_meta(conn: &Connection) -> Result<(Option<String>, Option<usize>)> {
+    fn read_meta(conn: &Connection, db: &Path) -> Result<(Option<String>, Option<usize>)> {
         conn.query_row(
             "SELECT model_id, dimensions FROM meta WHERE id = 1",
             [],
@@ -197,26 +201,26 @@ impl SqliteVecStore {
             },
         )
         .optional()
-        .context(SqliteSnafu)
+        .context(SqliteSnafu { path: db.to_path_buf() })
         .map(|row| row.unwrap_or_default())
     }
 }
 
 /// Creates the `unit_vectors` vec0 table if absent. `dims` is an internal
 /// usize, never user input, so interpolation is safe here.
-pub(super) fn ensure_vec_table(conn: &Connection, dims: usize) -> Result<()> {
+pub(super) fn ensure_vec_table(conn: &Connection, db: &Path, dims: usize) -> Result<()> {
     let exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'unit_vectors'",
             [],
             |row| row.get(0),
         )
-        .context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: db.to_path_buf() })?;
     if exists == 0 {
         conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE unit_vectors USING vec0(vector float[{dims}])"
         ))
-        .context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: db.to_path_buf() })?;
     }
     Ok(())
 }
@@ -237,14 +241,14 @@ pub fn checkpoint_wal(path: &Path) -> Result<()> {
     if file.read_exact(&mut magic).is_err() || &magic != SQLITE_MAGIC {
         return Ok(());
     }
-    let conn = Connection::open(path).context(SqliteSnafu)?;
+    let conn = Connection::open(path).context(SqliteSnafu { path: path.to_path_buf() })?;
     // `(busy, wal frames, checkpointed frames)`; `-1` log/ckpt = not a WAL
     // database (nothing to move, the copy is complete by definition).
     let (busy, log, checkpointed): (i64, i64, i64) = conn
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
-        .context(SqliteSnafu)?;
+        .context(SqliteSnafu { path: path.to_path_buf() })?;
     if busy != 0 || (log >= 0 && log != checkpointed) {
         return IndexSnafu {
             reason: format!(
@@ -288,9 +292,13 @@ impl SqliteVecStore {
     /// Shared read-side vec-table check (kept separate from `ensure_vec_table`
     /// so `search` can stay `&self`).
     fn ensure_vec_table_read(&self) -> Result<()> {
-        ensure_vec_table(
-            &self.conn,
-            self.dimensions.expect("dimensions checked by caller"),
-        )
+        let Some(dimensions) = self.dimensions else {
+            return IndexSnafu {
+                reason: "index dimensionality is unknown; write once before searching"
+                    .to_string(),
+            }
+            .fail();
+        };
+        ensure_vec_table(&self.conn, &self.path, dimensions)
     }
 }

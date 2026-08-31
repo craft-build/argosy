@@ -379,3 +379,15 @@ fn unit_hashes_round_trip_tracks_every_mutation() {
     store.remove_concept(&units[1].concept).unwrap();
     assert_eq!(store.unit_hashes().unwrap().len(), 2);
 }
+
+/// SQLite errors name the database they failed on — the one identifying
+/// detail on a machine with several project indexes.
+#[test]
+fn sqlite_errors_name_the_database() {
+    let err = crate::error::Error::Sqlite {
+        path: std::path::PathBuf::from("/x/argosy/projects/proj-1a2b3c4d/index.db"),
+        source: rusqlite::Error::QueryReturnedNoRows,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("proj-1a2b3c4d/index.db"), "{msg}");
+}
