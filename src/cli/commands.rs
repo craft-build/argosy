@@ -224,6 +224,24 @@ pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> 
                     );
                 }
             }
+            // An import is a bulk write, and the index reconciles on every
+            // write: without this, freshly imported rules stay invisible to
+            // search until a manual `index build` or the next MCP start.
+            // A failed reconcile degrades retrieval without undoing the
+            // import.
+            if report.written > 0 && report.findings.is_empty() {
+                #[cfg(feature = "default-index")]
+                match reconcile_index_after_import() {
+                    Ok(Some(reconciled)) => out.note(&format!(
+                        "index reconciled: {} upserted, {} removed, {} unchanged",
+                        reconciled.upserted, reconciled.removed, reconciled.unchanged
+                    )),
+                    Ok(None) => {}
+                    Err(e) => out.warn(&format!(
+                        "index reconcile failed ({e:#}) — run `argosy index build` to update it"
+                    )),
+                }
+            }
             Ok(if report.findings.is_empty() {
                 ExitCode::SUCCESS
             } else {
@@ -231,6 +249,33 @@ pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> 
             })
         }
     }
+}
+
+/// Reconciles the project's index after `convert styleguide` wrote rules
+/// into one of its argosys. `Ok(None)` — still without loading the model —
+/// when no index db exists yet: a later `index build` starts fresh and sees
+/// the imported rules, and creating one here would force a ~90 MB model
+/// download as a side effect of a convert.
+#[cfg(feature = "default-index")]
+fn reconcile_index_after_import() -> Result<Option<argosy::index::IndexReport>> {
+    use argosy::context::ProjectContext;
+    use argosy::index::Index;
+    use argosy::index::fastembed::FastembedProvider;
+    use argosy::index::sqlite::SqliteVecStore;
+
+    let root = current_dir()?;
+    let db = argosy::pull::project_argosy_dir(&root)?.join(argosy::pull::INDEX_DB_NAME);
+    if !db.is_file() {
+        return Ok(None);
+    }
+    // Same UX as `index build`: say so on stderr so the pause while the
+    // embedding model loads never reads as a hang.
+    eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+    let context = ProjectContext::open_project(&root)?;
+    let store = SqliteVecStore::open(&db)?;
+    let provider = FastembedProvider::new_default()?;
+    let mut index = Index::new(provider, store);
+    Ok(Some(index.reconcile(&context)?))
 }
 
 pub(super) fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {

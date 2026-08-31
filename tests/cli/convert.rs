@@ -171,4 +171,57 @@ fn convert_styleguide_without_project_argosy_fails() {
         .stderr(predicate::str::contains("argosy init"));
 }
 
+/// The index reconciles on every write, and an import is a bulk write:
+/// after `convert styleguide` the new rules must be searchable without a
+/// manual `index build`. Needs the ONNX model — run with
+/// `cargo test --test cli -- --ignored convert_import_reconciles_the_index`.
+#[cfg(feature = "default-index")]
+#[test]
+#[ignore = "downloads the fastembed model (needs network on first run)"]
+fn convert_import_reconciles_the_index() {
+    let scratch = TempDir::new().unwrap();
+    let (project, xdg) = fixture_project(&scratch);
+
+    argosy_bin()
+        .args(["index", "build"])
+        .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
+        .assert()
+        .success();
+
+    let yaml_dir = scratch.path().join("yaml");
+    fs::create_dir_all(&yaml_dir).unwrap();
+    fs::write(
+        yaml_dir.join("rust.yaml"),
+        "- id: never-panic-in-payment-code\n  description: Never call unwrap in payment code.\n",
+    )
+    .unwrap();
+    argosy_bin()
+        .args(["convert", "styleguide", yaml_dir.to_str().unwrap()])
+        .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("index reconciled: 1 upserted"));
+
+    // Searchable immediately, no `index build` in between.
+    let output = argosy_bin()
+        .args(["--json", "index", "query", "never call unwrap", "-k", "5"])
+        .current_dir(&project)
+        .env("XDG_STATE_HOME", &xdg)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let hits: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let found = hits
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h["concept"]["id"]
+            .as_str()
+            .is_some_and(|id| id.contains("never-panic-in-payment-code")));
+    assert!(found, "imported rule must be searchable: {hits}");
+}
+
 // -------------------------------------------------------------------- pull
