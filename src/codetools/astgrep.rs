@@ -149,9 +149,7 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
                 // file that already carried error nodes (WIP code) must not
                 // have every rewrite rejected for damage it did not cause.
                 let repl_grep = lang.ast_grep(&new_content);
-                if has_error_or_missing(&repl_grep.root())
-                    && !has_error_or_missing(&grep.root())
-                {
+                if has_error_or_missing(&repl_grep.root()) && !has_error_or_missing(&grep.root()) {
                     rolled_back = true;
                     results.push(format!(
                         "{rel}: ROLLED BACK — replacement introduces syntax errors"
@@ -550,7 +548,10 @@ mod tests {
                 .unwrap()
                 .contains("eprintln!")
         );
-        assert_eq!(std::fs::read_to_string(dir.path().join("src/b.rs")).unwrap(), changed);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/b.rs")).unwrap(),
+            changed
+        );
     }
 
     #[test]

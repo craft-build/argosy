@@ -58,7 +58,10 @@ impl Argosy {
         // Reads never follow symlinks: a symlinked root manifest could
         // live outside the bundle, so it is refused like a missing one.
         let manifest_meta = fs::symlink_metadata(&manifest_path);
-        if !manifest_meta.as_ref().is_ok_and(|m| m.file_type().is_file()) {
+        if !manifest_meta
+            .as_ref()
+            .is_ok_and(|m| m.file_type().is_file())
+        {
             let symlinked = manifest_meta
                 .as_ref()
                 .is_ok_and(|m| m.file_type().is_symlink());

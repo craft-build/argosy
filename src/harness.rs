@@ -248,10 +248,12 @@ pub fn setup_reviewer(harness: Harness, project_root: &Path, force: bool) -> Res
     // harness would happily load.
     let tmp = dest.with_file_name(format!(
         "{}.tmp",
-        dest.file_name().and_then(|n| n.to_str()).unwrap_or("reviewer")
+        dest.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("reviewer")
     ));
-    let staged = fs::write(&tmp, harness.reviewer_definition())
-        .and_then(|()| fs::rename(&tmp, &dest));
+    let staged =
+        fs::write(&tmp, harness.reviewer_definition()).and_then(|()| fs::rename(&tmp, &dest));
     if staged.is_err() {
         let _ = fs::remove_file(&tmp);
     }

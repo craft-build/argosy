@@ -6,7 +6,9 @@ use tree_sitter::Query;
 use super::extract::{TOML_FIELD_TRUNCATE_THRESHOLD, extract_symbols};
 use super::lang::LangId;
 use super::queries::{ALL_LANGS, query_source};
-use super::render::{build_outline_tree, render_file_outline, truncate_signature, truncate_outline};
+use super::render::{
+    build_outline_tree, render_file_outline, truncate_outline, truncate_signature,
+};
 use super::types::{Symbol, SymbolKind};
 
 use super::*;
@@ -111,7 +113,8 @@ fn outline_truncation_lands_on_char_boundaries() {
 /// heading line: zoom promises "section content under a heading".
 #[test]
 fn markdown_heading_range_covers_its_section() {
-    let src = "# Title\n\nintro\n\n## Setup\n\nstep one\nstep two\n\n## Usage\n\nuse it\n\n# Next\n";
+    let src =
+        "# Title\n\nintro\n\n## Setup\n\nstep one\nstep two\n\n## Usage\n\nuse it\n\n# Next\n";
     let symbols = extract_symbols(src, LangId::Markdown);
     let setup = symbols.iter().find(|s| s.name == "Setup").unwrap();
     assert_eq!(setup.range.start_row, 4);
@@ -620,7 +623,9 @@ fn run_dir_mode_records_reads_for_the_stale_guard() {
     let file = dir.path().join("a.rs");
     std::fs::write(&file, "fn a() { changed }\n").unwrap();
     assert!(
-        tools.check_before_edit(std::path::Path::new(&file)).is_err(),
+        tools
+            .check_before_edit(std::path::Path::new(&file))
+            .is_err(),
         "the outline's read must feed the stale-read guard"
     );
 }
@@ -640,7 +645,11 @@ fn run_dir_mode_labels_oversize_files_skipped() {
         },
     )
     .unwrap();
-    assert!(report.text.contains("big.rs (too large)"), "got {}", report.text);
+    assert!(
+        report.text.contains("big.rs (too large)"),
+        "got {}",
+        report.text
+    );
     assert!(report.text.contains("ok.rs"));
 }
 

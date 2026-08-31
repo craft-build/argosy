@@ -102,7 +102,8 @@ fn tsx_files_extract_tags_through_the_tsx_grammar() {
     let src = "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title}</div>;\n}\nexport const helper = () => <Card title=\"x\" />;\n";
     let tags = extract_tags(src, LangId::Tsx, "card.tsx");
     assert!(
-        tags.iter().any(|t| t.kind == TagKind::Def && t.ident == "Card"),
+        tags.iter()
+            .any(|t| t.kind == TagKind::Def && t.ident == "Card"),
         "{tags:?}"
     );
     assert_eq!(LangId::from_extension("tsx"), Some(LangId::Tsx));

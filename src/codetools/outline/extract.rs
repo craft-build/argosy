@@ -178,9 +178,7 @@ fn extend_markdown_heading_sections(symbols: &mut [Symbol], content: &str) {
             (
                 i,
                 s.range.start_row,
-                s.signature
-                    .as_deref()
-                    .map_or(0, markdown_heading_level),
+                s.signature.as_deref().map_or(0, markdown_heading_level),
             )
         })
         .collect();
@@ -200,9 +198,7 @@ fn extend_markdown_heading_sections(symbols: &mut [Symbol], content: &str) {
 /// as headings.
 fn is_hn_heading(name: &str) -> bool {
     let bytes = name.as_bytes();
-    bytes.len() == 2
-        && matches!(bytes[0], b'h' | b'H')
-        && (b'1'..=b'6').contains(&bytes[1])
+    bytes.len() == 2 && matches!(bytes[0], b'h' | b'H') && (b'1'..=b'6').contains(&bytes[1])
 }
 
 fn extract_yaml_symbols(content: &str, lang: LangId) -> Vec<Symbol> {

@@ -229,7 +229,8 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
                 .iter()
                 .find(|e| e.file_name() == *OsStr::new(&entry_name));
             let entry_point_file = entry_point.is_some_and(|e| {
-                e.file_type().map_or(true, |t| t.is_file() || t.is_symlink())
+                e.file_type()
+                    .map_or(true, |t| t.is_file() || t.is_symlink())
             });
             if !entry_point_file {
                 findings.push(Finding::new(

@@ -501,7 +501,8 @@ fn promote_refuses_non_list_sources_instead_of_replacing() {
         )
         .unwrap_err();
     assert!(
-        err.to_string().contains("`sources` frontmatter is not a list"),
+        err.to_string()
+            .contains("`sources` frontmatter is not a list"),
         "{err}"
     );
     assert!(!tmp.path().join("document/promoted-bad-sources.md").exists());
@@ -514,7 +515,10 @@ fn deleting_a_directory_skill_entry_point_names_the_directory() {
     let tmp = fixture_copy("valid-acme-billing");
     let local = LocalArgosy::open(tmp.path()).unwrap();
     let err = local
-        .delete_concept(Namespace::Skill, &id("skill/rotate-api-keys/rotate-api-keys"))
+        .delete_concept(
+            Namespace::Skill,
+            &id("skill/rotate-api-keys/rotate-api-keys"),
+        )
         .unwrap_err();
     let msg = err.to_string();
     assert!(

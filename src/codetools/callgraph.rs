@@ -348,7 +348,13 @@ fn render_call_tree_inner(node: &CallTreeNode, depth: usize, out: &mut String) -
     let marker = if node.recursive { " [recursive]" } else { "" };
     let _ = std::fmt::write(
         out,
-        format_args!("{}{} (line {}){}\n", indent, node.name, node.line + 1, marker),
+        format_args!(
+            "{}{} (line {}){}\n",
+            indent,
+            node.name,
+            node.line + 1,
+            marker
+        ),
     );
     for child in &node.children {
         if render_call_tree_inner(child, depth + 1, out) {

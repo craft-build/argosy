@@ -271,8 +271,7 @@ mod tests {
     /// the heading line plus context.
     #[test]
     fn zoom_markdown_heading_returns_section_content() {
-        let content =
-            "# Guide\n\n## Error Handling\n\nfirst line of section\n\nmore detail\n\n## Next Section\n\nbye\n";
+        let content = "# Guide\n\n## Error Handling\n\nfirst line of section\n\nmore detail\n\n## Next Section\n\nbye\n";
         let result = zoom_by_symbol(content, "/readme.md", "Error Handling", 0).unwrap();
         assert!(result.text.contains("Error Handling"));
         assert!(result.text.contains("first line of section"));

@@ -291,7 +291,10 @@ async fn astgrep_search_diff_apply_and_guards() {
         "fn broken() {\n    println!(\"changed\");\n}\n",
     )
     .unwrap();
-    let err = call_err(
+    // Stale read: dry-run records the read, an external change then makes
+    // the apply skip that file. Skipping is reported inline (per-file), not
+    // a whole-run error — files earlier in the walk may already be written.
+    let out = call_ok(
         &client,
         "astgrep",
         serde_json::json!({
@@ -303,7 +306,21 @@ async fn astgrep_search_diff_apply_and_guards() {
         }),
     )
     .await;
-    assert!(err.contains("changed since last read"), "{err}");
+    assert_eq!(out["mode"], "apply");
+    assert_eq!(out["files_changed"], 0);
+    assert!(
+        out["text"]
+            .as_str()
+            .unwrap()
+            .contains("changed since last read"),
+        "got {out}"
+    );
+    assert!(
+        fs::read_to_string(ws.path().join("src/broken.rs"))
+            .unwrap()
+            .contains("changed"),
+        "the stale file stays untouched"
+    );
 
     // Unknown language is a tool error listing the supported set.
     let err = call_err(

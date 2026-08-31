@@ -214,13 +214,11 @@ fn convert_import_reconciles_the_index() {
         .get_output()
         .clone();
     let hits: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let found = hits
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|h| h["concept"]["id"]
+    let found = hits.as_array().unwrap().iter().any(|h| {
+        h["concept"]["id"]
             .as_str()
-            .is_some_and(|id| id.contains("never-panic-in-payment-code")));
+            .is_some_and(|id| id.contains("never-panic-in-payment-code"))
+    });
     assert!(found, "imported rule must be searchable: {hits}");
 }
 
