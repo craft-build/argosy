@@ -261,11 +261,15 @@ pub(super) fn render_files_table(entries: &[DirEntry], skipped: &[String]) -> (S
     truncate_outline(&mut out)
 }
 
-fn truncate_outline(out: &mut String) -> (String, bool) {
+pub(super) fn truncate_outline(out: &mut String) -> (String, bool) {
     let truncated = out.len() > MAX_OUTPUT_BYTES;
     if truncated {
         let truncation_hint = "\n… (output truncated, narrow the path to see more)";
-        out.truncate(MAX_OUTPUT_BYTES - truncation_hint.len());
+        // Outline text routinely contains multibyte characters; flooring
+        // to a char boundary keeps `truncate` from panicking when one
+        // straddles the cut.
+        let cut = out.floor_char_boundary(MAX_OUTPUT_BYTES - truncation_hint.len());
+        out.truncate(cut);
         out.push_str(truncation_hint);
     }
     (std::mem::take(out), truncated)

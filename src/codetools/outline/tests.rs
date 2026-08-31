@@ -6,7 +6,7 @@ use tree_sitter::Query;
 use super::extract::{TOML_FIELD_TRUNCATE_THRESHOLD, extract_symbols};
 use super::lang::LangId;
 use super::queries::{ALL_LANGS, query_source};
-use super::render::{build_outline_tree, render_file_outline, truncate_signature};
+use super::render::{build_outline_tree, render_file_outline, truncate_signature, truncate_outline};
 use super::types::{Symbol, SymbolKind};
 
 use super::*;
@@ -89,6 +89,22 @@ fn truncate_signature_long() {
     let truncated = truncate_signature(sig);
     assert!(truncated.chars().count() <= 81);
     assert!(truncated.ends_with('…'));
+}
+
+/// The byte cut must land on a char boundary: outline text routinely
+/// contains multibyte characters, and `String::truncate` panics when the
+/// new length splits one.
+#[test]
+fn outline_truncation_lands_on_char_boundaries() {
+    // Every `é` is two bytes, so a byte cut at an odd offset would split
+    // a character — exactly the case at the 30KB cap.
+    let mut out = "é".repeat(20_000);
+    assert!(out.len() > 30_000);
+    let (text, truncated) = truncate_outline(&mut out);
+    assert!(truncated);
+    assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    assert!(text.ends_with("(output truncated, narrow the path to see more)"));
+    assert!(text.len() <= 30_000);
 }
 
 #[test]
