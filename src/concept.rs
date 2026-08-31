@@ -156,16 +156,30 @@ impl Concept {
     /// one stood. The same-directory rename also replaces an existing
     /// target atomically (the deliberate edit path).
     pub fn to_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        /// Distinguishes concurrent `to_file` calls on the same target
+        /// within one process (two MCP tool calls, say): a per-call nonce
+        /// keeps each staging file distinct so neither write can truncate
+        /// the other's temp mid-flight.
+        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = path.as_ref();
         let file_name = path
             .file_name()
             .map(|n| n.to_os_string())
             .unwrap_or_default();
         let mut tmp_name = file_name.clone();
-        tmp_name.push(format!(".tmp-{}", std::process::id()));
+        tmp_name.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let tmp = path.with_file_name(tmp_name);
         let write =
             std::fs::write(&tmp, self.to_string()).and_then(|()| std::fs::rename(&tmp, path));
+        // A failed write or rename must not litter the staging file
+        // behind; cleanup is best-effort next to the real error.
+        if write.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
         write.context(IoSnafu {
             path: path.to_path_buf(),
         })
@@ -410,6 +424,55 @@ mod tests {
         concept.to_file(&path).unwrap();
         let reloaded = Concept::from_file(&path).unwrap();
         assert_eq!(reloaded, concept);
+    }
+
+    /// A failed write or rename must not litter the staging file behind.
+    #[test]
+    fn to_file_cleans_up_the_staging_file_when_the_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("concept.md");
+        // Renaming a file onto an existing directory fails.
+        std::fs::create_dir(&target).unwrap();
+
+        let concept = Concept::from_str("---\ntype: X\n---\nbody\n").unwrap();
+        assert!(concept.to_file(&target).is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging file must not linger");
+    }
+
+    /// Concurrent writes to one target stage through distinct temp files,
+    /// so the surviving content is always one complete concept.
+    #[test]
+    fn concurrent_to_file_on_one_target_never_tears() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("concept.md");
+        let a = Concept::from_str("---\ntype: X\n---\na body\n").unwrap();
+        let b = Concept::from_str("---\ntype: Y\n---\nb body\n").unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..32 {
+            let concept = if i % 2 == 0 { a.clone() } else { b.clone() };
+            let target = target.clone();
+            handles.push(std::thread::spawn(move || concept.to_file(&target)));
+        }
+        for h in handles {
+            assert!(h.join().unwrap().is_ok());
+        }
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            text == a.to_string() || text == b.to_string(),
+            "torn write: {text:?}"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
