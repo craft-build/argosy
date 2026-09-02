@@ -40,3 +40,7 @@ tests/**/.argosy
 .env
 .env.*
 !.env.example
+
+# researcher lab (experiment history — local only)
+.lab/
+run.log
