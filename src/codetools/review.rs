@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -588,8 +588,7 @@ fn respond(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
-    stream.flush()?;
-    stream.shutdown(Shutdown::Write)
+    stream.flush()
 }
 
 fn respond_best_effort(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
@@ -752,15 +751,6 @@ mod tests {
     fn request(address: &str, request: &str) -> String {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
-        // Signal that the complete test request is on the wire. Real HTTP
-        // clients frame this with Content-Length/connection management; the
-        // half-close keeps this tiny raw client deterministic under parallel
-        // macOS test load.
-        if let Err(error) = stream.shutdown(Shutdown::Write)
-            && error.kind() != std::io::ErrorKind::NotConnected
-        {
-            panic!("failed to finish HTTP request: {error}");
-        }
         let mut response = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
@@ -901,7 +891,7 @@ mod tests {
         let path = format!("/review/{}", opened.review_id);
         let page = request(
             address,
-            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
         );
         assert!(page.starts_with("HTTP/1.1 200 OK"));
         assert!(page.contains("hello.txt"));
@@ -910,7 +900,7 @@ mod tests {
         let response = request(
             address,
             &format!(
-                "POST {path}/submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST {path}/submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             ),
         );
