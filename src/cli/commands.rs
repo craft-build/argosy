@@ -260,7 +260,7 @@ pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> 
 fn reconcile_index_after_import() -> Result<Option<argosy::index::IndexReport>> {
     use argosy::context::ProjectContext;
     use argosy::index::Index;
-    use argosy::index::fastembed::FastembedProvider;
+    use argosy::index::candle::CandleProvider;
     use argosy::index::sqlite::SqliteVecStore;
 
     let root = current_dir()?;
@@ -273,7 +273,7 @@ fn reconcile_index_after_import() -> Result<Option<argosy::index::IndexReport>> 
     eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
     let context = ProjectContext::open_project(&root)?;
     let store = SqliteVecStore::open(&db)?;
-    let provider = FastembedProvider::new_default()?;
+    let provider = CandleProvider::new_default()?;
     let mut index = Index::new(provider, store);
     Ok(Some(index.reconcile(&context)?))
 }
@@ -316,7 +316,7 @@ pub(super) fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
 #[cfg(feature = "default-index")]
 pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
-    use argosy::index::fastembed::FastembedProvider;
+    use argosy::index::candle::CandleProvider;
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::{Index, VectorStore, staleness_report};
 
@@ -345,7 +345,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // index and must never write (no directory creation, no pragma,
             // no DDL).
             let store = SqliteVecStore::open_read_only(&db)?;
-            let expected_model = FastembedProvider::default_model_id()?;
+            let expected_model = CandleProvider::default_model_id();
             let stale = staleness_report(&context, &store, &expected_model)?;
 
             // Unit counts per argosy/namespace, derived from `unit_hashes`
@@ -417,7 +417,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // cold cache): say so on stderr so the pause never reads as a
             // hang. stdout stays the machine-readable channel.
             eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
-            let provider = FastembedProvider::new_default()?;
+            let provider = CandleProvider::new_default()?;
             let mut index = Index::new(provider, store);
             let report = index.reconcile(&context)?;
             if out.json {
@@ -448,7 +448,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // in the store) and must work on a read-only index.
             let store = SqliteVecStore::open_read_only(&db)?;
             eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
-            let provider = FastembedProvider::new_default()?;
+            let provider = CandleProvider::new_default()?;
             let index = Index::new(provider, store);
             let query = Query {
                 text: q.text.clone(),
@@ -490,7 +490,7 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
     use argosy::error::Error;
     use argosy::index::Index;
-    use argosy::index::fastembed::LazyFastembedProvider;
+    use argosy::index::candle::LazyCandleProvider;
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
     use rmcp::ServiceExt;
@@ -499,7 +499,7 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     // and every tool call names its project (`cwd`). Projects open lazily
     // through this factory and stay cached for the process lifetime.
     // stdout is the stdio protocol channel: every diagnostic is stderr.
-    let factory: SessionFactory<LazyFastembedProvider, SqliteVecStore> = Arc::new(|root| {
+    let factory: SessionFactory<LazyCandleProvider, SqliteVecStore> = Arc::new(|root| {
         let context = ProjectContext::open_project(root)?;
         let store = SqliteVecStore::open(
             argosy::pull::project_argosy_dir(root)?.join(argosy::pull::INDEX_DB_NAME),
@@ -507,7 +507,7 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
         // The lazy provider makes the open instant and offline-tolerant:
         // the model (and its ~90 MB first-run download) loads only when
         // something actually needs embedding.
-        let mut index = Index::new(LazyFastembedProvider::new_default()?, store);
+        let mut index = Index::new(LazyCandleProvider::new_default()?, store);
         // A failed reconcile degrades retrieval, it must not fail the open
         // (spec §11: an out-of-date index degrades search quality, never
         // correctness) — warn on stderr and serve the session anyway;

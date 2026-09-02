@@ -18,9 +18,19 @@ tar = "0.4"
 flate2 = "1"
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 sqlite-vec = { version = "0.1", optional = true }
-fastembed = { version = "6", default-features = false, features = [
-  "hf-hub-native-tls",
-  "ort-download-binaries-native-tls",
+# Pure-Rust embedding stack (no C in the chain): candle 0.9 is the newest
+# line whose `candle-core` does not hard-depend on `tokenizers` with the
+# C Oniguruma (`onig`) feature on native targets; our own `tokenizers` uses
+# the pure-Rust `fancy-regex` backend instead, and `hf-hub` uses the sync
+# `ureq` downloader whose default TLS is rustls.
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+hf-hub = { version = "0.4", default-features = false, features = [
+  "ureq",
+], optional = true }
+tokenizers = { version = "0.23", default-features = false, features = [
+  "fancy-regex",
 ], optional = true }
 rmcp = { version = "3.1", default-features = false, features = [
   "server",
@@ -93,7 +103,11 @@ default = ["default-index", "mcp", "code-tools"]
 default-index = [
   "dep:rusqlite",
   "dep:sqlite-vec",
-  "dep:fastembed",
+  "dep:candle-core",
+  "dep:candle-nn",
+  "dep:candle-transformers",
+  "dep:hf-hub",
+  "dep:tokenizers",
 ]
 mcp = ["dep:rmcp", "dep:tokio"]
 code-tools = [

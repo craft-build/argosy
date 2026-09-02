@@ -36,7 +36,7 @@ These were open in the reference-implementation document and are now settled. Do
 |---|---|
 | Crate count | One crate, `argosy`, lib + bin (reference doc §2.3) |
 | Default vector store | **`sqlite-vec`** — one SQLite file per project context (`index.db` under the project's slot in the XDG state dir — relocated there 2026-08-29 so argosy data never sits in the project tree; originally `<project-root>/.argosy/index.db`), SQL provides the `IDX-9` structured filtering |
-| Default embedding provider | **`fastembed`** (ONNX, local) behind the `EmbeddingProvider` trait; model identity recorded per `IDX-5` |
+| Default embedding provider | **`candle`** (pure-Rust, local — no C in the dependency chain) behind the `EmbeddingProvider` trait; model identity recorded per `IDX-5`. Supersedes the original `fastembed` (ONNX) resolution as of 2026-09-01 (doc 11) |
 | CLI surface | Full set from the start: `mcp`, `validate`, `package`, `index`, `convert styleguide` (reference doc §6) |
 | Precedence rule (`MUL-6`/`MUL-7`) | Local argosy first, then imported argosys in registration order. Deterministic and inspectable: every aggregate operation reports which argosy each result came from |
 | YAML rule-set conversion | One concept file per rule, named for its `rule_id`; `## Good` / `## Bad` body headings (`STG-6`); `rule_id`/`priority`/`pattern` as optional frontmatter (`STG-5`) |
@@ -58,7 +58,7 @@ src/
 ├── index/
 │   ├── mod.rs           # traits, EmbeddingUnit, reconcile, Query (doc 06)
 │   ├── sqlite.rs        # SqliteVecStore   (doc 07, feature "default-index")
-│   └── fastembed.rs     # FastembedProvider (doc 07, feature "default-index")
+│   └── candle.rs        # CandleProvider   (doc 11, feature "default-index")
 ├── package.rs           # distribution packaging + YAML styleguide import (doc 08)
 ├── main.rs              # binary entry point (doc 09)
 ├── cli.rs               # clap definitions + subcommand dispatch (doc 09)
@@ -68,7 +68,7 @@ tests/
 └── *.rs                 # integration tests (CLI in doc 09, MCP in doc 10)
 ```
 
-Cargo features: `default = ["default-index", "mcp"]`; `default-index` gates the sqlite-vec/fastembed backend; `mcp` gates `rmcp` so library consumers can stay lean.
+Cargo features: `default = ["default-index", "mcp"]`; `default-index` gates the sqlite-vec/candle backend; `mcp` gates `rmcp` so library consumers can stay lean.
 
 ## 5. Global Conventions
 
@@ -76,8 +76,8 @@ These apply to every chunk. Individual documents add chunk-specific rules.
 
 - **Toolchain.** Rust edition 2024 (already set in `Cargo.toml`). Every chunk ends with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` all clean.
 - **Errors.** One `thiserror`-based `argosy::Error` enum plus `pub type Result<T>`, defined in doc 01. No panics, `unwrap`, or `expect` on paths reachable by untrusted input (an argosy's contents are untrusted — spec §12.1). Panics are acceptable only in tests.
-- **Dependencies.** Keep the tree minimal; every dependency must be justified in the document that introduces it. Already prescribed: `thiserror`, `serde` + `serde_yaml` (frontmatter), `semver` (manifest), `tempfile` (dev). Docs 07/09/10 add `rusqlite`/`sqlite-vec`/`fastembed`, `clap`, and `rmcp` respectively.
-- **Testing.** Unit tests colocated with the code they test; fixtures under `tests/fixtures/` constructed as real directory trees (write small helper builders as needed). `cargo test` with default features must require **no network access** — the fastembed model download is exercised only in a gated test (doc 07).
+- **Dependencies.** Keep the tree minimal; every dependency must be justified in the document that introduces it. Already prescribed: `thiserror`, `serde` + `serde_yaml` (frontmatter), `semver` (manifest), `tempfile` (dev). Docs 07/09/10 add `rusqlite`/`sqlite-vec`/`fastembed`, `clap`, and `rmcp` respectively; doc 11 replaces the fastembed entry with the pure-Rust `candle`/`hf-hub`/`tokenizers` stack.
+- **Testing.** Unit tests colocated with the code they test; fixtures under `tests/fixtures/` constructed as real directory trees (write small helper builders as needed). `cargo test` with default features must require **no network access** — the embedding model download is exercised only in a gated test (docs 07/11).
 - **Filesystem access.** All reads/writes of bundle content go through the library's own APIs so structural rules (namespace placement, reserved filenames, imported-argosy read-only) are enforced in exactly one place. Path-traversal safety: any path derived from user or bundle input must be normalized and verified to stay inside the bundle root.
 - **Spec citations.** When a requirement ID (e.g. `SKL-4`) is implemented or enforced in code, name it in a doc comment or test name, e.g. `#[test] fn skl4_skill_requires_description()`. This is the traceability mechanism for conformance claims.
 - **No speculative scope.** UX decisions the spec leaves open (`PROM-5`, `SEC-3`, `SEC-4`) stay open here — the library exposes the mechanism; who triggers it is the harness's business.
@@ -92,10 +92,11 @@ These apply to every chunk. Individual documents add chunk-specific rules.
 | 04 | `04-local-writes-and-promotion.md` | Write/delete concepts in the local argosy; memory→document/styleguide promotion | 03 |
 | 05 | `05-multi-argosy-context.md` | `ProjectContext` (one local + N imported), read-only enforcement, qualified identity, `argosy://` URIs, precedence | 04 |
 | 06 | `06-index-traits-and-reconciliation.md` | `EmbeddingProvider`/`VectorStore` traits, `EmbeddingUnit`, staleness + reconcile, `Query` | 05 |
-| 07 | `07-sqlite-vec-and-fastembed-backend.md` | Default index backend: `SqliteVecStore` + `FastembedProvider` | 06 |
+| 07 | `07-sqlite-vec-and-fastembed-backend.md` | Default index backend: `SqliteVecStore` + `FastembedProvider` (embedding half superseded by doc 11) | 06 |
 | 08 | `08-distribution-and-import.md` | Packaging with `memory/` exclusion, integrity hashes, Craft YAML styleguide import | 07 |
 | 09 | `09-cli.md` | `argosy` binary: `validate`, `package`, `index`, `convert styleguide` | 08 |
 | 10 | `10-mcp-server.md` | `argosy mcp` server per the reference doc §3.2 tool/resource mapping | 09 |
+| 11 | `11-candle-embedding-backend.md` | `CandleProvider`: pure-Rust candle embedding backend replacing fastembed (no C in the chain) | 06 |
 
 ## 7. Global Definition of Done
 

@@ -43,12 +43,12 @@ fn index_on_a_project_without_a_local_bundle_points_at_init() {
 }
 
 /// Full round trip with the real backend: `build` then `status` then
-/// `query --json`. Needs the ONNX model — the first run downloads ~90 MB
+/// `query --json`. Needs the model weights — the first run downloads ~90 MB
 #[cfg(feature = "default-index")]
 /// `cargo test --test cli -- --ignored index_build_status_query_round_trip`.
 #[cfg(feature = "default-index")]
 #[test]
-#[ignore = "downloads the fastembed model (needs network on first run)"]
+#[ignore = "downloads the candle model weights (needs network on first run)"]
 fn index_build_status_query_round_trip() {
     let scratch = TempDir::new().unwrap();
     let (project, xdg) = fixture_project(&scratch);
@@ -62,7 +62,7 @@ fn index_build_status_query_round_trip() {
         .assert()
         .success()
         .stdout(predicate::str::contains("index"))
-        .stdout(predicate::str::contains("fastembed/"));
+        .stdout(predicate::str::contains("candle/"));
 
     argosy_bin()
         .args(["index", "status"])
@@ -70,7 +70,7 @@ fn index_build_status_query_round_trip() {
         .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
-        .stdout(predicate::str::contains("model: fastembed/"))
+        .stdout(predicate::str::contains("model: candle/"))
         .stdout(predicate::str::contains("acme-billing/document: 3"))
         .stdout(predicate::str::contains("up to date"));
 

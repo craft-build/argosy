@@ -111,11 +111,12 @@ pub enum Error {
     #[snafu(display("index operation failed: {reason}"))]
     Index { reason: String },
 
-    /// The fastembed embedding provider failed to initialize the ONNX model
-    /// (including the first-run download) or to embed a batch.
+    /// The default embedding provider failed to initialize the local model
+    /// (including the first-run download) or to embed a batch; the reason
+    /// carries the underlying candle/hf-hub/tokenizer error message.
     #[cfg(feature = "default-index")]
-    #[snafu(display("fastembed embedding failed: {source}"))]
-    Embedding { source: fastembed::Error },
+    #[snafu(display("embedding model failed: {reason}"))]
+    Embedding { reason: String },
 
     /// A bundle file was a symlink whose resolved target escapes the bundle
     /// root. Packaging refuses to follow it (the same root-containment

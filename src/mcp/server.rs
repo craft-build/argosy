@@ -127,7 +127,7 @@ fn invalid_params(err: serde_json::Error) -> CallToolResult {
 
 // Parses arguments, runs the handler on the blocking pool with the state
 // lock held, and renders the outcome. Argosy handlers block by nature
-// (argosy walks, SQLite, ONNX inference), so they must not sit on an
+// (argosy walks, SQLite, model inference), so they must not sit on an
 // async runtime worker; `blocking_lock` keeps requests serialized.
 // Actionable failures are tool-level errors (`isError`), never protocol ones.
 macro_rules! dispatch {

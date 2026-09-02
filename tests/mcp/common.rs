@@ -15,7 +15,7 @@ use argosy::mcp::{McpState, ProjectSession, SessionFactory};
 use argosy::{Concept, LocalArgosy, Result};
 use tempfile::TempDir;
 
-// --- Public-trait backend doubles (no ONNX, no SQLite) ---------------------
+// --- Public-trait backend doubles (no model, no SQLite) -------------------
 
 pub(crate) const DIM: usize = 64;
 

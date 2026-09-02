@@ -44,7 +44,7 @@ The `argosy` executable provides the MCP server and other CLI commands (validati
 
 ### 2.3 Why One Crate
 
-Keeping everything in one crate avoids version skew between the format logic and its default index backend, and keeps the dependency story simple for consumers: one crate, one version. The replaceability the split used to provide is preserved by the trait boundary — the default vector store and embedding provider remain optional at the feature level, so a consumer with its own embedding infrastructure (Craft, which already runs local ONNX embeddings via fastembed for its context-compaction feature) implements the trait around what it already has instead of carrying two embedding stacks side by side.
+Keeping everything in one crate avoids version skew between the format logic and its default index backend, and keeps the dependency story simple for consumers: one crate, one version. The replaceability the split used to provide is preserved by the trait boundary — the default vector store and embedding provider remain optional at the feature level, so a consumer with its own embedding infrastructure (Craft, which already runs local ONNX embeddings via fastembed in its own context-compaction feature) implements the trait around what it already has instead of carrying two embedding stacks side by side.
 
 ## 3. The MCP Server (`argosy mcp`)
 

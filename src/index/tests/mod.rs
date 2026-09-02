@@ -1,5 +1,5 @@
 //! Test doubles and fixtures for the index: `MockEmbedder` + `MemStore`
-//! prove the provider/store traits with no ONNX and no SQLite. `pub(crate)`
+//! prove the provider/store traits with no model and no SQLite. `pub(crate)`
 //! so other modules' tests (sqlite, mcp) reuse the same doubles.
 
 mod reconcile;
@@ -18,7 +18,7 @@ use crate::context::ProjectContext;
 use crate::error::Error;
 
 // --- Test doubles: MockEmbedder + MemStore prove trait sufficiency with
-// no ONNX and no SQLite. ---
+// no model and no SQLite. ---
 
 /// Deterministic provider: every text maps to a normalized 128-dim
 /// vector by hashing its tokens into dims, so identical texts always

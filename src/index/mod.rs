@@ -1,7 +1,7 @@
 //! The semantic index: trait boundaries, embedding units, reconciliation,
 //! and ranked search. The index is a derived, rebuildable artifact whose
 //! only inputs are on-disk bundles and an [`EmbeddingProvider`]; custom
-//! backends implement the traits, sqlite-vec + fastembed by default. One
+//! backends implement the traits, sqlite-vec + candle by default. One
 //! unit per concept; search via [`Index::search`], lookup via resolve.
 
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use crate::error::{IndexSnafu, Result, UnknownArgosySnafu};
 use crate::hash::sha256_hex;
 
 #[cfg(feature = "default-index")]
-pub mod fastembed;
+pub mod candle;
 #[cfg(feature = "default-index")]
 pub mod sqlite;
 
@@ -23,7 +23,7 @@ pub mod sqlite;
 /// efficiently.
 pub trait EmbeddingProvider {
     /// The stable identity of the model — name and version/revision
-    /// (e.g. `"fastembed/all-MiniLM-L6-v2@4"`). Compared against the
+    /// (e.g. `"candle/all-MiniLM-L6-v2@1"`). Compared against the
     /// store's recorded identity on every reconcile: vectors from different
     /// models are not comparable, so this must change with the weights.
     fn model_id(&self) -> &str;

@@ -58,9 +58,9 @@ argosy init
 argosy pull https://github.com/your-org/shared-argosy company-rules
 
 # 3. Build the semantic index.
-#    FIRST RUN downloads the embedding model (~90 MB) into the fastembed
-#    cache ($FASTEMBED_CACHE or the platform cache dir); later runs are
-#    offline.
+#    FIRST RUN downloads the embedding model (~90 MB) into the argosy
+#    cache ($ARGOSY_EMBED_CACHE_DIR or the platform cache dir); later runs
+#    are offline.
 argosy index build
 
 # 4. Serve the MCP server on stdio.
