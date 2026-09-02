@@ -33,11 +33,13 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         "inspect",
         "callgraph",
         "repomap",
+        "open_review",
+        "review_status",
     ] {
         assert!(names.contains(&expected), "missing tool `{expected}`");
     }
     #[cfg(feature = "code-tools")]
-    let expected_total = 20;
+    let expected_total = 22;
     #[cfg(not(feature = "code-tools"))]
     let expected_total = 13;
     assert_eq!(

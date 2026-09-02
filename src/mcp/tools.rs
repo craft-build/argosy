@@ -149,6 +149,18 @@ fn code_tool_definitions() -> Vec<Tool> {
             true,
             false,
         ),
+        tool::<codetools::review::OpenReviewParams>(
+            "open_review",
+            "Open a one-time, GitHub-style browser review. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one already-committed revision, set commit to its SHA or git revision instead (base and commit are mutually exclusive). Returns a loopback URL on the requested port, or a randomly assigned port when omitted; ask the user to review there, then call review_status with the returned review_id to retrieve their decision, summary, and line comments. The diff is snapshotted when this tool runs, working-tree mode excludes untracked files, the page expires after 60 minutes by default, and the tool never modifies the repository.",
+            false,
+            false,
+        ),
+        tool::<codetools::review::ReviewStatusParams>(
+            "review_status",
+            "Check a browser code review opened by open_review. Use it after the user has visited the returned URL; pending responses repeat the URL, submitted responses contain the user's approve/comment/request-changes decision and feedback, and expired or failed responses explain why no submission is available.",
+            true,
+            false,
+        ),
     ]
 }
 

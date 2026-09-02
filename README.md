@@ -130,6 +130,8 @@ the workspace directory it was spawned in, ported from Craft:
 | `inspect` | Quick health check: TODO/FIXME/HACK/XXX scan plus `git status`. |
 | `callgraph` | Intra-file call graph: `call_tree`, `callers`, `impact` (blast radius). |
 | `repomap` | Token-budgeted, PageRank-ranked map of a repository's definitions. |
+| `open_review` | Snapshot tracked repository changes or one specific committed revision and serve a one-time, GitHub-style review page on a requested or automatically assigned loopback port. |
+| `review_status` | Return the reviewer's decision, summary, and structured file-and-line comments to the agent. |
 
 `astgrep` (with `rewrite` + `apply`) and `conflicts` (with `resolve`) are
 the only ones that write files, and both refuse to write a file that

@@ -141,8 +141,24 @@ pub enum Error {
         source: rusqlite::Error,
     },
 
+    /// Starting or operating the one-time browser review server failed.
+    #[cfg(feature = "code-tools")]
+    #[snafu(display("review operation failed while {operation}: {source}"))]
+    ReviewIo {
+        operation: String,
+        source: std::io::Error,
+    },
+
+    /// Git produced a diff that cannot be represented by the UTF-8 review UI.
+    #[cfg(feature = "code-tools")]
+    #[snafu(display("{artifact} was not valid UTF-8: {source}"))]
+    ReviewEncoding {
+        artifact: &'static str,
+        source: std::string::FromUtf8Error,
+    },
+
     /// A code-intelligence tool (`outline`, `zoom`, `astgrep`, `conflicts`,
-    /// `inspect`, `callgraph`, `repomap`) failed on caller input: an
+    /// `inspect`, `callgraph`, `repomap`, browser review) failed on caller input: an
     /// unsupported language, an ambiguous symbol, a stale read, an invalid
     /// pattern. The message is phrased for an LLM caller to act on.
     #[cfg(feature = "code-tools")]

@@ -100,7 +100,8 @@ fn server_instructions() -> String {
     {
         format!(
             "{INSTRUCTIONS_BASE} The server also offers code-intelligence tools \
-             (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap) over the \
+             (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, open_review, \
+             review_status) over the \
              workspace directory it was spawned in; astgrep (apply) and conflicts \
              (resolve) write files only when explicitly requested."
         )
@@ -228,6 +229,18 @@ async fn dispatch_code_tool(
             codetools::repomap::run,
             codetools::repomap::RepomapParams
         )),
+        "open_review" => Some(dispatch_code!(
+            code,
+            args,
+            codetools::review::open_review,
+            codetools::review::OpenReviewParams
+        )),
+        "review_status" => Some(dispatch_code!(
+            code,
+            args,
+            codetools::review::review_status,
+            codetools::review::ReviewStatusParams
+        )),
         _ => None,
     }
 }
@@ -313,7 +326,15 @@ where
             #[cfg(feature = "code-tools")]
             if matches!(
                 name.as_str(),
-                "outline" | "zoom" | "astgrep" | "conflicts" | "inspect" | "callgraph" | "repomap"
+                "outline"
+                    | "zoom"
+                    | "astgrep"
+                    | "conflicts"
+                    | "inspect"
+                    | "callgraph"
+                    | "repomap"
+                    | "open_review"
+                    | "review_status"
             ) {
                 let result = dispatch_code_tool(code, &name, args)
                     .await

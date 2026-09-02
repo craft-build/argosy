@@ -1,5 +1,6 @@
 //! Workspace code-intelligence tools, ported from Craft: `outline`, `zoom`,
-//! `astgrep`, `conflicts`, `inspect`, `callgraph`, and `repomap`.
+//! `astgrep`, `conflicts`, `inspect`, `callgraph`, `repomap`, and browser
+//! review sessions.
 //!
 //! These tools know nothing about argosy bundles — they operate on the
 //! workspace filesystem the host process was spawned in, which makes them a
@@ -23,6 +24,7 @@ mod file_tracker;
 pub mod inspect;
 pub mod outline;
 pub mod repomap;
+pub mod review;
 pub mod zoom;
 
 pub use file_tracker::FileReadTracker;
@@ -65,6 +67,9 @@ pub struct CodeTools {
     /// wins. Holding this lock across a whole mutating run closes that
     /// window; read-only runs never take it.
     write_lock: Mutex<()>,
+    /// One-time browser review sessions, keyed by the opaque id returned to
+    /// the MCP caller.
+    reviews: review::ReviewManager,
 }
 
 impl CodeTools {
