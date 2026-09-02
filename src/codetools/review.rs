@@ -750,18 +750,42 @@ mod tests {
 
     fn request(address: &str, request: &str) -> String {
         let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
+            if let Some(expected) = http_response_length(&response)
+                && response.len() >= expected
+            {
+                response.truncate(expected);
+                break;
+            }
             match stream.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => panic!("HTTP response ended before its declared Content-Length"),
                 Ok(read) => response.extend_from_slice(&buffer[..read]),
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => panic!("failed to read HTTP response: {error}"),
             }
         }
         String::from_utf8(response).unwrap()
+    }
+
+    fn http_response_length(response: &[u8]) -> Option<usize> {
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?
+            + 4;
+        let header = std::str::from_utf8(&response[..header_end]).ok()?;
+        let content_length = header.lines().find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+        })?;
+        Some(header_end + content_length)
     }
 
     #[test]
@@ -893,7 +917,10 @@ mod tests {
             address,
             &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
         );
-        assert!(page.starts_with("HTTP/1.1 200 OK"));
+        assert!(
+            page.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {page:?}"
+        );
         assert!(page.contains("hello.txt"));
 
         let body = r#"{"decision":"request_changes","summary":"Please revise.","comments":[{"path":"hello.txt","line":1,"side":"new","body":"Keep the greeting."}]}"#;
