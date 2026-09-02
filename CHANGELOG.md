@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/craft-build/argosy/compare/v0.2.1...v0.2.2) - 2026-09-02
+
+### Added
+
+- *(mcp)* more thorough scan prompt: two-pass investigation, fact ownership, audit pass
+
+### Other
+
+- ignore .lab/ and run.log for research sessions
+- *(index)* replace fastembed with pure-Rust candle backend
+
 ## [0.2.1](https://github.com/craft-build/argosy/compare/v0.2.0...v0.2.1) - 2026-08-31
 
 ### Added
