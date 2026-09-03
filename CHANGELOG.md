@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/craft-build/argosy/compare/v0.2.2...v0.2.3) - 2026-09-03
+
+### Added
+
+- *(review)* add structured MCP review workflow
+- *(mcp)* add one-time browser code reviews
+
+### Fixed
+
+- *(mcp)* avoid review HTTP close race
+
+### Other
+
+- *(mcp)* make review HTTP test deterministic
+
 ## [0.2.2](https://github.com/craft-build/argosy/compare/v0.2.1...v0.2.2) - 2026-09-02
 
 ### Added
