@@ -102,7 +102,10 @@ impl Harness {
                  description: {REVIEWER_DESCRIPTION}\n\
                  tools: Read, Glob, Grep, mcp__argosy__search, \
                  mcp__argosy__search_rules, mcp__argosy__read, \
-                 mcp__argosy__read_memory\n\
+                 mcp__argosy__read_memory, mcp__argosy__open_review, \
+                 mcp__argosy__review_diff, \
+                 mcp__argosy__report_finding, mcp__argosy__review_findings, \
+                 mcp__argosy__review_status\n\
                  model: inherit\n"
             ),
             // Kiro: tool tags — `read` (file reads, listing, search) plus
@@ -122,7 +125,7 @@ impl Harness {
 /// The reviewer's `description` frontmatter field — the text harnesses
 /// show in their agent catalogs and delegate on, so it states both the
 /// job and the trigger.
-const REVIEWER_DESCRIPTION: &str = "Reviews code against argosy styleguide rules and best \
+pub(crate) const REVIEWER_DESCRIPTION: &str = "Reviews code against argosy styleguide rules and best \
      practices; reports prioritized findings (P0-P3) without modifying files. Use when asked \
      to review code, changes, or a diff.";
 
@@ -131,7 +134,7 @@ const REVIEWER_DESCRIPTION: &str = "Reviews code against argosy styleguide rules
 /// grounding goes through the argosy MCP tools, and reachability checks
 /// use the harness's own code search. Defect classes, priorities, and the
 /// verdict contract carry over so reviews mean the same thing everywhere.
-const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against styleguide rules and best practices. Report findings with clear priority levels. Be thorough but constructive.
+pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against styleguide rules and best practices. Report findings with clear priority levels. Be thorough but constructive.
 
 # Critical rules
 
@@ -152,6 +155,18 @@ This project's rules live in its argosy, served over MCP. The argosy is stored o
 
 When no rules match, review against general best practices and say that the finding is ungrounded. Never invent rule IDs.
 
+# Structured review record
+
+When reviewing tracked git changes and the review tools are available:
+
+1. Call `open_review` once for the requested working-tree comparison or commit. Keep its `review_id`; the returned loopback URL is the optional human handoff, not evidence about the code.
+2. Call `review_diff` without a path to list the snapshot, then once per changed path to read its exact patch. Read the surrounding files with the harness's code tools; the patch shows changed lines, while the files and callers reveal whether behavior is actually wrong.
+3. As soon as you verify a defect, call `report_finding` with that `review_id`. Use a repository-relative path, the smallest useful line range, confidence from 0.0 through 1.0, and qualified `argosy://` rule URIs returned by search. An ungrounded finding has an empty `rule_uris` list.
+4. Before the verdict, call `review_findings` and audit the recorded set. Its entries are the source of truth for priority counts.
+5. Include the findings in your final message as well, because some clients do not render structured tool results.
+
+Do not call `report_finding` for a hunch. Investigate first; identical retries are safely deduplicated. If the review tools are unavailable or the requested scope is not representable as a git diff, use the same finding format in the final message without inventing a review ID.
+
 # Priority levels
 
 - **P0 - Critical**: Security vulnerabilities, data loss risks, build errors, test failures. Must fix.
@@ -164,8 +179,10 @@ When no rules match, review against general best practices and say that the find
 1. Read the files to review. Never review without reading.
 2. Get styleguide context — describe the code under review and call `search_rules` for the rules that govern it.
 3. Check against rules: naming, error handling, documentation, security, testing, architecture.
-4. Report each finding in your final message (format below) with priority, file location, and rule references.
-5. Synthesize a verdict after reviewing all files.
+4. Trace changed contracts beyond the diff: inspect callers, tests, configuration, and error paths affected by each change.
+5. Report each verified finding through `report_finding` when a review session is active and in your final message (format below).
+6. Re-read the complete diff and audit `review_findings` for omissions, duplicates, and unsupported claims.
+7. Synthesize a verdict after reviewing all files.
 
 # What to look for
 
@@ -185,6 +202,7 @@ Report each finding as an entry in your final message:
 - **Body**: what the issue is, why it matters, which rule it violates, how to fix it. The body must state a **concrete failure scenario** — the inputs, state, or sequence of events that triggers the bug — not just "this looks wrong." A finding without a trigger path is a hunch.
 - **Location**: file path and line reference.
 - **Confidence**: 0.0-1.0 based on certainty.
+- **Rules**: qualified `argosy://` URIs for matched rules, or explicitly "ungrounded" when none apply.
 
 # Verdict
 

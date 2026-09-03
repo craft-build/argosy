@@ -151,13 +151,31 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::review::OpenReviewParams>(
             "open_review",
-            "Open a one-time, GitHub-style browser review. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one already-committed revision, set commit to its SHA or git revision instead (base and commit are mutually exclusive). Returns a loopback URL on the requested port, or a randomly assigned port when omitted; ask the user to review there, then call review_status with the returned review_id to retrieve their decision, summary, and line comments. The diff is snapshotted when this tool runs, working-tree mode excludes untracked files, the page expires after 60 minutes by default, and the tool never modifies the repository.",
+            "Start a review session over a snapshotted git diff and serve its one-time, GitHub-style browser page. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Returns a review_id used by review_diff, report_finding, review_findings, and review_status, plus changed_files and a loopback URL where a human can inspect the same diff and automated findings and submit their own decision and line comments. Working-tree mode excludes untracked files; the page expires after 60 minutes by default; the tool never modifies the repository.",
             false,
+            false,
+        ),
+        tool::<codetools::review::ReviewDiffParams>(
+            "review_diff",
+            "Read the immutable diff snapshot captured by open_review. Omit path to list all repository-relative changed files, then request each path to retrieve that file's exact patch, including removed lines. Use this rather than rerunning git diff so every automated finding and the human review page refer to the same review snapshot.",
+            true,
+            false,
+        ),
+        tool::<codetools::review::ReportFindingParams>(
+            "report_finding",
+            "Record one structured automated finding in the review session created by open_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, the path must be repository-relative, and rule_uris must be qualified argosy:// URIs returned by rule search. Identical retries are deduplicated. The finding becomes visible through review_findings, review_status, and the human review page.",
+            false,
+            false,
+        ),
+        tool::<codetools::review::ReviewFindingsParams>(
+            "review_findings",
+            "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict.",
+            true,
             false,
         ),
         tool::<codetools::review::ReviewStatusParams>(
             "review_status",
-            "Check a browser code review opened by open_review. Use it after the user has visited the returned URL; pending responses repeat the URL, submitted responses contain the user's approve/comment/request-changes decision and feedback, and expired or failed responses explain why no submission is available.",
+            "Check a review opened by open_review. Every response includes its structured automated findings; pending responses repeat the human-review URL, submitted responses additionally contain the user's approve/comment/request-changes decision and feedback, and expired or failed responses explain why no human submission is available.",
             true,
             false,
         ),

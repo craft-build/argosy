@@ -3,7 +3,12 @@
 //! already exposes, so any MCP harness can run it without special client
 //! support.
 
-use rmcp::model::{GetPromptResult, Prompt, PromptMessage, Role};
+#[cfg(feature = "code-tools")]
+use rmcp::model::PromptArgument;
+use rmcp::model::{GetPromptResult, JsonObject, Prompt, PromptMessage, Role};
+
+#[cfg(feature = "code-tools")]
+use crate::harness::REVIEWER_PROMPT;
 
 /// The `dream` prompt body: a memory-consolidation pass over the local
 /// argosy, adapted from craft's `/dream`.
@@ -82,27 +87,154 @@ Investigate the project at `cwd` and write what you learn into the local argosy 
 /// the resolved result.
 const SCAN_DESCRIPTION: &str = "Investigate the project at cwd and write its core documents (summary, architecture, tech stack, development guide) into the local argosy with write_document, updating existing documents in place. Use it when onboarding a project whose argosy is empty or its documents have drifted from the code.";
 
+#[cfg(feature = "code-tools")]
+const REVIEW_DESCRIPTION: &str = "Review tracked working-tree changes or one commit with the shared Argosy reviewer process: inspect the actual code and blast radius, ground verified findings in styleguide rules, record them through report_finding, audit the structured finding set, and return a prioritized verdict without modifying files.";
+
 /// The advertised prompt set. The set is static — no `list_changed`
 /// notifications.
 pub fn prompt_definitions() -> Vec<Prompt> {
-    vec![
+    #[allow(unused_mut)]
+    let mut prompts = vec![
         Prompt::new("dream", Some(DREAM_DESCRIPTION), None),
         Prompt::new("scan", Some(SCAN_DESCRIPTION), None),
-    ]
+    ];
+    #[cfg(feature = "code-tools")]
+    prompts.push(Prompt::new(
+            "review",
+            Some(REVIEW_DESCRIPTION),
+            Some(vec![
+                PromptArgument::new("cwd")
+                    .with_title("Project root")
+                    .with_description(
+                        "Absolute path of the git repository to review; passed to every Argosy tool call.",
+                    )
+                    .with_required(true),
+                PromptArgument::new("base")
+                    .with_title("Base revision")
+                    .with_description(
+                        "Revision to compare tracked working-tree changes against (default HEAD). Mutually exclusive with commit.",
+                    ),
+                PromptArgument::new("commit")
+                    .with_title("Commit")
+                    .with_description(
+                        "Review exactly this committed revision against its first parent. Mutually exclusive with base.",
+                    ),
+                PromptArgument::new("focus")
+                    .with_title("Review focus")
+                    .with_description(
+                        "Optional files, subsystem, risk, or user concern to prioritize without excluding the rest of the diff.",
+                    ),
+            ]),
+        ));
+    prompts
 }
 
 /// Resolves one prompt by name to its messages, or `None` when the name is
 /// unknown. Pure and stateless: prompts are static workflows, so unlike
 /// tools they never touch [`super::McpState`]. Each workflow runs as a
 /// single user-role message.
-pub fn get_prompt_result(name: &str) -> Option<GetPromptResult> {
+pub fn get_prompt_result(
+    name: &str,
+    arguments: Option<&JsonObject>,
+) -> std::result::Result<Option<GetPromptResult>, String> {
+    #[cfg(not(feature = "code-tools"))]
+    let _ = arguments;
     let (body, description) = match name {
         "dream" => (DREAM_PROMPT, DREAM_DESCRIPTION),
         "scan" => (SCAN_PROMPT, SCAN_DESCRIPTION),
-        _ => return None,
+        #[cfg(feature = "code-tools")]
+        "review" => {
+            let body = review_prompt(arguments)?;
+            return Ok(Some(
+                GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                    .with_description(REVIEW_DESCRIPTION),
+            ));
+        }
+        _ => return Ok(None),
     };
-    Some(
+    Ok(Some(
         GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
             .with_description(description),
-    )
+    ))
+}
+
+#[cfg(feature = "code-tools")]
+fn review_prompt(arguments: Option<&JsonObject>) -> std::result::Result<String, String> {
+    let arguments = arguments.ok_or("review prompt requires the `cwd` argument")?;
+    let unknown: Vec<_> = arguments
+        .keys()
+        .filter(|name| !matches!(name.as_str(), "cwd" | "base" | "commit" | "focus"))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "unknown review prompt argument(s): {}",
+            unknown.join(", ")
+        ));
+    }
+    let string_arg = |name: &str| -> std::result::Result<Option<&str>, String> {
+        arguments
+            .get(name)
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        format!("review prompt argument `{name}` must be a non-empty string")
+                    })
+            })
+            .transpose()
+    };
+    let cwd = string_arg("cwd")?.ok_or("review prompt requires the `cwd` argument")?;
+    let base = string_arg("base")?;
+    let commit = string_arg("commit")?;
+    let focus = string_arg("focus")?;
+    if base.is_some() && commit.is_some() {
+        return Err("review prompt arguments `base` and `commit` are mutually exclusive".into());
+    }
+
+    let target = if let Some(commit) = commit {
+        format!(
+            "Call `open_review` with `cwd` and `commit` set to {}.",
+            quoted(commit)
+        )
+    } else {
+        format!(
+            "Call `open_review` with `cwd` and `base` set to {}.",
+            quoted(base.unwrap_or("HEAD"))
+        )
+    };
+    let focus = focus.map_or_else(
+        || "No additional focus was supplied; review the complete diff.".to_string(),
+        |focus| {
+            format!(
+                "Prioritize this user-supplied focus without skipping the rest of the diff: {}.",
+                quoted(focus)
+            )
+        },
+    );
+
+    Ok(format!(
+        r#"# Review invocation
+
+Review the repository at `cwd` = {cwd}. Do not modify it.
+
+{target}
+Keep the returned `review_id` for every review tool call. Call `review_diff` without `path` to list the snapshot and then with each changed path to read the exact patch. Use the harness's file-reading and code-search tools for surrounding definitions and callers; the browser URL returned by `open_review` is an optional human handoff, not a substitute for reading the code.
+
+{focus}
+
+Follow the shared reviewer process below exactly.
+
+---
+
+{reviewer_prompt}"#,
+        cwd = quoted(cwd),
+        reviewer_prompt = REVIEWER_PROMPT,
+    ))
+}
+
+#[cfg(feature = "code-tools")]
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value).expect("strings always serialize")
 }

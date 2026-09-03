@@ -115,6 +115,11 @@ feels redundant — and a `scan` prompt: a project-documentation pass that
 investigates the codebase and writes the core document set (`summary`,
 `architecture`, `tech`, `development`) into the local argosy, updating
 existing documents in place.
+It also serves a `review` prompt with arguments for the project root and
+working-tree base or commit. The workflow snapshots the diff, reads the
+affected code and its blast radius, grounds verified findings in qualified
+styleguide-rule URIs, records them as structured review findings, and returns
+a prioritized verdict without modifying files.
 
 ### Code-intelligence tools
 
@@ -130,8 +135,11 @@ the workspace directory it was spawned in, ported from Craft:
 | `inspect` | Quick health check: TODO/FIXME/HACK/XXX scan plus `git status`. |
 | `callgraph` | Intra-file call graph: `call_tree`, `callers`, `impact` (blast radius). |
 | `repomap` | Token-budgeted, PageRank-ranked map of a repository's definitions. |
-| `open_review` | Snapshot tracked repository changes or one specific committed revision and serve a one-time, GitHub-style review page on a requested or automatically assigned loopback port. |
-| `review_status` | Return the reviewer's decision, summary, and structured file-and-line comments to the agent. |
+| `open_review` | Snapshot tracked repository changes or one specific committed revision, start a review session, and serve a one-time GitHub-style page on a requested or automatically assigned loopback port. |
+| `review_diff` | List changed files in a review session or read one file's immutable snapshotted patch. |
+| `report_finding` | Attach one validated, P0–P3 automated finding—with confidence, line range, suggestion, and qualified rule URIs—to a review session; identical retries deduplicate. |
+| `review_findings` | Read or filter the structured automated finding set for a review session. |
+| `review_status` | Return automated findings plus the human reviewer's decision, summary, and structured file-and-line comments. |
 
 `astgrep` (with `rewrite` + `apply`) and `conflicts` (with `resolve`) are
 the only ones that write files, and both refuse to write a file that
@@ -146,9 +154,12 @@ you want) for a much faster, smaller compile.
 definition into the harness's agent directory (`.opencode/agents/`,
 `.claude/agents/`, or `.kiro/agents/`). The reviewer reads the code,
 grounds findings in the project's styleguide rules via the argosy MCP
-tools, and reports prioritized findings (P0–P3) with a final verdict —
-adapted from Craft's built-in reviewer. Register the argosy MCP server
-with the harness to enable rule grounding.
+tools, records structured findings in the same session shown by the browser
+review page, and reports prioritized findings (P0–P3) with a final verdict —
+adapted from Craft's built-in reviewer. Harnesses with MCP prompt support can
+invoke the same process through the `review` prompt without installing a
+subagent. Register the argosy MCP server with the harness to enable rule
+grounding and structured findings.
 
 ## Commands
 

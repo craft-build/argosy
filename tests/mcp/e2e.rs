@@ -313,10 +313,17 @@ async fn end_to_end_over_in_process_duplex() {
     );
     assert_eq!(bad.is_error, Some(true), "bad write is a tool error");
 
-    // Prompts: the dream memory-consolidation and scan project-documentation
-    // workflows.
+    // Prompts: memory consolidation, project documentation, and structured
+    // code review workflows.
     let prompts = client.list_prompts(None).await.unwrap();
     let names: Vec<_> = prompts.prompts.iter().map(|p| p.name.as_str()).collect();
+    #[cfg(feature = "code-tools")]
+    assert_eq!(
+        names,
+        ["dream", "scan", "review"],
+        "exactly the advertised set"
+    );
+    #[cfg(not(feature = "code-tools"))]
     assert_eq!(names, ["dream", "scan"], "exactly the advertised set");
     for prompt in &prompts.prompts {
         assert!(
@@ -359,6 +366,47 @@ async fn end_to_end_over_in_process_duplex() {
             }
         }
         other => panic!("expected text content, got {other:?}"),
+    }
+
+    #[cfg(feature = "code-tools")]
+    {
+        let review = client
+            .get_prompt(
+                rmcp::model::GetPromptRequestParams::new("review").with_arguments(
+                    serde_json::json!({
+                        "cwd": cwd,
+                        "base": "main",
+                        "focus": "authorization",
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        match &review.messages[0].content {
+            rmcp::model::ContentBlock::Text(text) => {
+                for required in [
+                    "open_review",
+                    "review_diff",
+                    "search_rules",
+                    "report_finding",
+                    "review_findings",
+                    "authorization",
+                ] {
+                    assert!(text.text.contains(required), "review names `{required}`");
+                }
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+        let missing_review_args = client
+            .get_prompt(rmcp::model::GetPromptRequestParams::new("review"))
+            .await;
+        assert!(
+            missing_review_args.is_err(),
+            "required review arguments are enforced"
+        );
     }
 
     // Unknown prompt name: protocol-level method-not-found, not empty content.

@@ -101,7 +101,7 @@ fn server_instructions() -> String {
         format!(
             "{INSTRUCTIONS_BASE} The server also offers code-intelligence tools \
              (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, open_review, \
-             review_status) over the \
+             review_diff, report_finding, review_findings, review_status) over the \
              workspace directory it was spawned in; astgrep (apply) and conflicts \
              (resolve) write files only when explicitly requested."
         )
@@ -235,6 +235,24 @@ async fn dispatch_code_tool(
             codetools::review::open_review,
             codetools::review::OpenReviewParams
         )),
+        "review_diff" => Some(dispatch_code!(
+            code,
+            args,
+            codetools::review::review_diff,
+            codetools::review::ReviewDiffParams
+        )),
+        "report_finding" => Some(dispatch_code!(
+            code,
+            args,
+            codetools::review::report_finding,
+            codetools::review::ReportFindingParams
+        )),
+        "review_findings" => Some(dispatch_code!(
+            code,
+            args,
+            codetools::review::review_findings,
+            codetools::review::ReviewFindingsParams
+        )),
         "review_status" => Some(dispatch_code!(
             code,
             args,
@@ -297,12 +315,15 @@ where
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = std::result::Result<GetPromptResponse, McpError>> + '_
     {
-        match get_prompt_result(&request.name) {
+        match get_prompt_result(&request.name, request.arguments.as_ref()) {
             // An unknown prompt name is unroutable — the same policy as
-            // call_tool's unknown tool name. Arguments are ignored: the
-            // dream workflow takes none and declares none.
-            None => std::future::ready(Err(McpError::method_not_found::<GetPromptRequestMethod>())),
-            Some(result) => std::future::ready(Ok(GetPromptResponse::Complete(result))),
+            // call_tool's unknown tool name. Invalid or missing arguments are
+            // request errors so clients can correct their prompt invocation.
+            Ok(None) => {
+                std::future::ready(Err(McpError::method_not_found::<GetPromptRequestMethod>()))
+            }
+            Ok(Some(result)) => std::future::ready(Ok(GetPromptResponse::Complete(result))),
+            Err(message) => std::future::ready(Err(McpError::invalid_params(message, None))),
         }
     }
 
@@ -334,6 +355,9 @@ where
                     | "callgraph"
                     | "repomap"
                     | "open_review"
+                    | "review_diff"
+                    | "report_finding"
+                    | "review_findings"
                     | "review_status"
             ) {
                 let result = dispatch_code_tool(code, &name, args)

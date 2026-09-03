@@ -2,6 +2,7 @@
 //! Craft, driven like any MCP client would.
 
 use std::fs;
+use std::process::Command;
 
 use argosy::mcp::ArgosyMcpServer;
 use tempfile::TempDir;
@@ -499,6 +500,108 @@ async fn repomap_renders_and_caches() {
     )
     .await;
     assert_eq!(out["text"], again["text"]);
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn structured_review_findings_round_trip_over_mcp() {
+    let ws = workspace();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "review@example.com"][..],
+        &["config", "user.name", "Review Test"][..],
+        &["add", "."][..],
+        &["commit", "--quiet", "-m", "initial"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(ws.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+    fs::write(
+        ws.path().join("src/main.rs"),
+        "fn main() {\n    changed();\n}\n\nfn changed() {}\n",
+    )
+    .unwrap();
+    let (client, server) = client().await;
+
+    let opened = call_ok(
+        &client,
+        "open_review",
+        serde_json::json!({
+            "cwd": ws.path(),
+            "timeout_minutes": 1,
+        }),
+    )
+    .await;
+    let review_id = opened["review_id"].as_str().unwrap();
+    assert_eq!(opened["changed_files"], serde_json::json!(["src/main.rs"]));
+    let snapshot_files = call_ok(
+        &client,
+        "review_diff",
+        serde_json::json!({"review_id": review_id}),
+    )
+    .await;
+    assert_eq!(
+        snapshot_files["changed_files"],
+        serde_json::json!(["src/main.rs"])
+    );
+    assert!(snapshot_files["diff"].is_null());
+    let snapshot = call_ok(
+        &client,
+        "review_diff",
+        serde_json::json!({"review_id": review_id, "path": "src/main.rs"}),
+    )
+    .await;
+    assert!(
+        snapshot["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+    changed();"),
+        "got {snapshot}"
+    );
+    let reported = call_ok(
+        &client,
+        "report_finding",
+        serde_json::json!({
+            "review_id": review_id,
+            "title": "[P1] Preserve the helper contract",
+            "body": "When the old helper is removed, main now calls an undefined replacement and the build fails. Restore the helper or update the call.",
+            "priority": "P1",
+            "confidence": 1.0,
+            "path": "src/main.rs",
+            "line_start": 2,
+            "line_end": 2,
+            "rule_uris": ["argosy://acme-billing/styleguide/rust/errors"],
+            "suggestion": "Define changed or keep the existing helper."
+        }),
+    )
+    .await;
+    assert_eq!(reported["created"], true);
+
+    let findings = call_ok(
+        &client,
+        "review_findings",
+        serde_json::json!({"review_id": review_id, "priority": "P1"}),
+    )
+    .await;
+    assert_eq!(findings["findings"].as_array().unwrap().len(), 1);
+    let status = call_ok(
+        &client,
+        "review_status",
+        serde_json::json!({"review_id": review_id}),
+    )
+    .await;
+    assert_eq!(status["status"], "pending");
+    assert_eq!(status["findings"].as_array().unwrap().len(), 1);
 
     drop(client);
     server.abort();

@@ -1,8 +1,9 @@
 //! One-time, loopback-only browser code reviews for repository changes.
 //!
 //! `open_review` snapshots a git diff and starts a tiny HTTP server on
-//! `127.0.0.1`. The page accepts one review submission; `review_status`
-//! returns that structured feedback to the MCP caller.
+//! `127.0.0.1`. Agents read that exact snapshot through `review_diff` and
+//! attach structured findings; the page displays those findings and accepts
+//! one human submission. `review_status` returns both feedback channels.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -49,6 +50,49 @@ pub struct ReviewStatusParams {
     pub review_id: String,
 }
 
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReviewDiffParams {
+    /// Opaque id returned by `open_review`.
+    pub review_id: String,
+    /// Repository-relative changed path. Omit to list the files in the snapshot.
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReportFindingParams {
+    /// Opaque id returned by `open_review`.
+    pub review_id: String,
+    /// Imperative title prefixed with the priority, e.g. `[P1] Preserve the lock`.
+    pub title: String,
+    /// What is wrong, why it matters, the concrete failure scenario, and how to fix it.
+    pub body: String,
+    /// Finding priority.
+    pub priority: ReviewPriority,
+    /// Certainty from 0.0 through 1.0.
+    pub confidence: f32,
+    /// Repository-relative file path.
+    pub path: String,
+    /// First affected line (1-indexed).
+    pub line_start: u32,
+    /// Last affected line, inclusive.
+    pub line_end: u32,
+    /// Qualified `argosy://` URIs of the styleguide rules that ground the finding.
+    #[serde(default)]
+    pub rule_uris: Vec<String>,
+    /// Concrete replacement or implementation direction, when useful.
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct ReviewFindingsParams {
+    /// Opaque id returned by `open_review`.
+    pub review_id: String,
+    /// Return only this priority.
+    pub priority: Option<ReviewPriority>,
+    /// Return only findings whose repository-relative path contains this text.
+    pub path_contains: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenReviewOutcome {
     pub review_id: String,
@@ -60,6 +104,7 @@ pub struct OpenReviewOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     pub files_changed: usize,
+    pub changed_files: Vec<String>,
     pub expires_in_minutes: u16,
 }
 
@@ -69,18 +114,71 @@ pub enum ReviewStatusOutcome {
     Pending {
         review_id: String,
         url: String,
+        findings: Vec<ReviewFinding>,
     },
     Submitted {
         review_id: String,
         feedback: ReviewSubmission,
+        findings: Vec<ReviewFinding>,
     },
     Expired {
         review_id: String,
+        findings: Vec<ReviewFinding>,
     },
     Failed {
         review_id: String,
         error: String,
+        findings: Vec<ReviewFinding>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, rmcp::schemars::JsonSchema, PartialEq, Eq)]
+pub enum ReviewPriority {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReviewFinding {
+    pub finding_id: String,
+    pub title: String,
+    pub body: String,
+    pub priority: ReviewPriority,
+    pub confidence: f32,
+    pub path: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_uris: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFindingOutcome {
+    pub review_id: String,
+    pub finding_id: String,
+    /// False when an identical retry had already recorded this finding.
+    pub created: bool,
+    pub finding_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewFindingsOutcome {
+    pub review_id: String,
+    pub findings: Vec<ReviewFinding>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewDiffOutcome {
+    pub review_id: String,
+    pub changed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -124,6 +222,9 @@ pub struct ReviewManager {
 struct Session {
     url: String,
     state: SessionState,
+    diff: String,
+    changed_files: Vec<String>,
+    findings: Vec<ReviewFinding>,
 }
 
 #[derive(Clone)]
@@ -146,6 +247,27 @@ pub fn review_status(
     params: ReviewStatusParams,
 ) -> Result<ReviewStatusOutcome> {
     tools.reviews.status(params)
+}
+
+pub fn review_diff(
+    tools: &super::CodeTools,
+    params: ReviewDiffParams,
+) -> Result<ReviewDiffOutcome> {
+    tools.reviews.diff(params)
+}
+
+pub fn report_finding(
+    tools: &super::CodeTools,
+    params: ReportFindingParams,
+) -> Result<ReportFindingOutcome> {
+    tools.reviews.report_finding(params)
+}
+
+pub fn review_findings(
+    tools: &super::CodeTools,
+    params: ReviewFindingsParams,
+) -> Result<ReviewFindingsOutcome> {
+    tools.reviews.findings(params)
 }
 
 impl ReviewManager {
@@ -226,10 +348,8 @@ impl ReviewManager {
             .and_then(|name| name.to_str())
             .unwrap_or("repository")
             .to_string();
-        let files_changed = diff
-            .lines()
-            .filter(|line| line.starts_with("diff --git "))
-            .count();
+        let changed_files = changed_files(&diff);
+        let files_changed = changed_files.len();
         let page = render_page(&repository, &comparison, &diff);
 
         self.sessions
@@ -240,6 +360,9 @@ impl ReviewManager {
                 Session {
                     url: url.clone(),
                     state: SessionState::Pending,
+                    diff,
+                    changed_files: changed_files.clone(),
+                    findings: Vec::new(),
                 },
             );
 
@@ -275,6 +398,7 @@ impl ReviewManager {
             base,
             commit,
             files_changed,
+            changed_files,
             expires_in_minutes: timeout,
         })
     }
@@ -284,23 +408,202 @@ impl ReviewManager {
         let session = sessions.get(&params.review_id).context(CodeToolSnafu {
             message: format!("unknown review id `{}`", params.review_id),
         })?;
+        let findings = session.findings.clone();
         Ok(match &session.state {
             SessionState::Pending => ReviewStatusOutcome::Pending {
                 review_id: params.review_id,
                 url: session.url.clone(),
+                findings,
             },
             SessionState::Submitted(feedback) => ReviewStatusOutcome::Submitted {
                 review_id: params.review_id,
                 feedback: feedback.clone(),
+                findings,
             },
             SessionState::Expired => ReviewStatusOutcome::Expired {
                 review_id: params.review_id,
+                findings,
             },
             SessionState::Failed(error) => ReviewStatusOutcome::Failed {
                 review_id: params.review_id,
                 error: error.clone(),
+                findings,
             },
         })
+    }
+
+    fn diff(&self, params: ReviewDiffParams) -> Result<ReviewDiffOutcome> {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.get(&params.review_id).context(CodeToolSnafu {
+            message: format!("unknown review id `{}`", params.review_id),
+        })?;
+        let Some(path) = params.path else {
+            return Ok(ReviewDiffOutcome {
+                review_id: params.review_id,
+                changed_files: session.changed_files.clone(),
+                path: None,
+                diff: None,
+            });
+        };
+        let path = path.trim();
+        let diff = diff_for_file(&session.diff, path).with_context(|| CodeToolSnafu {
+            message: format!(
+                "`{path}` is not in review `{}`; call review_diff without path to list the snapshot",
+                params.review_id
+            ),
+        })?;
+        Ok(ReviewDiffOutcome {
+            review_id: params.review_id,
+            changed_files: session.changed_files.clone(),
+            path: Some(path.to_string()),
+            diff: Some(diff),
+        })
+    }
+
+    fn report_finding(&self, params: ReportFindingParams) -> Result<ReportFindingOutcome> {
+        let (review_id, finding) = validate_finding(params)?;
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.get_mut(&review_id).context(CodeToolSnafu {
+            message: format!("unknown review id `{review_id}`"),
+        })?;
+        let created = !session
+            .findings
+            .iter()
+            .any(|existing| existing.finding_id == finding.finding_id);
+        if created {
+            session.findings.push(finding.clone());
+        }
+        Ok(ReportFindingOutcome {
+            review_id,
+            finding_id: finding.finding_id,
+            created,
+            finding_count: session.findings.len(),
+        })
+    }
+
+    fn findings(&self, params: ReviewFindingsParams) -> Result<ReviewFindingsOutcome> {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let session = sessions.get(&params.review_id).context(CodeToolSnafu {
+            message: format!("unknown review id `{}`", params.review_id),
+        })?;
+        let findings = session
+            .findings
+            .iter()
+            .filter(|finding| {
+                params
+                    .priority
+                    .is_none_or(|priority| finding.priority == priority)
+                    && params.path_contains.as_ref().is_none_or(|needle| {
+                        finding
+                            .path
+                            .to_ascii_lowercase()
+                            .contains(&needle.to_ascii_lowercase())
+                    })
+            })
+            .cloned()
+            .collect();
+        Ok(ReviewFindingsOutcome {
+            review_id: params.review_id,
+            findings,
+        })
+    }
+}
+
+fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFinding)> {
+    let title = params.title.trim();
+    let body = params.body.trim();
+    let path = params.path.trim();
+    let suggestion = params
+        .suggestion
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let expected_prefix = format!("[{}]", params.priority.as_str());
+    let path_is_safe = !path.is_empty()
+        && Path::new(path).is_relative()
+        && Path::new(path).components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+    if title.is_empty()
+        || title.len() > 500
+        || !title.starts_with(&expected_prefix)
+        || body.is_empty()
+        || body.len() > 10_000
+        || !path_is_safe
+        || path.len() > 4096
+        || params.line_start == 0
+        || params.line_end < params.line_start
+        || !params.confidence.is_finite()
+        || !(0.0..=1.0).contains(&params.confidence)
+        || suggestion
+            .as_ref()
+            .is_some_and(|value| value.len() > 10_000)
+        || params
+            .rule_uris
+            .iter()
+            .any(|uri| !uri.starts_with("argosy://"))
+    {
+        return CodeToolSnafu {
+            message: format!(
+                "invalid finding: title must start with {expected_prefix}, body and repository-relative path must be non-empty, lines must be a valid 1-indexed range, confidence must be 0.0-1.0, and every rule_uris entry must be an argosy:// URI"
+            ),
+        }
+        .fail();
+    }
+
+    let mut hasher = Sha256::new();
+    for value in [
+        params.review_id.as_str(),
+        title,
+        body,
+        params.priority.as_str(),
+        path,
+        &params.line_start.to_string(),
+        &params.line_end.to_string(),
+        &params.confidence.to_bits().to_string(),
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    for uri in &params.rule_uris {
+        hasher.update(uri.as_bytes());
+        hasher.update([0]);
+    }
+    if let Some(value) = &suggestion {
+        hasher.update(value.as_bytes());
+    }
+    let finding_id: String = hasher.finalize()[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    Ok((
+        params.review_id,
+        ReviewFinding {
+            finding_id,
+            title: title.to_string(),
+            body: body.to_string(),
+            priority: params.priority,
+            confidence: params.confidence,
+            path: path.to_string(),
+            line_start: params.line_start,
+            line_end: params.line_end,
+            rule_uris: params.rule_uris,
+            suggestion,
+        },
+    ))
+}
+
+impl ReviewPriority {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
     }
 }
 
@@ -435,7 +738,17 @@ fn serve(
                     }
                 };
                 if request.method == "GET" && request.path == page_path {
-                    respond_best_effort(&mut stream, "200 OK", "text/html; charset=utf-8", page);
+                    let findings = sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(id)
+                        .map(|session| session.findings.clone())
+                        .unwrap_or_default();
+                    let page = page.replace(
+                        "<!-- automated-findings -->",
+                        &render_automated_findings(&findings),
+                    );
+                    respond_best_effort(&mut stream, "200 OK", "text/html; charset=utf-8", &page);
                 } else if request.method == "POST" && request.path == submit_path {
                     match serde_json::from_slice::<ReviewSubmission>(&request.body)
                         .and_then(validate_submission)
@@ -606,13 +919,83 @@ fn render_page(repository: &str, comparison: &str, diff: &str) -> String {
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Review {repository}</title><style>
-:root{{--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--add:#12261e;--del:#301b1e;--blue:#2f81f7}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}header{{position:sticky;top:0;z-index:2;padding:16px 24px;background:rgba(13,17,23,.96);border-bottom:1px solid var(--border)}}h1{{font-size:20px;margin:0 0 4px}}.muted{{color:var(--muted)}}main{{max-width:1400px;margin:20px auto;padding:0 20px 300px}}.file{{border:1px solid var(--border);border-radius:7px;margin:16px 0;overflow:hidden}}.file-title{{padding:10px 14px;background:var(--panel);font-family:ui-monospace,monospace;font-weight:600}}table{{border-collapse:collapse;width:100%;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}}td{{vertical-align:top}}.num{{width:52px;text-align:right;color:var(--muted);padding:0 8px;border-right:1px solid var(--border);user-select:none}}.code{{white-space:pre-wrap;word-break:break-all;padding:0 10px}}tr.add{{background:var(--add)}}tr.del{{background:var(--del)}}tr.meta .code{{color:var(--muted)}}tr.commentable{{cursor:pointer}}tr.commentable:hover{{outline:1px solid var(--blue);outline-offset:-1px}}aside{{position:fixed;z-index:3;right:20px;bottom:20px;width:min(480px,calc(100vw - 40px));max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;box-shadow:0 12px 40px #0008}}textarea{{width:100%;min-height:70px;margin:8px 0;padding:9px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px}}button,select{{padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:#21262d;color:var(--text)}}button.primary{{background:#238636;border-color:#2ea043;font-weight:600}}.comment{{border-top:1px solid var(--border);padding-top:8px;margin-top:8px}}.comment strong{{font:12px ui-monospace,monospace}}.remove{{float:right;color:#f85149}}#done{{display:none;color:#3fb950;font-weight:600}}</style></head>
-<body><header><h1>{repository}</h1><span class="muted"><code>{comparison}</code> · Click a changed or context line to comment</span></header><main>{rows}</main>
+:root{{--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--add:#12261e;--del:#301b1e;--blue:#2f81f7}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}header{{position:sticky;top:0;z-index:2;padding:16px 24px;background:rgba(13,17,23,.96);border-bottom:1px solid var(--border)}}h1{{font-size:20px;margin:0 0 4px}}.muted{{color:var(--muted)}}main{{max-width:1400px;margin:20px auto;padding:0 20px 300px}}.automated{{border:1px solid var(--border);border-radius:7px;padding:14px;background:var(--panel)}}.automated h2{{margin:0 0 10px}}.finding{{border-top:1px solid var(--border);padding:10px 0}}.finding:first-of-type{{border-top:0}}.finding p{{white-space:pre-wrap;margin:6px 0}}.file{{border:1px solid var(--border);border-radius:7px;margin:16px 0;overflow:hidden}}.file-title{{padding:10px 14px;background:var(--panel);font-family:ui-monospace,monospace;font-weight:600}}table{{border-collapse:collapse;width:100%;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}}td{{vertical-align:top}}.num{{width:52px;text-align:right;color:var(--muted);padding:0 8px;border-right:1px solid var(--border);user-select:none}}.code{{white-space:pre-wrap;word-break:break-all;padding:0 10px}}tr.add{{background:var(--add)}}tr.del{{background:var(--del)}}tr.meta .code{{color:var(--muted)}}tr.commentable{{cursor:pointer}}tr.commentable:hover{{outline:1px solid var(--blue);outline-offset:-1px}}aside{{position:fixed;z-index:3;right:20px;bottom:20px;width:min(480px,calc(100vw - 40px));max-height:70vh;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;box-shadow:0 12px 40px #0008}}textarea{{width:100%;min-height:70px;margin:8px 0;padding:9px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px}}button,select{{padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:#21262d;color:var(--text)}}button.primary{{background:#238636;border-color:#2ea043;font-weight:600}}.comment{{border-top:1px solid var(--border);padding-top:8px;margin-top:8px}}.comment strong{{font:12px ui-monospace,monospace}}.remove{{float:right;color:#f85149}}#done{{display:none;color:#3fb950;font-weight:600}}</style></head>
+<body><header><h1>{repository}</h1><span class="muted"><code>{comparison}</code> · Click a changed or context line to comment</span></header><main><!-- automated-findings -->{rows}</main>
 <aside><h2>Submit review</h2><div id="comments"></div><label>Summary<textarea id="summary" placeholder="Overall feedback"></textarea></label><select id="decision"><option value="comment">Comment</option><option value="approve">Approve</option><option value="request_changes">Request changes</option></select> <button class="primary" id="submit">Submit review</button><span id="done">Review submitted. You can close this page.</span></aside>
 <script>const comments=document.querySelector('#comments');document.querySelectorAll('tr.commentable').forEach(r=>r.onclick=()=>{{const key=r.dataset.path+':'+r.dataset.line+':'+r.dataset.side;if(document.querySelector(`[data-key="${{CSS.escape(key)}}"]`))return;const d=document.createElement('div');d.className='comment';d.dataset.key=key;d.dataset.path=r.dataset.path;d.dataset.line=r.dataset.line;d.dataset.side=r.dataset.side;const s=document.createElement('strong');s.textContent=key;const x=document.createElement('button');x.className='remove';x.textContent='Remove';x.onclick=()=>d.remove();const t=document.createElement('textarea');t.placeholder='Leave a line comment';d.append(s,x,t);comments.append(d);t.focus()}});document.querySelector('#submit').onclick=async()=>{{const button=document.querySelector('#submit');button.disabled=true;const payload={{decision:document.querySelector('#decision').value,summary:document.querySelector('#summary').value,comments:[...comments.children].filter(d=>d.querySelector('textarea').value.trim()).map(d=>({{path:d.dataset.path,line:Number(d.dataset.line),side:d.dataset.side,body:d.querySelector('textarea').value}}))}};try{{const response=await fetch(location.pathname+'/submit',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});if(!response.ok)throw new Error(await response.text());document.querySelector('#done').style.display='inline';button.style.display='none';document.querySelector('#decision').disabled=true}}catch(e){{alert('Could not submit review: '+e.message);button.disabled=false}}}};</script></body></html>"#,
         repository = html_escape(repository),
         comparison = html_escape(comparison),
     )
+}
+
+fn render_automated_findings(findings: &[ReviewFinding]) -> String {
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "<section class=\"automated\"><h2>Automated findings ({})</h2>",
+        findings.len()
+    );
+    for finding in findings {
+        write!(
+            out,
+            "<article class=\"finding\"><strong>{}</strong><div class=\"muted\"><code>{}:{}-{}</code> · confidence {:.2}</div><p>{}</p>",
+            html_escape(&finding.title),
+            html_escape(&finding.path),
+            finding.line_start,
+            finding.line_end,
+            finding.confidence,
+            html_escape(&finding.body),
+        )
+        .unwrap();
+        if !finding.rule_uris.is_empty() {
+            write!(
+                out,
+                "<div class=\"muted\">Rules: {}</div>",
+                html_escape(&finding.rule_uris.join(", "))
+            )
+            .unwrap();
+        }
+        if let Some(suggestion) = &finding.suggestion {
+            write!(
+                out,
+                "<p><strong>Suggested fix:</strong> {}</p>",
+                html_escape(suggestion)
+            )
+            .unwrap();
+        }
+        out.push_str("</article>");
+    }
+    out.push_str("</section>");
+    out
+}
+
+fn changed_files(diff: &str) -> Vec<String> {
+    diff.lines().filter_map(diff_header_path).collect()
+}
+
+fn diff_for_file(diff: &str, wanted: &str) -> Option<String> {
+    let mut selected = false;
+    let mut out = String::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            if selected {
+                break;
+            }
+            selected = diff_header_path(line).as_deref() == Some(wanted);
+        }
+        if selected {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn diff_header_path(line: &str) -> Option<String> {
+    line.strip_prefix("diff --git ")?
+        .rsplit_once(" b/")
+        .map(|(_, value)| value.trim_end_matches('"').to_string())
 }
 
 fn render_diff(diff: &str) -> String {
@@ -627,10 +1010,7 @@ fn render_diff(diff: &str) -> String {
                 out.push_str("</table></div>");
             }
             file_open = true;
-            path = line
-                .rsplit_once(" b/")
-                .map(|(_, value)| value.trim_end_matches('"').to_string())
-                .unwrap_or_else(|| "changed file".to_string());
+            path = diff_header_path(line).unwrap_or_else(|| "changed file".to_string());
             write!(
                 out,
                 "<div class=\"file\"><div class=\"file-title\">{}</div><table>",
@@ -905,6 +1285,51 @@ mod tests {
             },
         )
         .unwrap();
+        let first = report_finding(
+            &tools,
+            ReportFindingParams {
+                review_id: opened.review_id.clone(),
+                title: "[P1] Keep the original greeting".into(),
+                body: "When callers expect `before`, returning `after` changes the observable contract. Preserve the old value or update every caller.".into(),
+                priority: ReviewPriority::P1,
+                confidence: 0.95,
+                path: "hello.txt".into(),
+                line_start: 1,
+                line_end: 1,
+                rule_uris: vec!["argosy://rules/styleguide/contracts".into()],
+                suggestion: Some("Restore `before` until callers migrate.".into()),
+            },
+        )
+        .unwrap();
+        assert!(first.created);
+        let duplicate = report_finding(
+            &tools,
+            ReportFindingParams {
+                review_id: opened.review_id.clone(),
+                title: "[P1] Keep the original greeting".into(),
+                body: "When callers expect `before`, returning `after` changes the observable contract. Preserve the old value or update every caller.".into(),
+                priority: ReviewPriority::P1,
+                confidence: 0.95,
+                path: "hello.txt".into(),
+                line_start: 1,
+                line_end: 1,
+                rule_uris: vec!["argosy://rules/styleguide/contracts".into()],
+                suggestion: Some("Restore `before` until callers migrate.".into()),
+            },
+        )
+        .unwrap();
+        assert!(!duplicate.created);
+        assert_eq!(duplicate.finding_count, 1);
+        let findings = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id.clone(),
+                priority: Some(ReviewPriority::P1),
+                path_contains: Some("HELLO".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(findings.findings.len(), 1);
         let address = opened
             .url
             .strip_prefix("http://")
@@ -922,6 +1347,9 @@ mod tests {
             "unexpected response: {page:?}"
         );
         assert!(page.contains("hello.txt"));
+        assert!(page.contains("Automated findings (1)"));
+        assert!(page.contains("Keep the original greeting"));
+        assert!(page.contains("argosy://rules/styleguide/contracts"));
 
         let body = r#"{"decision":"request_changes","summary":"Please revise.","comments":[{"path":"hello.txt","line":1,"side":"new","body":"Keep the greeting."}]}"#;
         let response = request(
@@ -941,10 +1369,14 @@ mod tests {
         )
         .unwrap();
         match status {
-            ReviewStatusOutcome::Submitted { feedback, .. } => {
+            ReviewStatusOutcome::Submitted {
+                feedback, findings, ..
+            } => {
                 assert!(matches!(feedback.decision, ReviewDecision::RequestChanges));
                 assert_eq!(feedback.comments[0].path, "hello.txt");
                 assert_eq!(feedback.comments[0].line, 1);
+                assert_eq!(findings.len(), 1);
+                assert_eq!(findings[0].finding_id, first.finding_id);
             }
             other => panic!("expected submitted review, got {other:?}"),
         }
