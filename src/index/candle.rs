@@ -1,8 +1,9 @@
 //! The candle-backed default [`EmbeddingProvider`], gated behind the
 //! `default-index` Cargo feature. The model runs natively in Rust through the
-//! candle crates — no ONNX runtime and no C dependency anywhere in the chain
-//! (tokenization uses the pure-Rust `fancy-regex` backend, downloads use
-//! rustls) — with no live network needed except the first construction, which
+//! candle crates — no ONNX runtime; downloads use rustls, and the
+//! tokenization this provider performs uses the pure-Rust `fancy-regex`
+//! backend (candle-core itself pulls a tokenizers copy with the C `onig`
+//! backend — see Cargo.toml) — with no live network needed except the first construction, which
 //! downloads the model weights (~90 MB) into a user-level cache
 //! ([`model_cache_dir`]); later runs load from the cache offline.
 
@@ -78,19 +79,28 @@ impl Model {
     /// Downloads any missing weights into `cache` (module docs), then builds
     /// the tokenizer and the encoder from the cached files.
     fn load(cache: &std::path::Path) -> Result<Self> {
-        let api =
-            hf_hub::api::sync::ApiBuilder::from_cache(hf_hub::Cache::new(cache.to_path_buf()))
-                .build()
-                .map_err(embedding_failed)?;
-        let repo = api.repo(hf_hub::Repo::with_revision(
-            MODEL_REPO.to_string(),
-            hf_hub::RepoType::Model,
-            MODEL_REVISION.to_string(),
-        ));
-        // Cache-first lookups: every file resolves offline once downloaded.
-        let weights_path = repo.get("model.safetensors").map_err(embedding_failed)?;
-        let config_path = repo.get("config.json").map_err(embedding_failed)?;
-        let tokenizer_path = repo.get("tokenizer.json").map_err(embedding_failed)?;
+        // hf-hub 1.0: the sync client is `HFClientSync` (feature `blocking`);
+        // it owns its own background runtime, so calls from inside another
+        // tokio runtime (the MCP blocking pool) are safe. The revision is a
+        // per-download argument now, not a property of the repo handle.
+        let client = hf_hub::HFClient::builder()
+            .cache_dir(cache)
+            .build_sync()
+            .map_err(embedding_failed)?;
+        let (owner, name) = hf_hub::split_id(MODEL_REPO);
+        let repo = client.model(owner, name);
+        // Cache-first lookups (default: `force_download` off): every file
+        // resolves offline once downloaded.
+        let download = |file: &'static str| {
+            repo.download_file()
+                .filename(file)
+                .revision(MODEL_REVISION)
+                .send()
+                .map_err(embedding_failed)
+        };
+        let weights_path = download("model.safetensors")?;
+        let config_path = download("config.json")?;
+        let tokenizer_path = download("tokenizer.json")?;
 
         let config: Config = serde_json::from_str(
             &fs::read_to_string(&config_path).context(IoSnafu { path: config_path })?,
@@ -183,8 +193,8 @@ fn mean_pool_normalize(hidden: &Tensor, attention_mask: &Tensor) -> candle_core:
 }
 
 /// A local candle [`EmbeddingProvider`]: BERT text embeddings with no remote
-/// service and no C dependency (see module docs for the first-run-download
-/// tolerance).
+/// service (see module docs for the dependency posture and the
+/// first-run-download tolerance).
 pub struct CandleProvider {
     model: Mutex<Model>,
     model_id: String,
