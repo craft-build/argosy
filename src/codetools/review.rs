@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "mcp")]
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,7 +29,8 @@ const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
 pub struct OpenReviewParams {
     /// Repository root (or a directory inside it).
     pub cwd: PathBuf,
@@ -44,13 +46,15 @@ pub struct OpenReviewParams {
     pub timeout_minutes: Option<u16>,
 }
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
 pub struct ReviewStatusParams {
     /// Opaque id returned by `open_review`.
     pub review_id: String,
 }
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
 pub struct ReviewDiffParams {
     /// Opaque id returned by `open_review`.
     pub review_id: String,
@@ -58,7 +62,8 @@ pub struct ReviewDiffParams {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
 pub struct ReportFindingParams {
     /// Opaque id returned by `open_review`.
     pub review_id: String,
@@ -83,7 +88,8 @@ pub struct ReportFindingParams {
     pub suggestion: Option<String>,
 }
 
-#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
 pub struct ReviewFindingsParams {
     /// Opaque id returned by `open_review`.
     pub review_id: String,
@@ -132,7 +138,8 @@ pub enum ReviewStatusOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, rmcp::schemars::JsonSchema, PartialEq, Eq)]
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ReviewPriority {
     P0,
     P1,

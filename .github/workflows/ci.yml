@@ -29,6 +29,32 @@ jobs:
       - name: Run tests
         run: cargo test ${{ matrix.features }}
 
+  # Every non-default feature combination must at least compile: the test
+  # matrix above needs `default-index` and `mcp` for the test crates, so a
+  # feature-gating bug like ungated `rmcp` use in `codetools/review.rs`
+  # (0.2.3) never surfaced. `check` builds the lib + bin exactly as a
+  # consumer of each feature set would.
+  feature-matrix:
+    name: Check (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "--features mcp"
+          - "--features code-tools"
+          - "--features default-index"
+          - "--features default-index,mcp"
+          - "--features default-index,code-tools"
+          - "--features code-tools,mcp"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --no-default-features ${{ matrix.features }}
+
   lint:
     name: Fmt + clippy
     runs-on: ubuntu-latest

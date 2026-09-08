@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+#[cfg(feature = "default-index")]
 use argosy::index::{Filter, Query};
 use argosy::package::{ImportReport, PackageOptions, PackageReport};
 use argosy::{Argosy, LocalArgosy, Namespace, ValidationReport};
