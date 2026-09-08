@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/craft-build/argosy/compare/v0.2.3...v0.2.4) - 2026-09-08
+
+### Fixed
+
+- *(review)* gate rmcp schema derives behind the mcp feature
+
+### Other
+
+- *(deps)* upgrade hf-hub to 1.0
+- bump dependencies
+
 ### Fixed
 
 - *(review)* gate rmcp schema derives behind the mcp feature so `code-tools` compiles without mcp
