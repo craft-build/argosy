@@ -268,8 +268,8 @@ where
     P: EmbeddingProvider + Send + 'static,
     S: VectorStore + Send + 'static,
 {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_prompts()
