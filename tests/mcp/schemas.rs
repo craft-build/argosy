@@ -33,16 +33,15 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         "inspect",
         "callgraph",
         "repomap",
-        "open_review",
+        "start_review",
         "review_diff",
         "report_finding",
         "review_findings",
-        "review_status",
     ] {
         assert!(names.contains(&expected), "missing tool `{expected}`");
     }
     #[cfg(feature = "code-tools")]
-    let expected_total = 25;
+    let expected_total = 24;
     #[cfg(not(feature = "code-tools"))]
     let expected_total = 13;
     assert_eq!(
@@ -50,12 +49,24 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
         expected_total,
         "exactly the documented tool set"
     );
+    assert!(!names.contains(&"open_review"), "no browser review tool");
+    assert!(
+        !names.contains(&"review_status"),
+        "no redundant review status tool"
+    );
 
     for tool in &tools {
         let props = tool.input_schema["properties"]
             .as_object()
             .cloned()
             .unwrap_or_default();
+        if tool.name == "start_review" {
+            assert!(props.contains_key("cwd"));
+            assert!(props.contains_key("base"));
+            assert!(props.contains_key("commit"));
+            assert!(!props.contains_key("port"));
+            assert!(!props.contains_key("timeout_minutes"));
+        }
         if [
             "write_memory",
             "delete_memory",

@@ -102,10 +102,9 @@ impl Harness {
                  description: {REVIEWER_DESCRIPTION}\n\
                  tools: Read, Glob, Grep, mcp__argosy__search, \
                  mcp__argosy__search_rules, mcp__argosy__read, \
-                 mcp__argosy__read_memory, mcp__argosy__open_review, \
+                 mcp__argosy__read_memory, mcp__argosy__start_review, \
                  mcp__argosy__review_diff, \
-                 mcp__argosy__report_finding, mcp__argosy__review_findings, \
-                 mcp__argosy__review_status\n\
+                 mcp__argosy__report_finding, mcp__argosy__review_findings\n\
                  model: inherit\n"
             ),
             // Kiro: tool tags — `read` (file reads, listing, search) plus
@@ -159,7 +158,7 @@ When no rules match, review against general best practices and say that the find
 
 When reviewing tracked git changes and the review tools are available:
 
-1. Call `open_review` once for the requested working-tree comparison or commit. Keep its `review_id`; the returned loopback URL is the optional human handoff, not evidence about the code.
+1. Call `start_review` once for the requested working-tree comparison or commit. Keep its `review_id` for the remaining review tool calls.
 2. Call `review_diff` without a path to list the snapshot, then once per changed path to read its exact patch. Read the surrounding files with the harness's code tools; the patch shows changed lines, while the files and callers reveal whether behavior is actually wrong.
 3. As soon as you verify a defect, call `report_finding` with that `review_id`. Use a repository-relative path, the smallest useful line range, confidence from 0.0 through 1.0, and qualified `argosy://` rule URIs returned by search. An ungrounded finding has an empty `rule_uris` list.
 4. Before the verdict, call `review_findings` and audit the recorded set. Its entries are the source of truth for priority counts.

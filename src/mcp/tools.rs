@@ -149,33 +149,27 @@ fn code_tool_definitions() -> Vec<Tool> {
             true,
             false,
         ),
-        tool::<codetools::review::OpenReviewParams>(
-            "open_review",
-            "Start a review session over a snapshotted git diff and serve its one-time, GitHub-style browser page. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Returns a review_id used by review_diff, report_finding, review_findings, and review_status, plus changed_files and a loopback URL where a human can inspect the same diff and automated findings and submit their own decision and line comments. Working-tree mode excludes untracked files; the page expires after 60 minutes by default; the tool never modifies the repository.",
+        tool::<codetools::review::StartReviewParams>(
+            "start_review",
+            "Start an in-process review session over a snapshotted git diff. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Returns a review_id used by review_diff, report_finding, and review_findings, plus changed_files. Working-tree mode excludes untracked files; the tool never modifies the repository or opens a network port.",
             false,
             false,
         ),
         tool::<codetools::review::ReviewDiffParams>(
             "review_diff",
-            "Read the immutable diff snapshot captured by open_review. Omit path to list all repository-relative changed files, then request each path to retrieve that file's exact patch, including removed lines. Use this rather than rerunning git diff so every automated finding and the human review page refer to the same review snapshot.",
+            "Read the immutable diff snapshot captured by start_review. Omit path to list all repository-relative changed files, then request each path to retrieve that file's exact patch, including removed lines. Use this rather than rerunning git diff so every automated finding refers to the same review snapshot.",
             true,
             false,
         ),
         tool::<codetools::review::ReportFindingParams>(
             "report_finding",
-            "Record one structured automated finding in the review session created by open_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, the path must be repository-relative, and rule_uris must be qualified argosy:// URIs returned by rule search. Identical retries are deduplicated. The finding becomes visible through review_findings, review_status, and the human review page.",
+            "Record one structured automated finding in the review session created by start_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, the path must be repository-relative, and rule_uris must be qualified argosy:// URIs returned by rule search. Identical retries are deduplicated. The finding becomes visible through review_findings.",
             false,
             false,
         ),
         tool::<codetools::review::ReviewFindingsParams>(
             "review_findings",
             "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict.",
-            true,
-            false,
-        ),
-        tool::<codetools::review::ReviewStatusParams>(
-            "review_status",
-            "Check a review opened by open_review. Every response includes its structured automated findings; pending responses repeat the human-review URL, submitted responses additionally contain the user's approve/comment/request-changes decision and feedback, and expired or failed responses explain why no human submission is available.",
             true,
             false,
         ),
