@@ -76,6 +76,116 @@ fn staleness_agrees_with_reconcile_on_identity_states() {
 // --- First reconcile ---
 
 #[test]
+fn progress_counts_committed_batches_and_only_changed_concepts() {
+    let (local, _imported, ctx) = fixture();
+    for n in 0..62 {
+        write_file(
+            local.path(),
+            &format!("document/extra-{n}.md"),
+            &format!("---\ntype: Note\n---\nExtra document {n}.\n"),
+        );
+    }
+    let mut index = fresh_index();
+    let mut events = Vec::new();
+    let report = index
+        .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+        .unwrap();
+    assert_eq!(report.upserted, 67);
+    assert_eq!(events, [(0, 67), (32, 67), (64, 67), (67, 67)]);
+    assert_eq!(index.provider().embed_calls(), 67);
+    assert_eq!(index.store().unit_hashes().unwrap().len(), 67);
+
+    events.clear();
+    index
+        .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+        .unwrap();
+    assert_eq!(events, [(0, 0)]);
+    assert_eq!(index.provider().embed_calls(), 67);
+
+    write_file(local.path(), "document/extra-0.md", "Changed document.\n");
+    events.clear();
+    index
+        .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+        .unwrap();
+    assert_eq!(events, [(0, 1), (1, 1)]);
+    assert_eq!(index.provider().embed_calls(), 68);
+
+    index.set_provider(MockEmbedder::with_model_id("mock-embedder@2"));
+    events.clear();
+    let report = index
+        .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+        .unwrap();
+    assert!(report.rebuilt);
+    assert_eq!(events, [(0, 67), (32, 67), (64, 67), (67, 67)]);
+}
+
+#[test]
+fn interrupted_incremental_build_reports_only_committed_work_and_resumes() {
+    struct FailingEmbedder {
+        inner: MockEmbedder,
+        calls: Cell<usize>,
+        fail_on: Cell<usize>,
+    }
+
+    impl EmbeddingProvider for FailingEmbedder {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if call == self.fail_on.get() {
+                return Err(Error::Index {
+                    reason: "simulated embedding failure".to_string(),
+                });
+            }
+            self.inner.embed(texts)
+        }
+    }
+
+    let (local, _imported, ctx) = fixture();
+    let mut index = Index::new(
+        FailingEmbedder {
+            inner: MockEmbedder::new(),
+            calls: Cell::new(0),
+            fail_on: Cell::new(usize::MAX),
+        },
+        MemStore::new(),
+    );
+    index.reconcile(&ctx).unwrap();
+    for n in 0..35 {
+        write_file(
+            local.path(),
+            &format!("document/new-{n}.md"),
+            &format!("---\ntype: Note\n---\nNew document {n}.\n"),
+        );
+    }
+    index.provider().fail_on.set(3);
+    let mut events = Vec::new();
+    assert!(
+        index
+            .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+            .is_err()
+    );
+    assert_eq!(events, [(0, 35), (32, 35)]);
+    assert_eq!(index.store().unit_hashes().unwrap().len(), 37);
+
+    index.provider().fail_on.set(usize::MAX);
+    events.clear();
+    let report = index
+        .reconcile_with_progress(&ctx, |done, total| events.push((done, total)))
+        .unwrap();
+    assert_eq!(report.upserted, 3);
+    assert_eq!(events, [(0, 3), (3, 3)]);
+    assert_eq!(index.store().unit_hashes().unwrap().len(), 40);
+}
+
+#[test]
 fn first_reconcile_embeds_every_default_namespace_concept_and_records_model() {
     let (_local, _imported, ctx) = fixture();
     let mut index = fresh_index();

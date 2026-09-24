@@ -404,6 +404,18 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// changed concepts are embedded, gone ones removed — reconcile scales
     /// with what changed. Returns an [`IndexReport`]; fully rebuildable.
     pub fn reconcile(&mut self, context: &ProjectContext) -> Result<IndexReport> {
+        self.reconcile_with_progress(context, |_, _| {})
+    }
+
+    /// Like [`Index::reconcile`], reporting `(completed, total)` concepts
+    /// needing embeddings once the diff is known and after each committed
+    /// batch. An unchanged run reports `(0, 0)`. The callback is not invoked
+    /// for scanning, deletions, or model loading.
+    pub fn reconcile_with_progress(
+        &mut self,
+        context: &ProjectContext,
+        mut progress: impl FnMut(usize, usize),
+    ) -> Result<IndexReport> {
         let current = self.gather(context)?;
         let stored = self.store.unit_hashes()?;
         let model = self.provider.model_id().to_string();
@@ -452,8 +464,15 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
 
-        if !to_embed.is_empty() {
-            let texts: Vec<String> = to_embed.iter().map(|g| g.text.clone()).collect();
+        // Keep both the embedding input and the resulting vectors bounded.
+        // Each upsert is atomic in the sqlite store; a later failure can leave
+        // completed batches in place, which the next reconcile will diff and
+        // resume (or rebuild if the model identity was not recorded yet).
+        const EMBED_BATCH: usize = 32;
+        let total = to_embed.len();
+        progress(0, total);
+        for batch in to_embed.chunks(EMBED_BATCH) {
+            let texts: Vec<String> = batch.iter().map(|g| g.text.clone()).collect();
             let vectors = self.provider.embed(&texts)?;
             if vectors.len() != texts.len() {
                 return IndexSnafu {
@@ -466,7 +485,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
                 }
                 .fail();
             }
-            let units: Vec<EmbeddingUnit> = to_embed
+            let units: Vec<EmbeddingUnit> = batch
                 .iter()
                 .zip(vectors)
                 .map(|(g, vector)| EmbeddingUnit {
@@ -477,8 +496,9 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
                     meta: g.meta.clone(),
                 })
                 .collect();
-            report.upserted = units.len();
             self.store.upsert(&units)?;
+            report.upserted += units.len();
+            progress(report.upserted, total);
         }
 
         // First reconcile (no identity yet) and every rebuild record the

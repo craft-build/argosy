@@ -314,6 +314,48 @@ pub(super) fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
     }
 }
 
+/// Terminal-only build progress; never writes to stdout or to redirected
+/// stderr. A trailing newline is emitted even if reconciliation fails.
+#[cfg(feature = "default-index")]
+struct IndexProgress {
+    enabled: bool,
+    displayed: bool,
+}
+
+#[cfg(feature = "default-index")]
+impl IndexProgress {
+    fn new(out: &Output) -> Self {
+        use std::io::IsTerminal;
+        Self {
+            enabled: !out.quiet && std::io::stderr().is_terminal(),
+            displayed: false,
+        }
+    }
+
+    fn update(&mut self, completed: usize, total: usize) {
+        if !self.enabled || total == 0 {
+            return;
+        }
+        use std::io::Write;
+        let width = total.to_string().len();
+        let _ = write!(
+            std::io::stderr(),
+            "\rargosy: embedding {completed:width$}/{total} concepts"
+        );
+        let _ = std::io::stderr().flush();
+        self.displayed = true;
+    }
+}
+
+#[cfg(feature = "default-index")]
+impl Drop for IndexProgress {
+    fn drop(&mut self) {
+        if self.displayed {
+            eprintln!();
+        }
+    }
+}
+
 #[cfg(feature = "default-index")]
 pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
@@ -417,10 +459,15 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // Loading the model takes a moment (and a ~90 MB download on a
             // cold cache): say so on stderr so the pause never reads as a
             // hang. stdout stays the machine-readable channel.
-            eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+            if !out.quiet {
+                eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+            }
             let provider = TractProvider::new_default()?;
             let mut index = Index::new(provider, store);
-            let report = index.reconcile(&context)?;
+            let mut progress = IndexProgress::new(out);
+            let report = index
+                .reconcile_with_progress(&context, |done, total| progress.update(done, total))?;
+            drop(progress);
             if out.json {
                 out.json(&report)?;
             } else {
