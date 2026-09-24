@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use snafu::{OptionExt, ResultExt};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
-use tract_onnx::prelude::{
-    Framework, InferenceModelExt, IntoRunnable, IntoTensor, TypedRunnableModel, tract_ndarray, tvec,
-};
+use tract::prelude::*;
+
+tract::impl_ndarray_interop!();
 
 use crate::error::{EmbeddingSnafu, IndexSnafu, IoSnafu, Result};
 
@@ -77,7 +77,7 @@ fn model_id() -> String {
 /// provider can own them under one mutex-guarded slot.
 struct Model {
     tokenizer: Tokenizer,
-    encoder: Arc<TypedRunnableModel>,
+    encoder: Arc<Runnable>,
 }
 
 #[derive(Default)]
@@ -126,13 +126,23 @@ impl Model {
         // Parse, optimize, and freeze the ONNX graph for the CPU runtime. The
         // graph's batch/sequence axes stay symbolic, so every batch size and
         // padded length runs against the same plan.
-        let encoder = tract_onnx::onnx()
-            .model_for_path(&onnx_path)
+
+        let model = tract::onnx()
             .map_err(embedding_failed)?
-            .into_optimized()
+            .load(&onnx_path)
             .map_err(embedding_failed)?
-            .into_runnable()
+            .into_model()
             .map_err(embedding_failed)?;
+
+        cfg_if::cfg_if! {
+            if #[cfg(all(target_os = "macos", target_arch = "aarch64"))] {
+                let runtime_s = "metal";
+            } else {
+                let runtime_s = "default";
+            }
+        }
+        let runtime = tract::runtime_for_name(runtime_s).map_err(embedding_failed)?;
+        let encoder = Arc::new(runtime.prepare(model).map_err(embedding_failed)?);
         Ok(Self { tokenizer, encoder })
     }
 
@@ -200,11 +210,11 @@ impl Model {
         let type_ids = flatten(|e| e.get_type_ids());
 
         let input_ids =
-            tract_ndarray::Array2::from_shape_vec((batch, seq), ids).map_err(embedding_failed)?;
-        let attention_mask = tract_ndarray::Array2::from_shape_vec((batch, seq), mask.clone())
+            ndarray::Array2::from_shape_vec((batch, seq), ids).map_err(embedding_failed)?;
+        let attention_mask = ndarray::Array2::from_shape_vec((batch, seq), mask.clone())
             .map_err(embedding_failed)?;
-        let token_type_ids = tract_ndarray::Array2::from_shape_vec((batch, seq), type_ids)
-            .map_err(embedding_failed)?;
+        let token_type_ids =
+            ndarray::Array2::from_shape_vec((batch, seq), type_ids).map_err(embedding_failed)?;
 
         if let (Some(start), Some(t)) = (started, timings.as_deref_mut()) {
             t.prepare += start.elapsed();
@@ -212,20 +222,18 @@ impl Model {
         let started = timings.as_ref().map(|_| Instant::now());
         let outputs = self
             .encoder
-            .run(tvec!(
-                input_ids.into_tensor().into(),
-                attention_mask.into_tensor().into(),
-                token_type_ids.into_tensor().into()
-            ))
+            .run([
+                input_ids.tract().map_err(embedding_failed)?,
+                attention_mask.tract().map_err(embedding_failed)?,
+                token_type_ids.tract().map_err(embedding_failed)?,
+            ])
             .map_err(embedding_failed)?;
         if let (Some(start), Some(t)) = (started, timings.as_deref_mut()) {
             t.infer += start.elapsed();
         }
         let started = timings.as_ref().map(|_| Instant::now());
         // Single output: `last_hidden_state` `(batch, seq, hidden)`.
-        let hidden = outputs[0]
-            .to_plain_array_view::<f32>()
-            .map_err(embedding_failed)?;
+        let hidden: &[f32] = outputs[0].as_slice().map_err(embedding_failed)?;
         let hidden: Vec<f32> = hidden.iter().copied().collect();
 
         let mut vectors = Vec::with_capacity(batch);
@@ -541,106 +549,106 @@ mod tests {
         assert!(minimum_cosine > 0.9999, "embedding drift after regrouping");
     }
 
-    /// Compare an alternate graph or truncation limit against the default
-    /// provider on a small corpus. This is a smoke test, not a quality gate.
-    #[test]
-    #[ignore = "set ARGOSY_BENCH_ONNX or ARGOSY_BENCH_TRUNCATE"]
-    fn candidate_onnx_smoke_test() {
-        let path = std::env::var("ARGOSY_BENCH_ONNX").ok();
-        let truncation = std::env::var("ARGOSY_BENCH_TRUNCATE")
-            .ok()
-            .map(|value| value.parse::<usize>().unwrap());
-        assert!(
-            path.is_some() ^ truncation.is_some(),
-            "choose one candidate"
-        );
-        let baseline = Model::load(&model_cache_dir().unwrap()).unwrap();
-        let start = Instant::now();
-        let encoder = match &path {
-            Some(path) => tract_onnx::onnx()
-                .model_for_path(path)
-                .unwrap()
-                .into_optimized()
-                .unwrap()
-                .into_runnable()
-                .unwrap(),
-            None => baseline.encoder.clone(),
-        };
-        let preparation = start.elapsed();
-        let mut alternate = Model {
-            tokenizer: baseline.tokenizer.clone(),
-            encoder,
-        };
-        if let Some(max_length) = truncation {
-            assert!(max_length > 0 && max_length < MAX_SEQ_TOKENS);
-            alternate
-                .tokenizer
-                .with_truncation(Some(TruncationParams {
-                    max_length,
-                    ..Default::default()
-                }))
-                .unwrap();
-        }
-        let docs = std::env::var("ARGOSY_BENCH_DOCS").expect("set ARGOSY_BENCH_DOCS");
-        let mut paths: Vec<_> = fs::read_dir(docs)
-            .unwrap()
-            .map(|item| item.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-            .collect();
-        paths.sort();
-        let texts: Vec<_> = paths
-            .iter()
-            .map(|path| {
-                fs::read_to_string(path)
-                    .unwrap()
-                    .splitn(3, "---\n")
-                    .nth(2)
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        let reference = baseline.embed_grouped(&texts).unwrap();
-        let start = Instant::now();
-        let vectors = alternate.embed_grouped(&texts).unwrap();
-        let elapsed = start.elapsed();
-        let minimum_cosine = vectors
-            .iter()
-            .zip(&reference)
-            .map(|(actual, expected)| actual.iter().zip(expected).map(|(a, b)| a * b).sum::<f32>())
-            .fold(1.0f32, f32::min);
-        let nearest = |all: &[Vec<f32>], index: usize| {
-            let mut ranked: Vec<_> = (0..all.len()).filter(|&i| i != index).collect();
-            ranked.sort_by(|&a, &b| {
-                let score = |i: usize| {
-                    all[index]
-                        .iter()
-                        .zip(&all[i])
-                        .map(|(x, y)| x * y)
-                        .sum::<f32>()
-                };
-                score(b).total_cmp(&score(a)).then_with(|| a.cmp(&b))
-            });
-            ranked.truncate(5);
-            ranked
-        };
-        let overlap: usize = (0..texts.len())
-            .map(|i| {
-                let actual = nearest(&vectors, i);
-                let expected = nearest(&reference, i);
-                actual.iter().filter(|item| expected.contains(item)).count()
-            })
-            .sum();
-        let top5_overlap = overlap as f64 / (texts.len() * 5) as f64;
-        println!(
-            "CANDIDATE path={} truncation={:?} concepts={} prepare_ms={:.2} embed_ms={:.2} \
-             min_cosine={minimum_cosine:.7} top5_overlap={top5_overlap:.4}",
-            path.as_deref().unwrap_or("default"),
-            truncation,
-            texts.len(),
-            preparation.as_secs_f64() * 1e3,
-            elapsed.as_secs_f64() * 1e3
-        );
-    }
+    // /// Compare an alternate graph or truncation limit against the default
+    // /// provider on a small corpus. This is a smoke test, not a quality gate.
+    // #[test]
+    // #[ignore = "set ARGOSY_BENCH_ONNX or ARGOSY_BENCH_TRUNCATE"]
+    // fn candidate_onnx_smoke_test() {
+    //     let path = std::env::var("ARGOSY_BENCH_ONNX").ok();
+    //     let truncation = std::env::var("ARGOSY_BENCH_TRUNCATE")
+    //         .ok()
+    //         .map(|value| value.parse::<usize>().unwrap());
+    //     assert!(
+    //         path.is_some() ^ truncation.is_some(),
+    //         "choose one candidate"
+    //     );
+    //     let baseline = Model::load(&model_cache_dir().unwrap()).unwrap();
+    //     let start = Instant::now();
+    //     let encoder = match &path {
+    //         Some(path) => tract_onnx::onnx()
+    //             .model_for_path(path)
+    //             .unwrap()
+    //             .into_optimized()
+    //             .unwrap()
+    //             .into_runnable()
+    //             .unwrap(),
+    //         None => baseline.encoder.clone(),
+    //     };
+    //     let preparation = start.elapsed();
+    //     let mut alternate = Model {
+    //         tokenizer: baseline.tokenizer.clone(),
+    //         encoder,
+    //     };
+    //     if let Some(max_length) = truncation {
+    //         assert!(max_length > 0 && max_length < MAX_SEQ_TOKENS);
+    //         alternate
+    //             .tokenizer
+    //             .with_truncation(Some(TruncationParams {
+    //                 max_length,
+    //                 ..Default::default()
+    //             }))
+    //             .unwrap();
+    //     }
+    //     let docs = std::env::var("ARGOSY_BENCH_DOCS").expect("set ARGOSY_BENCH_DOCS");
+    //     let mut paths: Vec<_> = fs::read_dir(docs)
+    //         .unwrap()
+    //         .map(|item| item.unwrap().path())
+    //         .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+    //         .collect();
+    //     paths.sort();
+    //     let texts: Vec<_> = paths
+    //         .iter()
+    //         .map(|path| {
+    //             fs::read_to_string(path)
+    //                 .unwrap()
+    //                 .splitn(3, "---\n")
+    //                 .nth(2)
+    //                 .unwrap()
+    //                 .to_string()
+    //         })
+    //         .collect();
+    //     let reference = baseline.embed_grouped(&texts).unwrap();
+    //     let start = Instant::now();
+    //     let vectors = alternate.embed_grouped(&texts).unwrap();
+    //     let elapsed = start.elapsed();
+    //     let minimum_cosine = vectors
+    //         .iter()
+    //         .zip(&reference)
+    //         .map(|(actual, expected)| actual.iter().zip(expected).map(|(a, b)| a * b).sum::<f32>())
+    //         .fold(1.0f32, f32::min);
+    //     let nearest = |all: &[Vec<f32>], index: usize| {
+    //         let mut ranked: Vec<_> = (0..all.len()).filter(|&i| i != index).collect();
+    //         ranked.sort_by(|&a, &b| {
+    //             let score = |i: usize| {
+    //                 all[index]
+    //                     .iter()
+    //                     .zip(&all[i])
+    //                     .map(|(x, y)| x * y)
+    //                     .sum::<f32>()
+    //             };
+    //             score(b).total_cmp(&score(a)).then_with(|| a.cmp(&b))
+    //         });
+    //         ranked.truncate(5);
+    //         ranked
+    //     };
+    //     let overlap: usize = (0..texts.len())
+    //         .map(|i| {
+    //             let actual = nearest(&vectors, i);
+    //             let expected = nearest(&reference, i);
+    //             actual.iter().filter(|item| expected.contains(item)).count()
+    //         })
+    //         .sum();
+    //     let top5_overlap = overlap as f64 / (texts.len() * 5) as f64;
+    //     println!(
+    //         "CANDIDATE path={} truncation={:?} concepts={} prepare_ms={:.2} embed_ms={:.2} \
+    //          min_cosine={minimum_cosine:.7} top5_overlap={top5_overlap:.4}",
+    //         path.as_deref().unwrap_or("default"),
+    //         truncation,
+    //         texts.len(),
+    //         preparation.as_secs_f64() * 1e3,
+    //         elapsed.as_secs_f64() * 1e3
+    //     );
+    // }
 
     #[test]
     fn cache_dir_precedence_and_fallbacks() {
