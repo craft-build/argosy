@@ -177,7 +177,7 @@ fn convert_styleguide_without_project_argosy_fails() {
 /// `cargo test --test cli -- --ignored convert_import_reconciles_the_index`.
 #[cfg(feature = "default-index")]
 #[test]
-#[ignore = "downloads the candle model weights (needs network on first run)"]
+#[ignore = "downloads the tract model weights (needs network on first run)"]
 fn convert_import_reconciles_the_index() {
     let scratch = TempDir::new().unwrap();
     let (project, xdg) = fixture_project(&scratch);

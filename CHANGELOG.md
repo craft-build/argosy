@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(index)* replace the candle embedding backend with pure-Rust `tract-onnx` running the ONNX export of `all-MiniLM-L6-v2`; `model_id()` is now `tract/...@tract-1`, which triggers one full index rebuild
+
 ## [0.2.4](https://github.com/craft-build/argosy/compare/v0.2.3...v0.2.4) - 2026-09-08
 
 ### Fixed

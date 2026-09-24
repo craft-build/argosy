@@ -1,22 +1,21 @@
-//! The candle-backed default [`EmbeddingProvider`], gated behind the
+//! The tract-backed default [`EmbeddingProvider`], gated behind the
 //! `default-index` Cargo feature. The model runs natively in Rust through the
-//! candle crates — no ONNX runtime; downloads use rustls, and the
-//! tokenization this provider performs uses the pure-Rust `fancy-regex`
-//! backend (candle-core itself pulls a tokenizers copy with the C `onig`
-//! backend — see Cargo.toml) — with no live network needed except the first construction, which
-//! downloads the model weights (~90 MB) into a user-level cache
-//! ([`model_cache_dir`]); later runs load from the cache offline.
+//! `tract-onnx` crates — no ONNX runtime shared library; downloads use rustls,
+//! and the tokenization this provider performs uses the pure-Rust
+//! `fancy-regex` backend, with no live network needed except the first
+//! construction, which downloads the ONNX model (~90 MB) into a user-level
+//! cache ([`model_cache_dir`]); later runs load from the cache offline.
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use snafu::{OptionExt, ResultExt};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
+use tract_onnx::prelude::{
+    Framework, InferenceModelExt, IntoRunnable, IntoTensor, TypedRunnableModel, tract_ndarray, tvec,
+};
 
 use crate::error::{EmbeddingSnafu, IndexSnafu, IoSnafu, Result};
 
@@ -33,11 +32,17 @@ const MODEL_REPO: &str = "sentence-transformers/all-MiniLM-L6-v2";
 /// which the identity mismatch below forces) to take a new revision.
 const MODEL_REVISION: &str = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41";
 
-/// The backend-major token carried in `model_id()` — the candle pin and
-/// [`MODEL_REVISION`] move together with it. Limitation inherited from the
-/// fastembed backend: numeric drift within the same major is reported
-/// identically (mismatch is detected only at this granularity).
-const CANDLE_BACKEND_VERSION: &str = "1";
+/// The ONNX graph file within [`MODEL_REPO`]; tract parses and optimizes this
+/// directly. Exported by sentence-transformers and emitting the encoder's
+/// `last_hidden_state` `(batch, seq, 384)` — pooling is applied in Rust below,
+/// exactly as the sentence-transformers pipeline does.
+const MODEL_ONNX_FILE: &str = "onnx/model.onnx";
+
+/// The backend-major token carried in `model_id()` — the tract pin and
+/// [`MODEL_REVISION`] move together with it. Numeric drift within the same
+/// major is reported identically (mismatch is detected only at this
+/// granularity).
+const TRACT_BACKEND_VERSION: &str = "1";
 
 /// sentence-transformers' configured `max_seq_length` for this model
 /// (`sentence_bert_config.json`); texts are truncated to it.
@@ -50,7 +55,7 @@ const EMBED_BATCH: usize = 32;
 /// all-MiniLM-L6-v2's vector width (the BERT `hidden_size`).
 const MODEL_DIMENSIONS: usize = 384;
 
-/// Maps candle/hf-hub/tokenizer failures into the crate error.
+/// Maps tract/hf-hub/tokenizer failures into the crate error.
 fn embedding_failed(source: impl std::fmt::Display) -> crate::error::Error {
     EmbeddingSnafu {
         reason: source.to_string(),
@@ -59,25 +64,24 @@ fn embedding_failed(source: impl std::fmt::Display) -> crate::error::Error {
 }
 
 /// The stable identity of the default model —
-/// `candle/<repo>@candle-<backend-major>` (e.g. `...@candle-1`), derived from
+/// `tract/<repo>@tract-<backend-major>` (e.g. `...@tract-1`), derived from
 /// static metadata only: read-only callers like the CLI's `index status` can
 /// compare a store's recorded identity against the current default without
 /// loading (or downloading) the model.
 fn model_id() -> String {
-    format!("candle/{MODEL_REPO}@candle-{CANDLE_BACKEND_VERSION}")
+    format!("tract/{MODEL_REPO}@tract-{TRACT_BACKEND_VERSION}")
 }
 
-/// The tokenizer plus the loaded BERT encoder, bundled so the provider can
-/// own them under one mutex-guarded slot.
+/// The tokenizer plus the loaded, runnable ONNX encoder, bundled so the
+/// provider can own them under one mutex-guarded slot.
 struct Model {
     tokenizer: Tokenizer,
-    encoder: BertModel,
-    device: Device,
+    encoder: Arc<TypedRunnableModel>,
 }
 
 impl Model {
-    /// Downloads any missing weights into `cache` (module docs), then builds
-    /// the tokenizer and the encoder from the cached files.
+    /// Downloads any missing model files into `cache` (module docs), then
+    /// builds the tokenizer and the runnable encoder from the cached files.
     fn load(cache: &std::path::Path) -> Result<Self> {
         // hf-hub 1.0: the sync client is `HFClientSync` (feature `blocking`);
         // it owns its own background runtime, so calls from inside another
@@ -98,14 +102,9 @@ impl Model {
                 .send()
                 .map_err(embedding_failed)
         };
-        let weights_path = download("model.safetensors")?;
-        let config_path = download("config.json")?;
+        let onnx_path = download(MODEL_ONNX_FILE)?;
         let tokenizer_path = download("tokenizer.json")?;
 
-        let config: Config = serde_json::from_str(
-            &fs::read_to_string(&config_path).context(IoSnafu { path: config_path })?,
-        )
-        .map_err(embedding_failed)?;
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(embedding_failed)?;
         tokenizer
             .with_truncation(Some(TruncationParams {
@@ -115,18 +114,17 @@ impl Model {
             .map_err(embedding_failed)?;
         tokenizer.with_padding(Some(PaddingParams::default()));
 
-        // Buffered (not mmap'd) loading keeps the build free of `unsafe`; the
-        // ~90 MB copy is transient and freed once the weights are materialized.
-        let weights = fs::read(&weights_path).context(IoSnafu { path: weights_path })?;
-        let device = Device::Cpu;
-        let vb = VarBuilder::from_buffered_safetensors(weights, DTYPE, &device)
+        // Parse, optimize, and freeze the ONNX graph for the CPU runtime. The
+        // graph's batch/sequence axes stay symbolic, so every batch size and
+        // padded length runs against the same plan.
+        let encoder = tract_onnx::onnx()
+            .model_for_path(&onnx_path)
+            .map_err(embedding_failed)?
+            .into_optimized()
+            .map_err(embedding_failed)?
+            .into_runnable()
             .map_err(embedding_failed)?;
-        let encoder = BertModel::load(vb, &config).map_err(embedding_failed)?;
-        Ok(Self {
-            tokenizer,
-            encoder,
-            device,
-        })
+        Ok(Self { tokenizer, encoder })
     }
 
     /// Embeds one batch: tokenize (truncate to [`MAX_SEQ_TOKENS`], pad to the
@@ -137,75 +135,102 @@ impl Model {
             .tokenizer
             .encode_batch(texts.iter().map(String::as_str).collect::<Vec<_>>(), true)
             .map_err(embedding_failed)?;
-        let attention_mask = Tensor::new(
-            encodings
-                .iter()
-                .map(|e| {
-                    e.get_attention_mask()
-                        .iter()
-                        .map(|&m| m as f32)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>(),
-            &self.device,
-        )
-        .map_err(embedding_failed)?;
-        let input_ids = Tensor::new(
-            encodings
-                .iter()
-                .map(|e| e.get_ids().to_vec())
-                .collect::<Vec<_>>(),
-            &self.device,
-        )
-        .map_err(embedding_failed)?;
-        let token_type_ids = Tensor::new(
-            encodings
-                .iter()
-                .map(|e| e.get_type_ids().to_vec())
-                .collect::<Vec<_>>(),
-            &self.device,
-        )
-        .map_err(embedding_failed)?;
+        let batch = encodings.len();
+        if batch == 0 {
+            return Ok(Vec::new());
+        }
+        // Padding is enabled above, so every encoding shares one length.
+        let seq = encodings[0].get_ids().len();
 
-        // `BertModel::forward` turns the 0/1 mask into the additive attention
-        // mask internally; the raw mask is reused here for the pooling sum.
-        let hidden = self
-            .encoder
-            .forward(&input_ids, &token_type_ids, Some(&attention_mask))
+        let flatten = |pick: fn(&tokenizers::Encoding) -> &[u32]| -> Vec<i64> {
+            encodings
+                .iter()
+                .flat_map(|e| pick(e).iter().map(|&x| x as i64))
+                .collect()
+        };
+        let ids = flatten(|e| e.get_ids());
+        let mask = flatten(|e| e.get_attention_mask());
+        let type_ids = flatten(|e| e.get_type_ids());
+
+        let input_ids =
+            tract_ndarray::Array2::from_shape_vec((batch, seq), ids).map_err(embedding_failed)?;
+        let attention_mask = tract_ndarray::Array2::from_shape_vec((batch, seq), mask.clone())
             .map_err(embedding_failed)?;
-        let pooled = mean_pool_normalize(&hidden, &attention_mask).map_err(embedding_failed)?;
-        pooled.to_vec2::<f32>().map_err(embedding_failed)
+        let token_type_ids = tract_ndarray::Array2::from_shape_vec((batch, seq), type_ids)
+            .map_err(embedding_failed)?;
+
+        let outputs = self
+            .encoder
+            .run(tvec!(
+                input_ids.into_tensor().into(),
+                attention_mask.into_tensor().into(),
+                token_type_ids.into_tensor().into()
+            ))
+            .map_err(embedding_failed)?;
+        // Single output: `last_hidden_state` `(batch, seq, hidden)`.
+        let hidden = outputs[0]
+            .to_plain_array_view::<f32>()
+            .map_err(embedding_failed)?;
+        let hidden: Vec<f32> = hidden.iter().copied().collect();
+
+        let mut vectors = Vec::with_capacity(batch);
+        for b in 0..batch {
+            let start = b * seq * MODEL_DIMENSIONS;
+            let end = start + seq * MODEL_DIMENSIONS;
+            let m_start = b * seq;
+            vectors.push(mean_pool_normalize(
+                &hidden[start..end],
+                &mask[m_start..m_start + seq],
+                seq,
+                MODEL_DIMENSIONS,
+            ));
+        }
+        Ok(vectors)
     }
 }
 
 /// Sentence-transformers pooling: the attention-mask-weighted mean of the
 /// token positions, followed by L2 normalization — the exact post-processing
-/// the `all-MiniLM-L6-v2` pipeline applies to the encoder output. `hidden`
-/// is `(batch, seq, hidden)`, `attention_mask` `(batch, seq)` of 0/1; the
-/// result is `(batch, hidden)`.
-fn mean_pool_normalize(hidden: &Tensor, attention_mask: &Tensor) -> candle_core::Result<Tensor> {
-    let mask = attention_mask.to_dtype(DType::F32)?.unsqueeze(2)?; // (b, s, 1)
-    let summed = hidden.broadcast_mul(&mask)?.sum(1)?; // (b, d)
-    let counts = mask.sum(1)?; // (b, 1); >= 1 because [CLS]/[SEP] are unmasked
-    let mean = summed.broadcast_div(&counts)?;
-    let norm = mean.sqr()?.sum_keepdim(1)?.sqrt()?; // (b, 1)
-    mean.broadcast_div(&norm)
+/// the `all-MiniLM-L6-v2` pipeline applies to the encoder output. `hidden` is
+/// `(seq, hidden)` for one sequence, `mask` is `(seq,)` of 0/1; the result is
+/// `(hidden,)`.
+fn mean_pool_normalize(hidden: &[f32], mask: &[i64], seq: usize, dims: usize) -> Vec<f32> {
+    let mut pooled = vec![0f32; dims];
+    let mut count = 0f32;
+    for t in 0..seq {
+        if mask[t] == 0 {
+            continue;
+        }
+        count += 1.0;
+        let row = &hidden[t * dims..(t + 1) * dims];
+        for (acc, value) in pooled.iter_mut().zip(row) {
+            *acc += value;
+        }
+    }
+    for value in pooled.iter_mut() {
+        *value /= count;
+    }
+    let norm = pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for value in pooled.iter_mut() {
+        *value /= norm;
+    }
+    pooled
 }
 
-/// A local candle [`EmbeddingProvider`]: BERT text embeddings with no remote
+/// A local tract [`EmbeddingProvider`]: BERT text embeddings with no remote
 /// service (see module docs for the dependency posture and the
 /// first-run-download tolerance).
-pub struct CandleProvider {
+pub struct TractProvider {
     model: Mutex<Model>,
     model_id: String,
     dimensions: usize,
 }
 
-impl CandleProvider {
+impl TractProvider {
     /// The vector width every `embed` call produces (all-MiniLM-L6-v2).
     pub const DEFAULT_DIMENSIONS: usize = MODEL_DIMENSIONS;
 
-    /// The model identity [`CandleProvider::new_default`] will report,
+    /// The model identity [`TractProvider::new_default`] will report,
     /// without constructing (or downloading) the model.
     pub fn default_model_id() -> String {
         model_id()
@@ -278,30 +303,30 @@ fn cache_dir_from(
     Ok(base.join("argosy").join("embeddings"))
 }
 
-/// A [`CandleProvider`] that defers model construction — and the first-run
+/// A [`TractProvider`] that defers model construction — and the first-run
 /// ~90 MB download — to the first [`EmbeddingProvider::embed`] call. Identity
 /// and dimensionality derive from static metadata, so hash-diff previews
 /// never load the model and a serving process starts instantly;
 /// embedding-dependent ops fail with an actionable hint.
-pub struct LazyCandleProvider {
+pub struct LazyTractProvider {
     model_id: String,
     dimensions: usize,
-    model: Mutex<Option<CandleProvider>>,
+    model: Mutex<Option<TractProvider>>,
 }
 
-impl LazyCandleProvider {
+impl LazyTractProvider {
     /// A lazy provider over the pinned default model. Never downloads or
     /// constructs anything until the first `embed`.
     pub fn new_default() -> Result<Self> {
         Ok(Self {
-            model_id: CandleProvider::default_model_id(),
-            dimensions: CandleProvider::DEFAULT_DIMENSIONS,
+            model_id: TractProvider::default_model_id(),
+            dimensions: TractProvider::DEFAULT_DIMENSIONS,
             model: Mutex::new(None),
         })
     }
 }
 
-impl EmbeddingProvider for LazyCandleProvider {
+impl EmbeddingProvider for LazyTractProvider {
     fn model_id(&self) -> &str {
         // Static metadata: no model load, works offline.
         &self.model_id
@@ -319,7 +344,7 @@ impl EmbeddingProvider for LazyCandleProvider {
             .build()
         })?;
         if slot.is_none() {
-            let provider = CandleProvider::new_default().map_err(|source| {
+            let provider = TractProvider::new_default().map_err(|source| {
                 IndexSnafu {
                     reason: format!(
                         "embedding model unavailable: {source}; run `argosy index build` \
@@ -334,7 +359,7 @@ impl EmbeddingProvider for LazyCandleProvider {
     }
 }
 
-impl EmbeddingProvider for CandleProvider {
+impl EmbeddingProvider for TractProvider {
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -399,52 +424,38 @@ mod tests {
 
     #[test]
     fn mean_pooling_masks_padding_and_normalizes() {
-        let device = Device::Cpu;
-        // Two sequences of three positions over a 2-dim hidden state.
-        let hidden = Tensor::new(
-            vec![
-                vec![1.0f32, 1.0, 2.0, 2.0, 3.0, 3.0],
-                vec![-1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
-            ],
-            &device,
-        )
-        .unwrap()
-        .reshape((2, 3, 2))
-        .unwrap();
-        // The second position of the first sequence is padding.
-        let mask = Tensor::new(
-            vec![vec![1.0f32, 1.0, 0.0], vec![1.0f32, 1.0, 1.0]],
-            &device,
-        )
-        .unwrap();
-        let out = mean_pool_normalize(&hidden, &mask)
-            .unwrap()
-            .to_vec2::<f32>()
-            .unwrap();
-        // Sequence 0: masked mean [1.5, 1.5], L2-normalized to 1/sqrt(2).
+        // Two positions of a 2-dim hidden state; the second is padding.
+        let hidden = [1.0f32, 1.0, 2.0, 2.0];
+        let mask = [1i64, 0];
+        let out = mean_pool_normalize(&hidden, &mask, 2, 2);
+        // Masked mean [1, 1], L2-normalized to 1/sqrt(2).
         let unit = 1.0 / 2.0f32.sqrt();
-        assert!((out[0][0] - unit).abs() < 1e-6 && (out[0][1] - unit).abs() < 1e-6);
-        // Sequence 1: mean [0, 2/3], L2-normalized to [0, 1].
-        assert!(out[1][0].abs() < 1e-6 && (out[1][1] - 1.0).abs() < 1e-6);
+        assert!((out[0] - unit).abs() < 1e-6 && (out[1] - unit).abs() < 1e-6);
+
+        // All positions unmasked: mean [0, 2/3], L2-normalized to [0, 1].
+        let hidden = [-1.0f32, 1.0, 0.0, 0.0, 1.0, 1.0];
+        let mask = [1i64, 1, 1];
+        let out = mean_pool_normalize(&hidden, &mask, 3, 2);
+        assert!(out[0].abs() < 1e-6 && (out[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn model_identity_is_offline_derivable_and_stable() {
-        assert_eq!(CandleProvider::default_model_id(), model_id());
+        assert_eq!(TractProvider::default_model_id(), model_id());
         let id = model_id();
         assert!(
-            id.starts_with("candle/") && id.contains("all-MiniLM-L6-v2") && id.contains("@candle-"),
-            "model_id() follows candle/<model>@candle-<major>: {id}"
+            id.starts_with("tract/") && id.contains("all-MiniLM-L6-v2") && id.contains("@tract-"),
+            "model_id() follows tract/<model>@tract-<major>: {id}"
         );
     }
 
-    /// The single candle test: needs network on a cold model cache, so it
+    /// The single model test: needs network on a cold model cache, so it
     /// never runs in default `cargo test`.
     #[test]
     #[ignore = "downloads the model weights; run with --ignored"]
     fn default_model_embeds_384_dims_and_reports_a_stable_identity() {
-        let a = CandleProvider::new_default().unwrap();
-        let b = CandleProvider::new_default().unwrap();
+        let a = TractProvider::new_default().unwrap();
+        let b = TractProvider::new_default().unwrap();
         assert_eq!(
             a.model_id(),
             b.model_id(),

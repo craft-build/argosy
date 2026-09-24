@@ -16,9 +16,6 @@ ast-grep-language = {
   ],
   optional = true
 }
-candle-core = { version = "0.11", optional = true }
-candle-nn = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", optional = true }
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 hf-hub = {
@@ -79,6 +76,7 @@ tokio = {
   ],
   optional = true
 }
+tract-onnx = { version = "0.23", optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
 tree-sitter = { version = "0.26", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
@@ -190,12 +188,10 @@ code-tools = [
   "dep:tree-sitter-zsh",
 ]
 default-index = [
-  "dep:candle-core",
-  "dep:candle-nn",
-  "dep:candle-transformers",
   "dep:hf-hub",
   "dep:rusqlite",
   "dep:sqlite-vec",
   "dep:tokenizers",
+  "dep:tract-onnx",
 ]
 mcp = ["dep:rmcp", "dep:tokio"]

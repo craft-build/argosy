@@ -113,7 +113,7 @@ pub enum Error {
 
     /// The default embedding provider failed to initialize the local model
     /// (including the first-run download) or to embed a batch; the reason
-    /// carries the underlying candle/hf-hub/tokenizer error message.
+    /// carries the underlying tract/hf-hub/tokenizer error message.
     #[cfg(feature = "default-index")]
     #[snafu(display("embedding model failed: {reason}"))]
     Embedding { reason: String },

@@ -130,14 +130,14 @@ fn reconcile_end_to_end_with_sqlite_store() {
     // A provider with a different identity rebuilds
     // everything with zero errors and zero mixed vectors.
     index.set_provider(MockEmbedder::with_model_id(
-        "candle/sentence-transformers/all-MiniLM-L6-v2@candle-9",
+        "tract/sentence-transformers/all-MiniLM-L6-v2@tract-9",
     ));
     let report = index.reconcile(&ctx).unwrap();
     assert!(report.rebuilt);
     assert_eq!(report.upserted, 5);
     assert_eq!(
         index.store().model_id(),
-        Some("candle/sentence-transformers/all-MiniLM-L6-v2@candle-9")
+        Some("tract/sentence-transformers/all-MiniLM-L6-v2@tract-9")
     );
 }
 
