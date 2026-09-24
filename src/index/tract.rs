@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use snafu::{OptionExt, ResultExt};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
@@ -79,6 +80,14 @@ struct Model {
     encoder: Arc<TypedRunnableModel>,
 }
 
+#[derive(Default)]
+struct EmbedTimings {
+    tokenize: Duration,
+    prepare: Duration,
+    infer: Duration,
+    pool: Duration,
+}
+
 impl Model {
     /// Downloads any missing model files into `cache` (module docs), then
     /// builds the tokenizer and the runnable encoder from the cached files.
@@ -131,16 +140,54 @@ impl Model {
     /// batch longest), run the encoder, mean-pool over unmasked token
     /// positions, L2-normalize.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed_timed(texts, None)
+    }
+
+    /// Avoid padding short concepts to the longest concept in the incoming
+    /// reconcile batch. Keep the returned vectors in their original order;
+    /// the index pairs each vector with its source concept by position.
+    fn embed_grouped(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        const INFERENCE_BATCH: usize = 8;
+        if texts.len() <= INFERENCE_BATCH {
+            return self.embed(texts);
+        }
+        let mut tokenizer = self.tokenizer.clone();
+        tokenizer.with_padding(None);
+        let lengths = tokenizer
+            .encode_batch(texts.iter().map(String::as_str).collect::<Vec<_>>(), true)
+            .map_err(embedding_failed)?;
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_by_key(|&index| lengths[index].len());
+        let mut result = vec![Vec::new(); texts.len()];
+        for indices in order.chunks(INFERENCE_BATCH) {
+            let chunk: Vec<String> = indices.iter().map(|&i| texts[i].clone()).collect();
+            for (&index, vector) in indices.iter().zip(self.embed(&chunk)?) {
+                result[index] = vector;
+            }
+        }
+        Ok(result)
+    }
+
+    fn embed_timed(
+        &self,
+        texts: &[String],
+        mut timings: Option<&mut EmbedTimings>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let started = timings.as_ref().map(|_| Instant::now());
         let encodings = self
             .tokenizer
             .encode_batch(texts.iter().map(String::as_str).collect::<Vec<_>>(), true)
             .map_err(embedding_failed)?;
+        if let (Some(start), Some(t)) = (started, timings.as_deref_mut()) {
+            t.tokenize += start.elapsed();
+        }
         let batch = encodings.len();
         if batch == 0 {
             return Ok(Vec::new());
         }
         // Padding is enabled above, so every encoding shares one length.
         let seq = encodings[0].get_ids().len();
+        let started = timings.as_ref().map(|_| Instant::now());
 
         let flatten = |pick: fn(&tokenizers::Encoding) -> &[u32]| -> Vec<i64> {
             encodings
@@ -159,6 +206,10 @@ impl Model {
         let token_type_ids = tract_ndarray::Array2::from_shape_vec((batch, seq), type_ids)
             .map_err(embedding_failed)?;
 
+        if let (Some(start), Some(t)) = (started, timings.as_deref_mut()) {
+            t.prepare += start.elapsed();
+        }
+        let started = timings.as_ref().map(|_| Instant::now());
         let outputs = self
             .encoder
             .run(tvec!(
@@ -167,6 +218,10 @@ impl Model {
                 token_type_ids.into_tensor().into()
             ))
             .map_err(embedding_failed)?;
+        if let (Some(start), Some(t)) = (started, timings.as_deref_mut()) {
+            t.infer += start.elapsed();
+        }
+        let started = timings.as_ref().map(|_| Instant::now());
         // Single output: `last_hidden_state` `(batch, seq, hidden)`.
         let hidden = outputs[0]
             .to_plain_array_view::<f32>()
@@ -184,6 +239,9 @@ impl Model {
                 seq,
                 MODEL_DIMENSIONS,
             ));
+        }
+        if let (Some(start), Some(t)) = (started, timings) {
+            t.pool += start.elapsed();
         }
         Ok(vectors)
     }
@@ -377,7 +435,7 @@ impl EmbeddingProvider for TractProvider {
         })?;
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(EMBED_BATCH) {
-            vectors.extend(model.embed(batch)?);
+            vectors.extend(model.embed_grouped(batch)?);
         }
         Ok(vectors)
     }
@@ -386,6 +444,203 @@ impl EmbeddingProvider for TractProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reproducible opt-in inference microbenchmark. Example:
+    /// `ARGOSY_BENCH_DOCS=.lab/workspace/.../document ARGOSY_BENCH_BATCH=16
+    ///  ARGOSY_BENCH_GROUP=1 cargo test --release --lib
+    ///  index::tract::tests::embedding_batch_benchmark -- --ignored --nocapture`
+    /// Pair with `/usr/bin/time -l` on macOS to capture peak resident memory.
+    #[test]
+    #[ignore = "loads model; explicitly opt in for inference benchmarking"]
+    fn embedding_batch_benchmark() {
+        let docs = std::env::var("ARGOSY_BENCH_DOCS").expect("set ARGOSY_BENCH_DOCS");
+        let batch: usize = std::env::var("ARGOSY_BENCH_BATCH")
+            .unwrap_or_else(|_| "32".into())
+            .parse()
+            .unwrap();
+        assert!((1..=32).contains(&batch));
+        let group = std::env::var("ARGOSY_BENCH_GROUP").is_ok_and(|s| s == "1");
+        let repetitions: usize = std::env::var("ARGOSY_BENCH_REPS")
+            .unwrap_or_else(|_| "5".into())
+            .parse()
+            .unwrap();
+        assert!(repetitions > 0);
+        let mut paths: Vec<_> = fs::read_dir(docs)
+            .unwrap()
+            .map(|item| item.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+            .collect();
+        paths.sort();
+        let texts: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                let file = fs::read_to_string(path).unwrap();
+                file.splitn(3, "---\n").nth(2).unwrap().to_string()
+            })
+            .collect();
+
+        let start = Instant::now();
+        let model = Model::load(&model_cache_dir().unwrap()).unwrap();
+        let load = start.elapsed();
+        let reference: Vec<Vec<f32>> = texts
+            .chunks(32)
+            .flat_map(|chunk| model.embed(chunk).unwrap())
+            .collect();
+        let production: Vec<Vec<f32>> = texts
+            .chunks(EMBED_BATCH)
+            .flat_map(|chunk| model.embed_grouped(chunk).unwrap())
+            .collect();
+        for (actual, expected) in production.iter().zip(&reference) {
+            let cosine: f32 = actual.iter().zip(expected).map(|(a, b)| a * b).sum();
+            assert!(cosine > 0.9999, "provider must preserve vector order");
+        }
+        let mut timing = EmbedTimings::default();
+        let mut total = Duration::ZERO;
+        let mut grouped_time = Duration::ZERO;
+        let mut minimum_cosine = 1.0f32;
+        for _ in 0..repetitions {
+            let start = Instant::now();
+            let mut order: Vec<usize> = (0..texts.len()).collect();
+            if group {
+                let mut tokenizer = model.tokenizer.clone();
+                tokenizer.with_padding(None);
+                let lengths = tokenizer
+                    .encode_batch(texts.iter().map(String::as_str).collect::<Vec<_>>(), true)
+                    .unwrap();
+                order.sort_by_key(|&i| lengths[i].len());
+            }
+            grouped_time += start.elapsed();
+            let start = Instant::now();
+            let mut result = vec![Vec::new(); texts.len()];
+            for indices in order.chunks(batch) {
+                let chunk: Vec<String> = indices.iter().map(|&i| texts[i].clone()).collect();
+                let vectors = model.embed_timed(&chunk, Some(&mut timing)).unwrap();
+                for (&index, vector) in indices.iter().zip(vectors) {
+                    result[index] = vector;
+                }
+            }
+            total += start.elapsed();
+            for (actual, expected) in result.iter().zip(&reference) {
+                let cosine: f32 = actual.iter().zip(expected).map(|(a, b)| a * b).sum();
+                minimum_cosine = minimum_cosine.min(cosine);
+            }
+        }
+        println!(
+            "BENCH batch={batch} group={group} concepts={} reps={repetitions} \
+             load_ms={:.2} group_ms={:.2} embed_ms={:.2} tokenize_ms={:.2} \
+             prepare_ms={:.2} infer_ms={:.2} pool_ms={:.2} min_cosine={minimum_cosine:.7}",
+            texts.len(),
+            load.as_secs_f64() * 1e3,
+            grouped_time.as_secs_f64() * 1e3 / repetitions as f64,
+            total.as_secs_f64() * 1e3 / repetitions as f64,
+            timing.tokenize.as_secs_f64() * 1e3 / repetitions as f64,
+            timing.prepare.as_secs_f64() * 1e3 / repetitions as f64,
+            timing.infer.as_secs_f64() * 1e3 / repetitions as f64,
+            timing.pool.as_secs_f64() * 1e3 / repetitions as f64,
+        );
+        assert!(minimum_cosine > 0.9999, "embedding drift after regrouping");
+    }
+
+    /// Compare an alternate graph or truncation limit against the default
+    /// provider on a small corpus. This is a smoke test, not a quality gate.
+    #[test]
+    #[ignore = "set ARGOSY_BENCH_ONNX or ARGOSY_BENCH_TRUNCATE"]
+    fn candidate_onnx_smoke_test() {
+        let path = std::env::var("ARGOSY_BENCH_ONNX").ok();
+        let truncation = std::env::var("ARGOSY_BENCH_TRUNCATE")
+            .ok()
+            .map(|value| value.parse::<usize>().unwrap());
+        assert!(
+            path.is_some() ^ truncation.is_some(),
+            "choose one candidate"
+        );
+        let baseline = Model::load(&model_cache_dir().unwrap()).unwrap();
+        let start = Instant::now();
+        let encoder = match &path {
+            Some(path) => tract_onnx::onnx()
+                .model_for_path(path)
+                .unwrap()
+                .into_optimized()
+                .unwrap()
+                .into_runnable()
+                .unwrap(),
+            None => baseline.encoder.clone(),
+        };
+        let preparation = start.elapsed();
+        let mut alternate = Model {
+            tokenizer: baseline.tokenizer.clone(),
+            encoder,
+        };
+        if let Some(max_length) = truncation {
+            assert!(max_length > 0 && max_length < MAX_SEQ_TOKENS);
+            alternate
+                .tokenizer
+                .with_truncation(Some(TruncationParams {
+                    max_length,
+                    ..Default::default()
+                }))
+                .unwrap();
+        }
+        let docs = std::env::var("ARGOSY_BENCH_DOCS").expect("set ARGOSY_BENCH_DOCS");
+        let mut paths: Vec<_> = fs::read_dir(docs)
+            .unwrap()
+            .map(|item| item.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+            .collect();
+        paths.sort();
+        let texts: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                fs::read_to_string(path)
+                    .unwrap()
+                    .splitn(3, "---\n")
+                    .nth(2)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let reference = baseline.embed_grouped(&texts).unwrap();
+        let start = Instant::now();
+        let vectors = alternate.embed_grouped(&texts).unwrap();
+        let elapsed = start.elapsed();
+        let minimum_cosine = vectors
+            .iter()
+            .zip(&reference)
+            .map(|(actual, expected)| actual.iter().zip(expected).map(|(a, b)| a * b).sum::<f32>())
+            .fold(1.0f32, f32::min);
+        let nearest = |all: &[Vec<f32>], index: usize| {
+            let mut ranked: Vec<_> = (0..all.len()).filter(|&i| i != index).collect();
+            ranked.sort_by(|&a, &b| {
+                let score = |i: usize| {
+                    all[index]
+                        .iter()
+                        .zip(&all[i])
+                        .map(|(x, y)| x * y)
+                        .sum::<f32>()
+                };
+                score(b).total_cmp(&score(a)).then_with(|| a.cmp(&b))
+            });
+            ranked.truncate(5);
+            ranked
+        };
+        let overlap: usize = (0..texts.len())
+            .map(|i| {
+                let actual = nearest(&vectors, i);
+                let expected = nearest(&reference, i);
+                actual.iter().filter(|item| expected.contains(item)).count()
+            })
+            .sum();
+        let top5_overlap = overlap as f64 / (texts.len() * 5) as f64;
+        println!(
+            "CANDIDATE path={} truncation={:?} concepts={} prepare_ms={:.2} embed_ms={:.2} \
+             min_cosine={minimum_cosine:.7} top5_overlap={top5_overlap:.4}",
+            path.as_deref().unwrap_or("default"),
+            truncation,
+            texts.len(),
+            preparation.as_secs_f64() * 1e3,
+            elapsed.as_secs_f64() * 1e3
+        );
+    }
 
     #[test]
     fn cache_dir_precedence_and_fallbacks() {
