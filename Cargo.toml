@@ -1,6 +1,6 @@
 [package]
 name = "argosy"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 description = "Library and Binary for creating, consuming and using knowledge books for coding harnesses"
 repository = "https://github.com/craft-build/argosy"
