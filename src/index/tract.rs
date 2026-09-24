@@ -139,6 +139,13 @@ impl Model {
                 let runtime_s = "metal";
             } else {
                 let runtime_s = "default";
+                tract_linalg::multithread::set_default_executor(
+                    tract_linalg::multithread::Executor::multithread(
+                        std::thread::available_parallelism()
+                            .map(std::num::NonZeroUsize::get)
+                            .unwrap_or(1)
+                    )
+                );
             }
         }
         let runtime = tract::runtime_for_name(runtime_s).map_err(embedding_failed)?;

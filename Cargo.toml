@@ -80,6 +80,9 @@ tokio = {
 }
 tracing = { version = "0.1", default-features = false, optional = true }
 tract = { version = "0.23", optional = true }
+tract-linalg = { version = "0.23", optional = true, features = [
+    "multithread-mm"
+]}
 tree-sitter = { version = "0.26", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
 tree-sitter-c = { version = "0.24", optional = true }
@@ -195,5 +198,6 @@ default-index = [
   "dep:sqlite-vec",
   "dep:tokenizers",
   "dep:tract",
+  "dep:tract-linalg",
 ]
 mcp = ["dep:rmcp", "dep:tokio"]

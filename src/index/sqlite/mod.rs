@@ -99,6 +99,10 @@ impl SqliteVecStore {
             .context(SqliteSnafu {
                 path: path.to_path_buf(),
             })?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .context(SqliteSnafu {
+                path: path.to_path_buf(),
+            })?;
         // Wait briefly instead of failing instantly when another process
         // (e.g. `argosy index build` while `argosy mcp` serves) holds the
         // write lock: "database is locked" after 0 ms is cryptic, after
