@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/craft-build/argosy/compare/v0.2.4...v0.3.0) - 2026-09-24
+
+### Added
+
+- *(index)* group tract inference by token length
+- *(index)* show embedding progress during CLI builds
+
+### Other
+
+- *(deps)* update dependencies
+- *(review)* remove browser server and status tool
+- *(index)* replace candle with tract-onnx embedding backend
+- *(deps)* update dependencies
+
 ### Changed
 
 - *(index)* replace the candle embedding backend with pure-Rust `tract-onnx` running the ONNX export of `all-MiniLM-L6-v2`; `model_id()` is now `tract/...@tract-1`, which triggers one full index rebuild
