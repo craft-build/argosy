@@ -100,8 +100,8 @@ fn server_instructions() -> String {
     {
         format!(
             "{INSTRUCTIONS_BASE} The server also offers code-intelligence tools \
-             (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, open_review, \
-             review_diff, report_finding, review_findings, review_status) over the \
+             (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, start_review, \
+             review_diff, report_finding, review_findings) over the \
              workspace directory it was spawned in; astgrep (apply) and conflicts \
              (resolve) write files only when explicitly requested."
         )
@@ -229,11 +229,11 @@ async fn dispatch_code_tool(
             codetools::repomap::run,
             codetools::repomap::RepomapParams
         )),
-        "open_review" => Some(dispatch_code!(
+        "start_review" => Some(dispatch_code!(
             code,
             args,
-            codetools::review::open_review,
-            codetools::review::OpenReviewParams
+            codetools::review::start_review,
+            codetools::review::StartReviewParams
         )),
         "review_diff" => Some(dispatch_code!(
             code,
@@ -252,12 +252,6 @@ async fn dispatch_code_tool(
             args,
             codetools::review::review_findings,
             codetools::review::ReviewFindingsParams
-        )),
-        "review_status" => Some(dispatch_code!(
-            code,
-            args,
-            codetools::review::review_status,
-            codetools::review::ReviewStatusParams
         )),
         _ => None,
     }
@@ -354,11 +348,10 @@ where
                     | "inspect"
                     | "callgraph"
                     | "repomap"
-                    | "open_review"
+                    | "start_review"
                     | "review_diff"
                     | "report_finding"
                     | "review_findings"
-                    | "review_status"
             ) {
                 let result = dispatch_code_tool(code, &name, args)
                     .await

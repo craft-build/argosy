@@ -535,10 +535,9 @@ async fn structured_review_findings_round_trip_over_mcp() {
 
     let opened = call_ok(
         &client,
-        "open_review",
+        "start_review",
         serde_json::json!({
             "cwd": ws.path(),
-            "timeout_minutes": 1,
         }),
     )
     .await;
@@ -594,14 +593,10 @@ async fn structured_review_findings_round_trip_over_mcp() {
     )
     .await;
     assert_eq!(findings["findings"].as_array().unwrap().len(), 1);
-    let status = call_ok(
-        &client,
-        "review_status",
-        serde_json::json!({"review_id": review_id}),
-    )
-    .await;
-    assert_eq!(status["status"], "pending");
-    assert_eq!(status["findings"].as_array().unwrap().len(), 1);
+    assert!(
+        opened.get("url").is_none(),
+        "no browser endpoint is created"
+    );
 
     drop(client);
     server.abort();

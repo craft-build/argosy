@@ -195,12 +195,12 @@ fn review_prompt(arguments: Option<&JsonObject>) -> std::result::Result<String, 
 
     let target = if let Some(commit) = commit {
         format!(
-            "Call `open_review` with `cwd` and `commit` set to {}.",
+            "Call `start_review` with `cwd` and `commit` set to {}.",
             quoted(commit)
         )
     } else {
         format!(
-            "Call `open_review` with `cwd` and `base` set to {}.",
+            "Call `start_review` with `cwd` and `base` set to {}.",
             quoted(base.unwrap_or("HEAD"))
         )
     };
@@ -220,7 +220,7 @@ fn review_prompt(arguments: Option<&JsonObject>) -> std::result::Result<String, 
 Review the repository at `cwd` = {cwd}. Do not modify it.
 
 {target}
-Keep the returned `review_id` for every review tool call. Call `review_diff` without `path` to list the snapshot and then with each changed path to read the exact patch. Use the harness's file-reading and code-search tools for surrounding definitions and callers; the browser URL returned by `open_review` is an optional human handoff, not a substitute for reading the code.
+Keep the returned `review_id` for every review tool call. Call `review_diff` without `path` to list the snapshot and then with each changed path to read the exact patch. Use the harness's file-reading and code-search tools for surrounding definitions and callers.
 
 {focus}
 

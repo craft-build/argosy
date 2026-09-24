@@ -388,7 +388,7 @@ async fn end_to_end_over_in_process_duplex() {
         match &review.messages[0].content {
             rmcp::model::ContentBlock::Text(text) => {
                 for required in [
-                    "open_review",
+                    "start_review",
                     "review_diff",
                     "search_rules",
                     "report_finding",

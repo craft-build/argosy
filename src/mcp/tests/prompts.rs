@@ -138,7 +138,7 @@ fn get_prompt_result_review_interpolates_scope_and_teaches_structured_process() 
         "/work/acme",
         "abc123",
         "authentication regressions",
-        "open_review",
+        "start_review",
         "review_diff",
         "search_rules",
         "report_finding",
