@@ -234,7 +234,7 @@ impl Model {
         let started = timings.as_ref().map(|_| Instant::now());
         // Single output: `last_hidden_state` `(batch, seq, hidden)`.
         let hidden: &[f32] = outputs[0].as_slice().map_err(embedding_failed)?;
-        let hidden: Vec<f32> = hidden.iter().copied().collect();
+        let hidden: Vec<f32> = hidden.to_vec();
 
         let mut vectors = Vec::with_capacity(batch);
         for b in 0..batch {
