@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,13 +64,84 @@ fn embedding_failed(source: impl std::fmt::Display) -> crate::error::Error {
     .build()
 }
 
-/// The stable identity of the default model —
+/// The stable identity of a model —
 /// `tract/<repo>@tract-<backend-major>` (e.g. `...@tract-1`), derived from
 /// static metadata only: read-only callers like the CLI's `index status` can
-/// compare a store's recorded identity against the current default without
-/// loading (or downloading) the model.
-fn model_id() -> String {
-    format!("tract/{MODEL_REPO}@tract-{TRACT_BACKEND_VERSION}")
+/// compare a store's recorded identity against the current model without
+/// loading (or downloading) it.
+///
+/// A vetted embedding model the default index can use. Selected by name
+/// from user configuration ([`ModelSpec::from_name`]); every property is
+/// compile-time pinned so embeddings stay reproducible and comparable
+/// within one `model_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelSpec {
+    /// `sentence-transformers/all-MiniLM-L6-v2` at the pinned revision:
+    /// 384-dim, ~90 MB, the long-standing default.
+    #[default]
+    AllMinilmL6V2,
+}
+
+impl ModelSpec {
+    /// Every selectable model, for listing in errors and help.
+    pub const ALL: &'static [ModelSpec] = &[ModelSpec::AllMinilmL6V2];
+
+    /// The configuration name of this model.
+    pub fn name(self) -> &'static str {
+        match self {
+            ModelSpec::AllMinilmL6V2 => "all-minilm-l6-v2",
+        }
+    }
+
+    /// The Hugging Face repo holding the weights.
+    fn repo(self) -> &'static str {
+        match self {
+            ModelSpec::AllMinilmL6V2 => MODEL_REPO,
+        }
+    }
+
+    /// The exact weights revision downloaded from the repo.
+    fn revision(self) -> &'static str {
+        match self {
+            ModelSpec::AllMinilmL6V2 => MODEL_REVISION,
+        }
+    }
+
+    /// The ONNX graph file within the repo.
+    fn onnx_file(self) -> &'static str {
+        match self {
+            ModelSpec::AllMinilmL6V2 => MODEL_ONNX_FILE,
+        }
+    }
+
+    /// The model's configured `max_seq_length`; texts truncate to it.
+    fn max_seq_tokens(self) -> usize {
+        match self {
+            ModelSpec::AllMinilmL6V2 => MAX_SEQ_TOKENS,
+        }
+    }
+
+    /// The vector width every `embed` call produces.
+    pub fn dimensions(self) -> usize {
+        match self {
+            ModelSpec::AllMinilmL6V2 => MODEL_DIMENSIONS,
+        }
+    }
+
+    /// The stable identity recorded in (and compared against) index
+    /// stores — see the backend-version caveat above.
+    pub fn model_id(self) -> String {
+        format!("tract/{}@tract-{TRACT_BACKEND_VERSION}", self.repo())
+    }
+
+    /// Resolves a configuration name to a spec; unknown names are the
+    /// caller's error to report (with [`ModelSpec::ALL`] as the valid set).
+    pub fn from_name(name: &str) -> Option<Self> {
+        ModelSpec::ALL
+            .iter()
+            .copied()
+            .find(|spec| spec.name() == name)
+    }
 }
 
 /// The tokenizer plus the loaded, runnable ONNX encoder, bundled so the
@@ -78,6 +149,7 @@ fn model_id() -> String {
 struct Model {
     tokenizer: Tokenizer,
     encoder: Arc<Runnable>,
+    dimensions: usize,
 }
 
 #[derive(Default)]
@@ -91,7 +163,7 @@ struct EmbedTimings {
 impl Model {
     /// Downloads any missing model files into `cache` (module docs), then
     /// builds the tokenizer and the runnable encoder from the cached files.
-    fn load(cache: &std::path::Path) -> Result<Self> {
+    fn load(cache: &std::path::Path, spec: ModelSpec) -> Result<Self> {
         // hf-hub 1.0: the sync client is `HFClientSync` (feature `blocking`);
         // it owns its own background runtime, so calls from inside another
         // tokio runtime (the MCP blocking pool) are safe. The revision is a
@@ -100,24 +172,24 @@ impl Model {
             .cache_dir(cache)
             .build_sync()
             .map_err(embedding_failed)?;
-        let (owner, name) = hf_hub::split_id(MODEL_REPO);
+        let (owner, name) = hf_hub::split_id(spec.repo());
         let repo = client.model(owner, name);
         // Cache-first lookups (default: `force_download` off): every file
         // resolves offline once downloaded.
         let download = |file: &'static str| {
             repo.download_file()
                 .filename(file)
-                .revision(MODEL_REVISION)
+                .revision(spec.revision())
                 .send()
                 .map_err(embedding_failed)
         };
-        let onnx_path = download(MODEL_ONNX_FILE)?;
+        let onnx_path = download(spec.onnx_file())?;
         let tokenizer_path = download("tokenizer.json")?;
 
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(embedding_failed)?;
         tokenizer
             .with_truncation(Some(TruncationParams {
-                max_length: MAX_SEQ_TOKENS,
+                max_length: spec.max_seq_tokens(),
                 ..Default::default()
             }))
             .map_err(embedding_failed)?;
@@ -150,7 +222,11 @@ impl Model {
         }
         let runtime = tract::runtime_for_name(runtime_s).map_err(embedding_failed)?;
         let encoder = Arc::new(runtime.prepare(model).map_err(embedding_failed)?);
-        Ok(Self { tokenizer, encoder })
+        Ok(Self {
+            tokenizer,
+            encoder,
+            dimensions: spec.dimensions(),
+        })
     }
 
     /// Embeds one batch: tokenize (truncate to [`MAX_SEQ_TOKENS`], pad to the
@@ -244,15 +320,16 @@ impl Model {
         let hidden: Vec<f32> = hidden.to_vec();
 
         let mut vectors = Vec::with_capacity(batch);
+        let dims = self.dimensions;
         for b in 0..batch {
-            let start = b * seq * MODEL_DIMENSIONS;
-            let end = start + seq * MODEL_DIMENSIONS;
+            let start = b * seq * dims;
+            let end = start + seq * dims;
             let m_start = b * seq;
             vectors.push(mean_pool_normalize(
                 &hidden[start..end],
                 &mask[m_start..m_start + seq],
                 seq,
-                MODEL_DIMENSIONS,
+                dims,
             ));
         }
         if let (Some(start), Some(t)) = (started, timings) {
@@ -306,23 +383,46 @@ impl TractProvider {
     /// The model identity [`TractProvider::new_default`] will report,
     /// without constructing (or downloading) the model.
     pub fn default_model_id() -> String {
-        model_id()
+        ModelSpec::default().model_id()
     }
 
     /// Creates a provider over the pinned default model. Downloads the model
     /// on first use (module docs).
     pub fn new_default() -> Result<Self> {
-        let cache = model_cache_dir()?;
+        Self::new_default_in(None)
+    }
+
+    /// [`TractProvider::new_default`] with an explicit model-cache
+    /// directory (hosts pass a configured path); `None` resolves the cache
+    /// from the environment ([`model_cache_dir`]).
+    pub fn new_default_in(cache: Option<&Path>) -> Result<Self> {
+        Self::new(ModelSpec::default(), cache)
+    }
+
+    /// Creates a provider over a selected [`ModelSpec`], with the same
+    /// cache resolution as [`TractProvider::new_default_in`].
+    pub fn new(spec: ModelSpec, cache: Option<&Path>) -> Result<Self> {
+        // `$ARGOSY_EMBED_CACHE_DIR` / `$FASTEMBED_CACHE_DIR` outrank the
+        // caller's explicit path: an env-pinned cache must never be
+        // silently relocated by configuration.
+        let cache = if env_cache_dir().is_some() {
+            model_cache_dir()?
+        } else {
+            match cache {
+                Some(dir) => dir.to_path_buf(),
+                None => model_cache_dir()?,
+            }
+        };
         // Create before the download touches it: a clear, early error for an
         // unwritable cache location instead of a mid-download failure.
         fs::create_dir_all(&cache).context(IoSnafu {
             path: cache.clone(),
         })?;
-        let model = Mutex::new(Model::load(&cache)?);
+        let model = Mutex::new(Model::load(&cache, spec)?);
         Ok(Self {
             model,
-            model_id: model_id(),
-            dimensions: MODEL_DIMENSIONS,
+            model_id: spec.model_id(),
+            dimensions: spec.dimensions(),
         })
     }
 }
@@ -334,11 +434,15 @@ impl TractProvider {
 /// under `AppData\Local`).
 pub fn model_cache_dir() -> Result<PathBuf> {
     cache_dir_from(
-        std::env::var_os("ARGOSY_EMBED_CACHE_DIR")
-            .or_else(|| std::env::var_os("FASTEMBED_CACHE_DIR")),
+        env_cache_dir(),
         std::env::var_os("XDG_CACHE_HOME"),
         std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
     )
+}
+
+/// The env-var cache override, when set.
+fn env_cache_dir() -> Option<OsString> {
+    std::env::var_os("ARGOSY_EMBED_CACHE_DIR").or_else(|| std::env::var_os("FASTEMBED_CACHE_DIR"))
 }
 
 /// Pure core of [`model_cache_dir`], env reads factored out for tests.
@@ -385,16 +489,31 @@ pub struct LazyTractProvider {
     model_id: String,
     dimensions: usize,
     model: Mutex<Option<TractProvider>>,
+    spec: ModelSpec,
+    cache: Option<PathBuf>,
 }
 
 impl LazyTractProvider {
     /// A lazy provider over the pinned default model. Never downloads or
     /// constructs anything until the first `embed`.
     pub fn new_default() -> Result<Self> {
+        Self::new_default_in(None)
+    }
+
+    /// [`LazyTractProvider::new_default`] with an explicit model-cache
+    /// directory used at first-`embed` load time.
+    pub fn new_default_in(cache: Option<PathBuf>) -> Result<Self> {
+        Self::new(ModelSpec::default(), cache)
+    }
+
+    /// A lazy provider over a selected [`ModelSpec`].
+    pub fn new(spec: ModelSpec, cache: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
-            model_id: TractProvider::default_model_id(),
-            dimensions: TractProvider::DEFAULT_DIMENSIONS,
+            model_id: spec.model_id(),
+            dimensions: spec.dimensions(),
             model: Mutex::new(None),
+            spec,
+            cache,
         })
     }
 }
@@ -417,15 +536,16 @@ impl EmbeddingProvider for LazyTractProvider {
             .build()
         })?;
         if slot.is_none() {
-            let provider = TractProvider::new_default().map_err(|source| {
-                IndexSnafu {
-                    reason: format!(
-                        "embedding model unavailable: {source}; run `argosy index build` \
+            let provider =
+                TractProvider::new(self.spec, self.cache.as_deref()).map_err(|source| {
+                    IndexSnafu {
+                        reason: format!(
+                            "embedding model unavailable: {source}; run `argosy index build` \
                          once while online to download it (~90 MB), then retry"
-                    ),
-                }
-                .build()
-            })?;
+                        ),
+                    }
+                    .build()
+                })?;
             *slot = Some(provider);
         }
         slot.as_ref().expect("populated above").embed(texts)
@@ -495,7 +615,7 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let model = Model::load(&model_cache_dir().unwrap()).unwrap();
+        let model = Model::load(&model_cache_dir().unwrap(), ModelSpec::default()).unwrap();
         let load = start.elapsed();
         let reference: Vec<Vec<f32>> = texts
             .chunks(32)
@@ -711,8 +831,11 @@ mod tests {
 
     #[test]
     fn model_identity_is_offline_derivable_and_stable() {
-        assert_eq!(TractProvider::default_model_id(), model_id());
-        let id = model_id();
+        assert_eq!(
+            TractProvider::default_model_id(),
+            ModelSpec::default().model_id()
+        );
+        let id = ModelSpec::default().model_id();
         assert!(
             id.starts_with("tract/") && id.contains("all-MiniLM-L6-v2") && id.contains("@tract-"),
             "model_id() follows tract/<model>@tract-<major>: {id}"

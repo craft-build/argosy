@@ -8,6 +8,7 @@ pub mod bundle;
 #[cfg(feature = "code-tools")]
 pub mod codetools;
 pub mod concept;
+pub mod config;
 pub mod context;
 pub mod error;
 pub mod harness;
@@ -25,6 +26,7 @@ pub(crate) mod testutil;
 
 pub use bundle::{Argosy, Finding, Manifest, Namespace, Severity, ValidationReport};
 pub use concept::{Concept, ConceptId};
+pub use config::Config;
 pub use error::{Error, Result};
 pub use harness::{Harness, ReviewerSetup, setup_reviewer};
 pub use local::{LocalArgosy, Promotion, PromotionTarget};

@@ -14,7 +14,7 @@ use crate::local::{LocalArgosy, PromotionTarget};
 
 use super::params::*;
 use super::reports::*;
-use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, DEFAULT_K, UNVERIFIED};
+use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, UNVERIFIED};
 
 /// One opened project: its argosy set and its semantic index, reconciled
 /// after every mutating tool — a written or deleted concept is visible to
@@ -24,6 +24,9 @@ pub struct ProjectSession<P: EmbeddingProvider, S: VectorStore> {
     pub context: ProjectContext,
     /// The semantic index backing `search`/`search_rules`.
     pub index: Index<P, S>,
+    /// The hit count when a search tool call omits `k` (user
+    /// configuration; defaults to [`super::DEFAULT_K`]).
+    pub default_k: usize,
 }
 
 /// Opens the [`ProjectSession`] for a project root: context discovery,
@@ -46,7 +49,17 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// factory normally runs [`Index::reconcile`] first, and every mutating
     /// tool re-reconciles before returning.
     pub fn new(context: ProjectContext, index: Index<P, S>) -> Self {
-        Self { context, index }
+        Self {
+            context,
+            index,
+            default_k: super::DEFAULT_K,
+        }
+    }
+
+    /// Overrides the default hit count for search tools.
+    pub fn with_default_k(mut self, default_k: usize) -> Self {
+        self.default_k = default_k;
+        self
     }
 
     /// Brings the index back in line with disk after a mutation. The write
@@ -117,7 +130,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
         let query = Query {
             text: params.query,
-            k: params.k.unwrap_or(DEFAULT_K),
+            k: params.k.unwrap_or(self.default_k),
             filter,
         };
         let hits = self.index.search(&self.context, &query)?;

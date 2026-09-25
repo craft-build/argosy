@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 
 use argosy::Namespace;
+use argosy::config::PackageFormatConfig;
 use argosy::package::PackageFormat;
 
 #[derive(Args)]
@@ -24,9 +25,9 @@ pub(super) struct PullArgs {
     pub(super) name: String,
 
     /// Install into the user-wide global argosy store instead of this
-    /// project's.
-    #[arg(long)]
-    pub(super) global: bool,
+    /// project's (default: the configured `pull.default_global`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) global: Option<bool>,
 }
 
 /// Create a new, empty argosy: the `argosy.md` manifest plus the reserved
@@ -67,13 +68,14 @@ pub(super) struct PackageArgs {
     /// Destination directory or `.tar.gz` file.
     pub(super) dest: PathBuf,
 
-    /// The artifact format.
-    #[arg(long, value_enum, default_value_t = Format::Dir)]
-    pub(super) format: Format,
+    /// The artifact format (default: the configured `package.format`).
+    #[arg(long, value_enum)]
+    pub(super) format: Option<Format>,
 
-    /// Also ship the `.argosy/` index cache in the artifact.
-    #[arg(long)]
-    pub(super) include_index: bool,
+    /// Also ship the `.argosy/` index cache in the artifact (default:
+    /// the configured `package.include_index`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) include_index: Option<bool>,
 }
 
 /// Operate on the project's semantic index (`index.db` under the user
@@ -103,9 +105,10 @@ pub(super) struct QueryArgs {
     /// The natural-language query text.
     pub(super) text: String,
 
-    /// Return at most this many hits.
-    #[arg(short = 'k', default_value_t = 5)]
-    pub(super) k: usize,
+    /// Return at most this many hits (default: the configured
+    /// `index.default_k`).
+    #[arg(short = 'k')]
+    pub(super) k: Option<usize>,
 
     /// Only hits in these namespaces.
     #[arg(long, value_enum)]
@@ -156,6 +159,10 @@ pub(super) struct ConvertStyleguideArgs {
     /// argosy under the user state dir).
     pub(super) argosy_path: Option<PathBuf>,
 }
+
+/// Show the resolved user configuration and where it was loaded from.
+#[derive(Args)]
+pub(super) struct ConfigArgs {}
 
 /// Install agent definitions for a coding harness.
 #[derive(Args)]
@@ -218,6 +225,15 @@ impl From<Format> for PackageFormat {
         match format {
             Format::Dir => Self::Directory,
             Format::TarGz => Self::TarGz,
+        }
+    }
+}
+
+impl From<PackageFormatConfig> for Format {
+    fn from(format: PackageFormatConfig) -> Self {
+        match format {
+            PackageFormatConfig::Dir => Self::Dir,
+            PackageFormatConfig::TarGz => Self::TarGz,
         }
     }
 }

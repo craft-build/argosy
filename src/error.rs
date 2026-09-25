@@ -50,6 +50,10 @@ pub enum Error {
     #[snafu(display("{reason}"))]
     Validation { reason: String },
 
+    /// The user-level BarkML configuration could not be read or parsed.
+    #[snafu(display("failed to load configuration: {source}"))]
+    Config { source: barkml::Error },
+
     /// Serving infrastructure failed (async runtime startup, transport
     /// handshake, serve loop) — distinct from validation so callers can
     /// tell "bad input" from "the server could not run".

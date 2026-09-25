@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use argosy::Config;
 use argosy::error::Result;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -18,13 +19,15 @@ use serde::Serialize;
     about = "Create, validate, package, and query OKF knowledge bundles"
 )]
 struct Cli {
-    /// Emit machine-readable JSON on stdout.
-    #[arg(long, global = true)]
-    json: bool,
+    /// Emit machine-readable JSON on stdout (default: the configured
+    /// `output.json`).
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    json: Option<bool>,
 
-    /// Suppress non-error human output.
-    #[arg(short, long, global = true)]
-    quiet: bool,
+    /// Suppress non-error human output (default: the configured
+    /// `output.quiet`).
+    #[arg(short, long, global = true, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    quiet: Option<bool>,
 
     #[command(subcommand)]
     command: Command,
@@ -40,6 +43,7 @@ enum Command {
     Convert(ConvertArgs),
     Agent(AgentArgs),
     Mcp(McpArgs),
+    Config(ConfigArgs),
 }
 
 mod args;
@@ -90,33 +94,54 @@ impl Output {
 
 /// The library `Error` type of one subcommand execution; business failures
 /// (non-conformant bundle, import findings) are the returned `ExitCode`.
-fn cmd_result(out: &Output, command: &Command) -> Result<ExitCode> {
+fn cmd_result(out: &Output, config: &Config, command: &Command) -> Result<ExitCode> {
     match command {
         Command::Init(args) => cmd_init(out, args),
         Command::Validate(args) => cmd_validate(out, args),
-        Command::Package(args) => cmd_package(out, args),
-        Command::Pull(args) => cmd_pull(out, args),
-        Command::Index(args) => cmd_index(out, args),
-        Command::Convert(args) => cmd_convert(out, args),
+        Command::Package(args) => cmd_package(out, config, args),
+        Command::Pull(args) => cmd_pull(out, config, args),
+        Command::Index(args) => cmd_index(out, config, args),
+        Command::Convert(args) => cmd_convert(out, config, args),
         Command::Agent(args) => cmd_agent(out, args),
-        Command::Mcp(args) => cmd_mcp(out, args),
+        Command::Mcp(args) => cmd_mcp(out, config, args),
+        Command::Config(args) => cmd_config(out, args, config),
     }
 }
 
-/// Entry point: parse, dispatch, and map library errors to exit code 1.
+/// Entry point: parse, load the user configuration, and dispatch.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-    let out = Output {
-        json: cli.json,
-        quiet: cli.quiet,
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return ExitCode::FAILURE;
+        }
     };
-    match cmd_result(&out, &cli.command) {
+    let out = Output {
+        json: cli.json.unwrap_or(config.output.json),
+        quiet: cli.quiet.unwrap_or(config.output.quiet),
+    };
+    match cmd_result(&out, &config, &cli.command) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The configured embedding-model cache, when to apply it: an explicitly
+/// set `$ARGOSY_EMBED_CACHE_DIR` (or the legacy `$FASTEMBED_CACHE_DIR`)
+/// always wins — then the library resolves it and `None` is returned.
+pub(super) fn embed_cache_override(config: &Config) -> Option<PathBuf> {
+    if std::env::var_os("ARGOSY_EMBED_CACHE_DIR")
+        .or_else(|| std::env::var_os("FASTEMBED_CACHE_DIR"))
+        .is_some()
+    {
+        return None;
+    }
+    config.embed_cache_dir()
 }
 
 /// The process working directory, mapped to the library's `Io` error.

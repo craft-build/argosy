@@ -44,7 +44,7 @@ fn query_flags_map_to_filter_fields() {
         "Styleguide Rule",
     ]);
     let filter = build_filter(&q);
-    assert_eq!(q.k, 3);
+    assert_eq!(q.k, Some(3));
     assert_eq!(
         filter.namespaces,
         Some(vec![
@@ -72,7 +72,7 @@ fn query_flags_map_to_filter_fields() {
 #[test]
 fn unscoped_query_leaves_every_filter_field_none() {
     let q = parse_query(&["argosy", "index", "query", "anything"]);
-    assert_eq!(q.k, 5, "default k");
+    assert_eq!(q.k, None, "no flag: default comes from the configuration");
     let filter = build_filter(&q);
     // 1:1 flag mapping: no flags means no constraints anywhere.
     assert!(filter.namespaces.is_none());

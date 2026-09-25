@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 ast-grep-core = { version = "0.45", default-features = false, optional = true }
+barkml = "0.10"
 ast-grep-language = {
   version = "0.45",
   default-features = false,

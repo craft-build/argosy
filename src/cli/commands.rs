@@ -10,7 +10,8 @@ use argosy::package::{ImportReport, PackageOptions, PackageReport};
 use argosy::{Argosy, LocalArgosy, Namespace, ValidationReport};
 
 use crate::cli::args::*;
-use crate::cli::{Output, current_dir};
+use crate::cli::{Output, current_dir, embed_cache_override};
+use argosy::Config;
 use argosy::Result;
 
 pub(super) fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
@@ -51,8 +52,9 @@ pub(super) fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub(super) fn cmd_pull(out: &Output, args: &PullArgs) -> Result<ExitCode> {
-    let root = if args.global {
+pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result<ExitCode> {
+    let global = args.global.unwrap_or(config.pull.default_global);
+    let root = if global {
         argosy::pull::global_argosy_dir()?
     } else {
         argosy::pull::project_argosy_dir(current_dir()?)?
@@ -64,7 +66,7 @@ pub(super) fn cmd_pull(out: &Output, args: &PullArgs) -> Result<ExitCode> {
             "name": argosy.manifest().name(),
             "argosy_version": argosy.manifest().argosy_version(),
             "path": dest,
-            "global": args.global,
+            "global": global,
         }))?;
     } else {
         out.note(&format!(
@@ -139,7 +141,7 @@ pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode
     })
 }
 
-pub(super) fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> {
+pub(super) fn cmd_package(out: &Output, config: &Config, args: &PackageArgs) -> Result<ExitCode> {
     // Gate packaging on validation (DIST-1's "only conformant bundles ship"
     // spirit): a broken bundle fails with its validation errors on stderr.
     let report = Argosy::validate(&args.source);
@@ -153,8 +155,11 @@ pub(super) fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> 
     }
     let source = Argosy::open(&args.source)?;
     let options = PackageOptions {
-        include_index: args.include_index,
-        format: args.format.into(),
+        include_index: args.include_index.unwrap_or(config.package.include_index),
+        format: args
+            .format
+            .unwrap_or_else(|| Format::from(config.package.format))
+            .into(),
     };
     let report: PackageReport = argosy::package::package(&source, &args.dest, &options)?;
     if out.json {
@@ -171,7 +176,7 @@ pub(super) fn cmd_package(out: &Output, args: &PackageArgs) -> Result<ExitCode> 
     Ok(ExitCode::SUCCESS)
 }
 
-pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> {
+pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> Result<ExitCode> {
     match &args.format {
         ConvertFormat::Styleguide(imp) => {
             // Implicit target is the current project's `default` argosy
@@ -232,7 +237,7 @@ pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> 
             // import.
             if report.written > 0 && report.findings.is_empty() {
                 #[cfg(feature = "default-index")]
-                match reconcile_index_after_import() {
+                match reconcile_index_after_import(config) {
                     Ok(Some(reconciled)) => out.note(&format!(
                         "index reconciled: {} upserted, {} removed, {} unchanged",
                         reconciled.upserted, reconciled.removed, reconciled.unchanged
@@ -258,14 +263,14 @@ pub(super) fn cmd_convert(out: &Output, args: &ConvertArgs) -> Result<ExitCode> 
 /// the imported rules, and creating one here would force a ~90 MB model
 /// download as a side effect of a convert.
 #[cfg(feature = "default-index")]
-fn reconcile_index_after_import() -> Result<Option<argosy::index::IndexReport>> {
+fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index::IndexReport>> {
     use argosy::context::ProjectContext;
     use argosy::index::Index;
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::tract::TractProvider;
 
     let root = current_dir()?;
-    let db = argosy::pull::project_argosy_dir(&root)?.join(argosy::pull::INDEX_DB_NAME);
+    let db = argosy::pull::project_argosy_dir(&root)?.join(config.index_db_name());
     if !db.is_file() {
         return Ok(None);
     }
@@ -274,7 +279,8 @@ fn reconcile_index_after_import() -> Result<Option<argosy::index::IndexReport>> 
     eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
     let context = ProjectContext::open_project(&root)?;
     let store = SqliteVecStore::open(&db)?;
-    let provider = TractProvider::new_default()?;
+    let provider =
+        TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
     let mut index = Index::new(provider, store);
     Ok(Some(index.reconcile(&context)?))
 }
@@ -357,7 +363,7 @@ impl Drop for IndexProgress {
 }
 
 #[cfg(feature = "default-index")]
-pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
+pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::tract::TractProvider;
@@ -367,7 +373,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
     // project's argosy store under the user state dir plus the global
     // store, all keyed by that root.
     let root = current_dir()?;
-    let db = argosy::pull::project_argosy_dir(&root)?.join(argosy::pull::INDEX_DB_NAME);
+    let db = argosy::pull::project_argosy_dir(&root)?.join(config.index_db_name());
 
     match &args.verb {
         IndexVerb::Status => {
@@ -388,7 +394,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // index and must never write (no directory creation, no pragma,
             // no DDL).
             let store = SqliteVecStore::open_read_only(&db)?;
-            let expected_model = TractProvider::default_model_id();
+            let expected_model = model_spec(config)?.model_id();
             let stale = staleness_report(&context, &store, &expected_model)?;
 
             // Unit counts per argosy/namespace, derived from `unit_hashes`
@@ -462,7 +468,8 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             if !out.quiet {
                 eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
             }
-            let provider = TractProvider::new_default()?;
+            let provider =
+                TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
             let mut index = Index::new(provider, store);
             let mut progress = IndexProgress::new(out);
             let report = index
@@ -496,11 +503,12 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
             // in the store) and must work on a read-only index.
             let store = SqliteVecStore::open_read_only(&db)?;
             eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
-            let provider = TractProvider::new_default()?;
+            let provider =
+                TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
             let index = Index::new(provider, store);
             let query = Query {
                 text: q.text.clone(),
-                k: q.k,
+                k: q.k.unwrap_or(config.index.default_k),
                 filter: build_filter(q),
             };
             let hits = index.search(&context, &query)?;
@@ -523,7 +531,7 @@ pub(super) fn cmd_index(out: &Output, args: &IndexArgs) -> Result<ExitCode> {
 }
 
 #[cfg(not(feature = "default-index"))]
-pub(super) fn cmd_index(_out: &Output, _args: &IndexArgs) -> Result<ExitCode> {
+pub(super) fn cmd_index(_out: &Output, _config: &Config, _args: &IndexArgs) -> Result<ExitCode> {
     eprintln!(
         "error: this `argosy` binary was built without the `default-index` feature; \
          rebuild with default features to use the index subcommand"
@@ -532,7 +540,7 @@ pub(super) fn cmd_index(_out: &Output, _args: &IndexArgs) -> Result<ExitCode> {
 }
 
 #[cfg(all(feature = "mcp", feature = "default-index"))]
-pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
+pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result<ExitCode> {
     use std::sync::Arc;
 
     use argosy::context::ProjectContext;
@@ -543,19 +551,21 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
     use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
     use rmcp::ServiceExt;
 
+    let default_k = config.index.mcp_default_k;
+    let db_name = config.index_db_name().to_string();
+    let embed_cache = embed_cache_override(config);
+    let spec = model_spec(config)?;
     // No project is opened at startup: the server runs from any directory,
     // and every tool call names its project (`cwd`). Projects open lazily
     // through this factory and stay cached for the process lifetime.
     // stdout is the stdio protocol channel: every diagnostic is stderr.
-    let factory: SessionFactory<LazyTractProvider, SqliteVecStore> = Arc::new(|root| {
+    let factory: SessionFactory<LazyTractProvider, SqliteVecStore> = Arc::new(move |root| {
         let context = ProjectContext::open_project(root)?;
-        let store = SqliteVecStore::open(
-            argosy::pull::project_argosy_dir(root)?.join(argosy::pull::INDEX_DB_NAME),
-        )?;
+        let store = SqliteVecStore::open(argosy::pull::project_argosy_dir(root)?.join(&db_name))?;
         // The lazy provider makes the open instant and offline-tolerant:
         // the model (and its ~90 MB first-run download) loads only when
         // something actually needs embedding.
-        let mut index = Index::new(LazyTractProvider::new_default()?, store);
+        let mut index = Index::new(LazyTractProvider::new(spec, embed_cache.clone())?, store);
         // A failed reconcile degrades retrieval, it must not fail the open
         // (spec §11: an out-of-date index degrades search quality, never
         // correctness) — warn on stderr and serve the session anyway;
@@ -574,7 +584,7 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
                 root.display()
             ),
         }
-        Ok(ProjectSession::new(context, index))
+        Ok(ProjectSession::new(context, index).with_default_k(default_k))
     });
     let server = ArgosyMcpServer::new(McpState::new(factory));
 
@@ -604,7 +614,7 @@ pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
 }
 
 #[cfg(not(all(feature = "mcp", feature = "default-index")))]
-pub(super) fn cmd_mcp(_out: &Output, _args: &McpArgs) -> Result<ExitCode> {
+pub(super) fn cmd_mcp(_out: &Output, _config: &Config, _args: &McpArgs) -> Result<ExitCode> {
     eprintln!(
         "error: this `argosy` binary was built without the `mcp` feature; \
          rebuild with default features to use the mcp subcommand"
@@ -624,4 +634,75 @@ pub(super) fn build_filter(q: &QueryArgs) -> Filter {
         language: q.language.clone(),
         category: q.category.clone(),
     }
+}
+
+/// Resolves the configured embedding model, erroring with the known names
+/// on a typo (validation also catches this at load time — this is the
+/// same check for non-configured invocations of the default).
+#[cfg(feature = "default-index")]
+fn model_spec(config: &Config) -> Result<argosy::index::tract::ModelSpec> {
+    let name = config.model_name();
+    argosy::index::tract::ModelSpec::from_name(name).ok_or_else(|| {
+        argosy::error::Error::Validation {
+            reason: format!(
+                "unknown embedding model `{name}` (known models: {})",
+                argosy::index::tract::ModelSpec::ALL
+                    .iter()
+                    .map(|spec| spec.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    })
+}
+
+/// Prints the resolved configuration (defaults merged with the user's
+/// BarkML files) and the search location it came from.
+pub(super) fn cmd_config(out: &Output, _args: &ConfigArgs, config: &Config) -> Result<ExitCode> {
+    let location = argosy::config::config_dir();
+    if out.json {
+        out.json(&serde_json::json!({
+            "config_dir": location,
+            "config": config,
+        }))?;
+    } else {
+        out.note(&format!(
+            "config location: {}",
+            location
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+        out.note(&format!(
+            "output: quiet={}, json={}",
+            config.output.quiet, config.output.json
+        ));
+        out.note(&format!(
+            "paths: embed_cache_dir={}, index_db_name={}",
+            config
+                .embed_cache_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<default>".to_string()),
+            config.index_db_name()
+        ));
+        out.note(&format!(
+            "pull: default_global={}",
+            config.pull.default_global
+        ));
+        out.note(&format!(
+            "index: model={}, default_k={}, mcp_default_k={}",
+            config.model_name(),
+            config.index.default_k,
+            config.index.mcp_default_k
+        ));
+        out.note(&format!(
+            "package: format={}, include_index={}",
+            match config.package.format {
+                argosy::config::PackageFormatConfig::Dir => "dir",
+                argosy::config::PackageFormatConfig::TarGz => "tar.gz",
+            },
+            config.package.include_index
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
 }
