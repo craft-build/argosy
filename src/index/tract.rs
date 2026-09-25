@@ -66,6 +66,11 @@ const BGE_SMALL_REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 /// bge-small-en-v1.5's `max_seq_length`.
 const BGE_SMALL_MAX_SEQ_TOKENS: usize = 512;
 
+/// The instruction prefixed to *query-side* text for the BGE v1.5 family
+/// (documents are embedded bare) — the asymmetry the model was trained
+/// with; omitting it on queries silently degrades recall.
+const BGE_QUERY_INSTRUCTION: &str = "represent this sentence for searching relevant passages: ";
+
 /// bge-small-en-v1.5's vector width (same BERT hidden size as MiniLM).
 const BGE_SMALL_DIMENSIONS: usize = 384;
 
@@ -168,6 +173,15 @@ impl ModelSpec {
         }
     }
 
+    /// The instruction prefixed to query-side text, if the model is
+    /// asymmetric (document-side text is never prefixed).
+    fn query_instruction(self) -> Option<&'static str> {
+        match self {
+            ModelSpec::AllMinilmL6V2 => None,
+            ModelSpec::BgeSmallEnV15 => Some(BGE_QUERY_INSTRUCTION),
+        }
+    }
+
     /// The stable identity recorded in (and compared against) index
     /// stores — see the backend-version caveat above.
     pub fn model_id(self) -> String {
@@ -191,6 +205,7 @@ struct Model {
     encoder: Arc<Runnable>,
     dimensions: usize,
     pooling: Pooling,
+    query_instruction: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -268,7 +283,22 @@ impl Model {
             encoder,
             dimensions: spec.dimensions(),
             pooling: spec.pooling(),
+            query_instruction: spec.query_instruction(),
         })
+    }
+
+    /// Query-side embedding: prepends the model's instruction, if any.
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        match self.query_instruction {
+            None => self.embed(texts),
+            Some(instruction) => {
+                let prefixed: Vec<String> = texts
+                    .iter()
+                    .map(|text| format!("{instruction}{text}"))
+                    .collect();
+                self.embed(&prefixed)
+            }
+        }
     }
 
     /// Embeds one batch: tokenize (truncate to [`MAX_SEQ_TOKENS`], pad to the
@@ -603,6 +633,29 @@ impl EmbeddingProvider for LazyTractProvider {
         }
         slot.as_ref().expect("populated above").embed(texts)
     }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut slot = self.model.lock().map_err(|_| -> crate::error::Error {
+            IndexSnafu {
+                reason: "embedding model mutex poisoned by a panicking caller".to_string(),
+            }
+            .build()
+        })?;
+        if slot.is_none() {
+            let provider =
+                TractProvider::new(self.spec, self.cache.as_deref()).map_err(|source| {
+                    IndexSnafu {
+                        reason: format!(
+                            "embedding model unavailable: {source}; run `argosy index build` \
+                     once while online to download it (~90 MB), then retry"
+                        ),
+                    }
+                    .build()
+                })?;
+            *slot = Some(provider);
+        }
+        slot.as_ref().expect("populated above").embed_query(texts)
+    }
 }
 
 impl EmbeddingProvider for TractProvider {
@@ -624,6 +677,20 @@ impl EmbeddingProvider for TractProvider {
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(EMBED_BATCH) {
             vectors.extend(model.embed_grouped(batch)?);
+        }
+        Ok(vectors)
+    }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let model = self.model.lock().map_err(|_| -> crate::error::Error {
+            IndexSnafu {
+                reason: "embedding model mutex poisoned by a panicking caller".to_string(),
+            }
+            .build()
+        })?;
+        let mut vectors = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(EMBED_BATCH) {
+            vectors.extend(model.embed_query(batch)?);
         }
         Ok(vectors)
     }
@@ -910,8 +977,16 @@ mod tests {
         let bge = ModelSpec::BgeSmallEnV15;
         assert_eq!(bge.dimensions(), 384);
         assert_eq!(bge.pooling(), Pooling::Cls);
-        assert_ne!(bge.model_id(), ModelSpec::default().model_id());
         assert!(bge.model_id().contains("bge-small-en-v1.5"));
+        assert_ne!(bge.model_id(), ModelSpec::default().model_id());
+        // Query-side asymmetry: BGE prefixes an instruction on queries;
+        // symmetric MiniLM does not.
+        let instruction = bge
+            .query_instruction()
+            .expect("bge queries carry an instruction");
+        assert!(instruction.starts_with("represent this sentence"));
+        assert!(instruction.ends_with(' '));
+        assert_eq!(ModelSpec::default().query_instruction(), None);
     }
 
     #[test]

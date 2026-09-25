@@ -29,6 +29,7 @@ pub(crate) struct MockEmbedder {
     model_id: String,
     dimension: usize,
     embed_calls: Cell<usize>,
+    query_embed_calls: Cell<usize>,
 }
 
 impl MockEmbedder {
@@ -42,11 +43,16 @@ impl MockEmbedder {
             model_id: model_id.to_string(),
             dimension: 128,
             embed_calls: Cell::new(0),
+            query_embed_calls: Cell::new(0),
         }
     }
 
     pub(crate) fn embed_calls(&self) -> usize {
         self.embed_calls.get()
+    }
+
+    pub(crate) fn query_embed_calls(&self) -> usize {
+        self.query_embed_calls.get()
     }
 }
 
@@ -95,6 +101,12 @@ impl EmbeddingProvider for MockEmbedder {
                 v
             })
             .collect())
+    }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.query_embed_calls
+            .set(self.query_embed_calls.get() + texts.len());
+        self.embed(texts)
     }
 }
 

@@ -35,6 +35,14 @@ pub trait EmbeddingProvider {
     /// Embeds every text in `texts`, returning exactly one vector of
     /// [`EmbeddingProvider::dimensions`] floats per text, in order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+
+    /// Embeds query-side text (the [`Index::search`] input). Asymmetric
+    /// models (the BGE family) require a query-side instruction that must
+    /// never appear on the document side ([`EmbeddingProvider::embed`],
+    /// used at index time); symmetric models default to plain `embed`.
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts)
+    }
 }
 
 /// The structured metadata a query can filter on:
@@ -538,7 +546,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
         let texts = std::slice::from_ref(&query.text);
-        let mut vectors = self.provider.embed(texts)?;
+        let mut vectors = self.provider.embed_query(texts)?;
         let Some(vector) = vectors.pop() else {
             return IndexSnafu {
                 reason: format!(

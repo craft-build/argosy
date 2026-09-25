@@ -55,6 +55,23 @@ fn namespace_filter_scopes_search_to_the_selected_namespaces() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
+    // Search is query-side: it must go through `embed_query`, never the
+    // document-side `embed` (asymmetric models depend on the split).
+    let (q_before, e_before) = (
+        index.provider().query_embed_calls(),
+        index.provider().embed_calls(),
+    );
+    let hits = index
+        .search(&ctx, &Query::unscoped("naming case style", 10))
+        .unwrap();
+    assert!(!hits.is_empty());
+    assert_eq!(index.provider().query_embed_calls(), q_before + 1);
+    assert_eq!(
+        index.provider().embed_calls(),
+        e_before + 1,
+        "default embed_query delegates to embed"
+    );
+
     let mut query = Query::unscoped("naming case style", 10);
     query.filter.namespaces = Some(vec![Namespace::Styleguide]);
     let hits = index.search(&ctx, &query).unwrap();
