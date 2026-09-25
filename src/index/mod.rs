@@ -527,17 +527,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// must be active in `context` — else
     /// [`crate::error::Error::UnknownArgosy`], never a silent empty.
     pub fn search(&self, context: &ProjectContext, query: &Query) -> Result<Vec<SearchHit>> {
-        if self.dimensions_mismatch() {
-            return IndexSnafu {
-                reason: format!(
-                    "index was built with a different embedding model: store holds {}-dim \
-                     vectors, provider `{}` emits {}; run `argosy index build` to rebuild",
-                    self.store.recorded_dimensions().expect("checked above"),
-                    self.provider.model_id(),
-                    self.provider.dimensions()
-                ),
-            }
-            .fail();
+        if let Some(reason) = self.dimension_guard_reason() {
+            return IndexSnafu { reason }.fail();
         }
         if let Some(argosies) = &query.filter.argosies {
             for name in argosies {
@@ -570,15 +561,40 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         self.store.search(&vector, query.k, &query.filter)
     }
 
-    /// True iff the store's recorded vector width disagrees with the
-    /// provider's — the read-path half of a model switch: the recorded
-    /// model identity drives rebuilds during `reconcile`, but a search
-    /// against a stale store must fail with a rebuild hint, never a
-    /// backend-specific shape error.
-    fn dimensions_mismatch(&self) -> bool {
+    /// The read-path half of a model switch: the recorded model identity
+    /// drives rebuilds during `reconcile`, but a search against a stale
+    /// store must fail with a rebuild hint, never a backend-specific
+    /// shape error. `Some(reason)` blocks the search:
+    /// - recorded width != provider width (the provider's width is never
+    ///   unknown — `EmbeddingProvider::dimensions` returns a `usize`);
+    /// - recorded width unknown *while the store holds units*: an
+    ///   unvalidated width can never be allowed through silently;
+    ///   an empty store with no recorded width is fine (nothing to
+    ///   compare, nothing to return).
+    fn dimension_guard_reason(&self) -> Option<String> {
+        match self.store.recorded_dimensions() {
+            Some(recorded) if recorded != self.provider.dimensions() => Some(format!(
+                "index was built with a different embedding model: store holds {recorded}-dim \
+                     vectors, provider `{}` emits {}; run `argosy index build` to rebuild",
+                self.provider.model_id(),
+                self.provider.dimensions()
+            )),
+            None if self.store_has_units() => Some(
+                "index dimensionality is unrecorded but the index holds vectors; \
+                 run `argosy index build` to rebuild"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Whether the store holds any unit; a failed probe counts as holding
+    /// (the search would surface the same failure moments later).
+    fn store_has_units(&self) -> bool {
         self.store
-            .recorded_dimensions()
-            .is_some_and(|recorded| recorded != self.provider.dimensions())
+            .unit_hashes()
+            .map(|hashes| !hashes.is_empty())
+            .unwrap_or(true)
     }
 }
 

@@ -127,6 +127,31 @@ impl MemStore {
         self.dimensions = Some(dims);
         self
     }
+
+    /// Simulates a store holding vectors whose recorded width was lost.
+    pub(crate) fn forget_dimensions_but_keep_units(&mut self) {
+        self.dimensions = None;
+        if self.units.is_empty() {
+            self.units.insert(
+                QualifiedConceptId {
+                    argosy: "local".into(),
+                    namespace: Namespace::Document,
+                    id: "document/arch.md".parse().unwrap(),
+                },
+                EmbeddingUnit {
+                    concept: QualifiedConceptId {
+                        argosy: "local".into(),
+                        namespace: Namespace::Document,
+                        id: "document/arch.md".parse().unwrap(),
+                    },
+                    vector: vec![0.0; 128],
+                    text_hash: String::new(),
+                    chunk_ordinal: 0,
+                    meta: UnitMeta::default(),
+                },
+            );
+        }
+    }
 }
 
 impl VectorStore for MemStore {
@@ -145,6 +170,9 @@ impl VectorStore for MemStore {
 
     fn upsert(&mut self, units: &[EmbeddingUnit]) -> Result<()> {
         for unit in units {
+            if self.dimensions.is_none() && !unit.vector.is_empty() {
+                self.dimensions = Some(unit.vector.len());
+            }
             self.units.insert(unit.concept.clone(), unit.clone());
         }
         Ok(())
@@ -167,6 +195,7 @@ impl VectorStore for MemStore {
     fn clear(&mut self) -> Result<()> {
         self.units.clear();
         self.model_id = None;
+        self.dimensions = None;
         self.clears += 1;
         Ok(())
     }

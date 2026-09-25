@@ -36,6 +36,17 @@ fn search_against_a_store_built_with_a_different_width_is_a_rebuild_hint() {
             .search(&ctx, &Query::unscoped("architecture", 10))
             .is_ok()
     );
+
+    // Unknown width *with* units is refused, never silently allowed.
+    let mut stale = MemStore::new();
+    stale.forget_dimensions_but_keep_units();
+    let index = Index::new(MockEmbedder::new(), stale);
+    let err = index
+        .search(&ctx, &Query::unscoped("architecture", 10))
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("dimensionality is unrecorded"), "{msg}");
+    assert!(msg.contains("argosy index build"), "{msg}");
 }
 
 #[test]

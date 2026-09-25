@@ -62,6 +62,7 @@ impl EmbeddingProvider for FakeEmbedder {
 #[derive(Default)]
 pub(crate) struct MemVec {
     model_id: Option<String>,
+    dimensions: Option<usize>,
     units: HashMap<(QualifiedConceptId, u32), EmbeddingUnit>,
 }
 
@@ -117,8 +118,15 @@ impl VectorStore for MemVec {
         Ok(())
     }
 
+    fn recorded_dimensions(&self) -> Option<usize> {
+        self.dimensions
+    }
+
     fn upsert(&mut self, units: &[EmbeddingUnit]) -> Result<()> {
         for unit in units {
+            if self.dimensions.is_none() && !unit.vector.is_empty() {
+                self.dimensions = Some(unit.vector.len());
+            }
             self.units
                 .insert((unit.concept.clone(), unit.chunk_ordinal), unit.clone());
         }
@@ -141,6 +149,7 @@ impl VectorStore for MemVec {
     fn clear(&mut self) -> Result<()> {
         self.units.clear();
         self.model_id = None;
+        self.dimensions = None;
         Ok(())
     }
 
