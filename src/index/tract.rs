@@ -56,6 +56,30 @@ const EMBED_BATCH: usize = 32;
 /// all-MiniLM-L6-v2's vector width (the BERT `hidden_size`).
 const MODEL_DIMENSIONS: usize = 384;
 
+/// The Hugging Face repo of the BGE-small model in the registry.
+const BGE_SMALL_REPO: &str = "BAAI/bge-small-en-v1.5";
+
+/// The exact weights revision of [`BGE_SMALL_REPO`]; same pinning contract
+/// as [`MODEL_REVISION`].
+const BGE_SMALL_REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
+
+/// bge-small-en-v1.5's `max_seq_length`.
+const BGE_SMALL_MAX_SEQ_TOKENS: usize = 512;
+
+/// bge-small-en-v1.5's vector width (same BERT hidden size as MiniLM).
+const BGE_SMALL_DIMENSIONS: usize = 384;
+
+/// How one sequence's embedding is derived from the encoder's
+/// `last_hidden_state` — the sentence-transformers post-processing each
+/// model family prescribes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pooling {
+    /// Attention-mask-weighted mean over token positions, then L2 norm.
+    Mean,
+    /// The `[CLS]` token's vector, L2-normalized (the BGE family).
+    Cls,
+}
+
 /// Maps tract/hf-hub/tokenizer failures into the crate error.
 fn embedding_failed(source: impl std::fmt::Display) -> crate::error::Error {
     EmbeddingSnafu {
@@ -80,16 +104,20 @@ pub enum ModelSpec {
     /// 384-dim, ~90 MB, the long-standing default.
     #[default]
     AllMinilmL6V2,
+    /// `BAAI/bge-small-en-v1.5` at the pinned revision: 384-dim with
+    /// CLS pooling — stronger retrieval per byte than MiniLM.
+    BgeSmallEnV15,
 }
 
 impl ModelSpec {
     /// Every selectable model, for listing in errors and help.
-    pub const ALL: &'static [ModelSpec] = &[ModelSpec::AllMinilmL6V2];
+    pub const ALL: &'static [ModelSpec] = &[ModelSpec::AllMinilmL6V2, ModelSpec::BgeSmallEnV15];
 
     /// The configuration name of this model.
     pub fn name(self) -> &'static str {
         match self {
             ModelSpec::AllMinilmL6V2 => "all-minilm-l6-v2",
+            ModelSpec::BgeSmallEnV15 => "bge-small-en-v1.5",
         }
     }
 
@@ -97,6 +125,7 @@ impl ModelSpec {
     fn repo(self) -> &'static str {
         match self {
             ModelSpec::AllMinilmL6V2 => MODEL_REPO,
+            ModelSpec::BgeSmallEnV15 => BGE_SMALL_REPO,
         }
     }
 
@@ -104,13 +133,14 @@ impl ModelSpec {
     fn revision(self) -> &'static str {
         match self {
             ModelSpec::AllMinilmL6V2 => MODEL_REVISION,
+            ModelSpec::BgeSmallEnV15 => BGE_SMALL_REVISION,
         }
     }
 
     /// The ONNX graph file within the repo.
     fn onnx_file(self) -> &'static str {
         match self {
-            ModelSpec::AllMinilmL6V2 => MODEL_ONNX_FILE,
+            ModelSpec::AllMinilmL6V2 | ModelSpec::BgeSmallEnV15 => MODEL_ONNX_FILE,
         }
     }
 
@@ -118,6 +148,7 @@ impl ModelSpec {
     fn max_seq_tokens(self) -> usize {
         match self {
             ModelSpec::AllMinilmL6V2 => MAX_SEQ_TOKENS,
+            ModelSpec::BgeSmallEnV15 => BGE_SMALL_MAX_SEQ_TOKENS,
         }
     }
 
@@ -125,6 +156,15 @@ impl ModelSpec {
     pub fn dimensions(self) -> usize {
         match self {
             ModelSpec::AllMinilmL6V2 => MODEL_DIMENSIONS,
+            ModelSpec::BgeSmallEnV15 => BGE_SMALL_DIMENSIONS,
+        }
+    }
+
+    /// How the model's embeddings are pooled from the encoder output.
+    fn pooling(self) -> Pooling {
+        match self {
+            ModelSpec::AllMinilmL6V2 => Pooling::Mean,
+            ModelSpec::BgeSmallEnV15 => Pooling::Cls,
         }
     }
 
@@ -150,6 +190,7 @@ struct Model {
     tokenizer: Tokenizer,
     encoder: Arc<Runnable>,
     dimensions: usize,
+    pooling: Pooling,
 }
 
 #[derive(Default)]
@@ -226,6 +267,7 @@ impl Model {
             tokenizer,
             encoder,
             dimensions: spec.dimensions(),
+            pooling: spec.pooling(),
         })
     }
 
@@ -323,14 +365,16 @@ impl Model {
         let dims = self.dimensions;
         for b in 0..batch {
             let start = b * seq * dims;
-            let end = start + seq * dims;
             let m_start = b * seq;
-            vectors.push(mean_pool_normalize(
-                &hidden[start..end],
-                &mask[m_start..m_start + seq],
-                seq,
-                dims,
-            ));
+            vectors.push(match self.pooling {
+                Pooling::Mean => mean_pool_normalize(
+                    &hidden[start..start + seq * dims],
+                    &mask[m_start..m_start + seq],
+                    seq,
+                    dims,
+                ),
+                Pooling::Cls => cls_pool_normalize(&hidden[start..start + dims]),
+            });
         }
         if let (Some(start), Some(t)) = (started, timings) {
             t.pool += start.elapsed();
@@ -365,6 +409,15 @@ fn mean_pool_normalize(hidden: &[f32], mask: &[i64], seq: usize, dims: usize) ->
         *value /= norm;
     }
     pooled
+}
+
+/// BGE-family pooling: the `[CLS]` token's vector, L2-normalized.
+fn cls_pool_normalize(cls: &[f32]) -> Vec<f32> {
+    let norm = cls.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        return cls.to_vec();
+    }
+    cls.iter().map(|x| x / norm).collect()
 }
 
 /// A local tract [`EmbeddingProvider`]: BERT text embeddings with no remote
@@ -842,6 +895,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn registry_entries_resolve_by_name_and_carry_distinct_identities() {
+        assert_eq!(ModelSpec::ALL.len(), 2);
+        for spec in ModelSpec::ALL {
+            assert_eq!(ModelSpec::from_name(spec.name()), Some(*spec));
+        }
+        assert_eq!(
+            ModelSpec::from_name("bge-small-en-v1.5"),
+            Some(ModelSpec::BgeSmallEnV15)
+        );
+        assert_eq!(ModelSpec::from_name("no-such-model"), None);
+
+        let bge = ModelSpec::BgeSmallEnV15;
+        assert_eq!(bge.dimensions(), 384);
+        assert_eq!(bge.pooling(), Pooling::Cls);
+        assert_ne!(bge.model_id(), ModelSpec::default().model_id());
+        assert!(bge.model_id().contains("bge-small-en-v1.5"));
+    }
+
+    #[test]
+    fn cls_pooling_l2_normalizes_the_cls_vector() {
+        let pooled = cls_pool_normalize(&[3.0, 4.0]);
+        assert!((pooled[0] - 0.6).abs() < 1e-6 && (pooled[1] - 0.8).abs() < 1e-6);
+        let zero = cls_pool_normalize(&[0.0, 0.0]);
+        assert_eq!(zero, vec![0.0, 0.0]);
+    }
+
     /// The single model test: needs network on a cold model cache, so it
     /// never runs in default `cargo test`.
     #[test]
@@ -861,6 +941,24 @@ mod tests {
         assert_eq!(vectors[0].len(), 384);
         // Normalized output: unit L2 norm (sentence-transformers pipelines
         // normalize, and the cosine search on top of it assumes it).
+        let norm: f32 = vectors[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "expected a unit vector, got {norm}"
+        );
+    }
+
+    /// Same contract as above for the BGE entry (network on a cold cache).
+    #[test]
+    #[ignore = "downloads the model weights; run with --ignored"]
+    fn bge_small_embeds_384_dims_and_reports_a_stable_identity() {
+        let a = TractProvider::new(ModelSpec::BgeSmallEnV15, None).unwrap();
+        assert_eq!(a.dimensions(), 384);
+        assert!(a.model_id().contains("bge-small-en-v1.5"));
+
+        let vectors = a.embed(&["borrow checker basics".to_string()]).unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 384);
         let norm: f32 = vectors[0].iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-3,
