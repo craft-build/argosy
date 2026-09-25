@@ -104,6 +104,7 @@ impl EmbeddingProvider for MockEmbedder {
 /// the reference semantics the sqlite backend must match.
 pub(crate) struct MemStore {
     model_id: Option<String>,
+    dimensions: Option<usize>,
     units: HashMap<QualifiedConceptId, EmbeddingUnit>,
     clears: usize,
     removals: Vec<QualifiedConceptId>,
@@ -113,16 +114,28 @@ impl MemStore {
     pub(crate) fn new() -> Self {
         Self {
             model_id: None,
+            dimensions: None,
             units: HashMap::new(),
             clears: 0,
             removals: Vec::new(),
         }
+    }
+
+    /// Pretends the store's contents were embedded at `dims` wide (the
+    /// model-switch read-path guard).
+    pub(crate) fn with_recorded_dimensions(mut self, dims: usize) -> Self {
+        self.dimensions = Some(dims);
+        self
     }
 }
 
 impl VectorStore for MemStore {
     fn model_id(&self) -> Option<&str> {
         self.model_id.as_deref()
+    }
+
+    fn recorded_dimensions(&self) -> Option<usize> {
+        self.dimensions
     }
 
     fn set_model_id(&mut self, id: &str) -> Result<()> {

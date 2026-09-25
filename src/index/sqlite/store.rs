@@ -18,6 +18,10 @@ impl VectorStore for SqliteVecStore {
         self.model_id.as_deref()
     }
 
+    fn recorded_dimensions(&self) -> Option<usize> {
+        self.dimensions
+    }
+
     fn set_model_id(&mut self, id: &str) -> Result<()> {
         self.conn
             .execute(

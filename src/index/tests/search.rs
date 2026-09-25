@@ -5,6 +5,40 @@ use super::*;
 // --- Namespace + facet filters ---
 
 #[test]
+fn search_against_a_store_built_with_a_different_width_is_a_rebuild_hint() {
+    let (_local, _imported, ctx) = fixture();
+    // MockEmbedder emits 128-dim vectors; a store recorded at 64 is the
+    // stale half of a model switch — the error must say what to do.
+    let index = Index::new(
+        MockEmbedder::new(),
+        MemStore::new().with_recorded_dimensions(64),
+    );
+    let err = index
+        .search(&ctx, &Query::unscoped("architecture", 10))
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("different embedding model"), "{msg}");
+    assert!(msg.contains("argosy index build"), "{msg}");
+
+    // Matching width searches normally; unknown width is not an error.
+    let index = Index::new(
+        MockEmbedder::new(),
+        MemStore::new().with_recorded_dimensions(128),
+    );
+    assert!(
+        index
+            .search(&ctx, &Query::unscoped("architecture", 10))
+            .is_ok()
+    );
+    let index = Index::new(MockEmbedder::new(), MemStore::new());
+    assert!(
+        index
+            .search(&ctx, &Query::unscoped("architecture", 10))
+            .is_ok()
+    );
+}
+
+#[test]
 fn namespace_filter_scopes_search_to_the_selected_namespaces() {
     let (_local, _imported, ctx) = fixture();
     let mut index = fresh_index();

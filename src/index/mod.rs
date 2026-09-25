@@ -156,6 +156,14 @@ pub trait VectorStore {
     /// [`VectorStore::clear`].
     fn model_id(&self) -> Option<&str>;
 
+    /// The vector width the store's current contents were built with, or
+    /// `None` when the backend does not record it. Search compares it
+    /// against the provider's width so a model switch surfaces as an
+    /// actionable rebuild hint instead of a backend shape error.
+    fn recorded_dimensions(&self) -> Option<usize> {
+        None
+    }
+
     /// Records the model identity of the store's current contents (set by
     /// [`Index::reconcile`] after a (re)build).
     fn set_model_id(&mut self, id: &str) -> Result<()>;
@@ -519,6 +527,18 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// must be active in `context` — else
     /// [`crate::error::Error::UnknownArgosy`], never a silent empty.
     pub fn search(&self, context: &ProjectContext, query: &Query) -> Result<Vec<SearchHit>> {
+        if self.dimensions_mismatch() {
+            return IndexSnafu {
+                reason: format!(
+                    "index was built with a different embedding model: store holds {}-dim \
+                     vectors, provider `{}` emits {}; run `argosy index build` to rebuild",
+                    self.store.recorded_dimensions().expect("checked above"),
+                    self.provider.model_id(),
+                    self.provider.dimensions()
+                ),
+            }
+            .fail();
+        }
         if let Some(argosies) = &query.filter.argosies {
             for name in argosies {
                 if context.argosy_named(name).is_none() {
@@ -548,6 +568,17 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             .fail();
         }
         self.store.search(&vector, query.k, &query.filter)
+    }
+
+    /// True iff the store's recorded vector width disagrees with the
+    /// provider's — the read-path half of a model switch: the recorded
+    /// model identity drives rebuilds during `reconcile`, but a search
+    /// against a stale store must fail with a rebuild hint, never a
+    /// backend-specific shape error.
+    fn dimensions_mismatch(&self) -> bool {
+        self.store
+            .recorded_dimensions()
+            .is_some_and(|recorded| recorded != self.provider.dimensions())
     }
 }
 
