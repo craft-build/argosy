@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/craft-build/argosy/compare/v0.3.1...v0.4.0) - 2026-09-26
+
+### Added
+
+- *(catalog)* generate a global project catalog
+- *(index)* add bge-small-en-v1.5 to the embedding model registry
+- *(config)* add user-level BarkML configuration and model registry
+
+### Fixed
+
+- *(error)* box large barkml Config source to shrink Error
+- *(index)* apply BGE query-side instruction via embed_query
+- *(index)* refuse search when store width is unrecorded but vectors exist
+- *(index)* fail search with a rebuild hint on model width mismatch
+
+### Other
+
+- *(deps)* update dependencies
+- *(sqlite+tract)* enable multithreaded embedding and synchronous db
+
 ### Added
 
 - *(catalog)* `argosy catalog` regenerates a global catalog of every project
