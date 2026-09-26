@@ -74,6 +74,61 @@ fn read_resource_unknown_concept_and_argosy_error() {
 }
 
 #[test]
+fn read_catalog_resource_renders_the_global_catalog_from_the_state_root() {
+    let scratch = TempDir::new().unwrap();
+    let state_root = scratch.path().join("argosy");
+    let project_root = scratch.path().join("catalog-proj");
+    fs::create_dir_all(&project_root).unwrap();
+    let slot = crate::pull::record_project_root_at(&state_root, &project_root).unwrap();
+    LocalArgosy::init(slot.join("default"), Some("catalog-proj"), None).unwrap();
+
+    let mut rig = rig();
+    rig.state = rig.state.with_catalog_state_root(&state_root);
+
+    let body = rig.state.read_resource(CATALOG_URI).unwrap();
+    assert_eq!(body.mime, "text/markdown");
+    assert!(body.text.contains("# Argosy catalog"), "got {}", body.text);
+    assert!(
+        body.text.contains("catalog-proj (writable)"),
+        "got {}",
+        body.text
+    );
+    assert_eq!(body.uri, CATALOG_URI);
+
+    let uris: Vec<String> = rig
+        .state
+        .list_resources()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.uri)
+        .collect();
+    assert!(uris.contains(&CATALOG_URI.to_string()), "got {uris:?}");
+}
+
+#[test]
+fn read_catalog_resource_with_redaction_override_still_renders() {
+    let scratch = TempDir::new().unwrap();
+    let state_root = scratch.path().join("argosy");
+    let project_root = scratch.path().join("redact-proj");
+    fs::create_dir_all(&project_root).unwrap();
+    let slot = crate::pull::record_project_root_at(&state_root, &project_root).unwrap();
+    LocalArgosy::init(slot.join("default"), Some("redact-proj"), None).unwrap();
+
+    let mut rig = rig();
+    rig.state = rig
+        .state
+        .with_catalog_state_root(&state_root)
+        .force_catalog_redaction();
+
+    let body = rig.state.read_resource(CATALOG_URI).unwrap();
+    assert!(
+        body.text.contains("redact-proj (writable)"),
+        "got {}",
+        body.text
+    );
+}
+
+#[test]
 fn list_resources_advertises_argosys_and_present_indexes() {
     let mut rig = rig();
     let uris: Vec<String> = rig

@@ -29,6 +29,13 @@ pub const LOCAL_ARGOSY_NAME: &str = "default";
 /// `<state>/projects/<slug>/index.db`.
 pub const INDEX_DB_NAME: &str = "index.db";
 
+/// The file inside a project's state-dir slot recording the canonical
+/// project root the slot was created for (`argosy init` / a project-scoped
+/// `argosy pull`). The slug only carries the root's basename and a path
+/// hash, so this sidecar is what lets the catalog map a slot back to its
+/// project and flag slots whose project directory no longer exists.
+pub const SLOT_ROOT_FILE: &str = ".project-root";
+
 /// The user's argosy state root: `$XDG_STATE_HOME/argosy` (falling back
 /// to `~/.local/state/argosy`, and on Windows — where neither
 /// `$XDG_STATE_HOME` nor `$HOME` is set by default — to
@@ -83,6 +90,7 @@ pub fn project_slug(project_root: impl AsRef<Path>) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "project".to_string());
     let digest = crate::hash::sha256_hex(canonical.as_os_str().as_encoded_bytes());
+    // The digest is lowercase ASCII hex, so slicing the first 8 bytes is safe.
     format!("{name}-{}", &digest[..8])
 }
 
@@ -98,6 +106,49 @@ pub fn project_argosy_dir(project_root: impl AsRef<Path>) -> Result<PathBuf> {
 /// inject a tempdir instead of touching `~/.local/state`).
 pub fn project_argosy_dir_at(state_root: &Path, project_root: impl AsRef<Path>) -> PathBuf {
     state_root.join("projects").join(project_slug(project_root))
+}
+
+/// The canonical spelling of `project_root`: its resolved path when the
+/// directory exists, else its absolutized spelling. Using the fallback for
+/// a deleted project keeps its slug (and therefore its slot) stable, so a
+/// stale slot still maps to the path it was created for.
+pub fn canonical_project_root(project_root: impl AsRef<Path>) -> PathBuf {
+    let root = project_root.as_ref();
+    root.canonicalize()
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Records `project_root`'s canonical path in its state-dir slot, creating
+/// the slot directory if needed, and returns the slot path. Called when a
+/// project slot is created (`argosy init` with no path, a project-scoped
+/// `argosy pull`), so the catalog can later map the slot back to its
+/// project root and detect stale slots.
+pub fn record_project_root_at(
+    state_root: &Path,
+    project_root: impl AsRef<Path>,
+) -> Result<PathBuf> {
+    let slot = project_argosy_dir_at(state_root, project_root.as_ref());
+    fs::create_dir_all(&slot).context(IoSnafu { path: slot.clone() })?;
+    let sidecar = slot.join(SLOT_ROOT_FILE);
+    let canonical = canonical_project_root(project_root);
+    fs::write(&sidecar, canonical.to_string_lossy().as_bytes())
+        .context(IoSnafu { path: sidecar })?;
+    Ok(slot)
+}
+
+/// [`record_project_root_at`] against the resolved [`state_dir`].
+pub fn record_project_root(project_root: impl AsRef<Path>) -> Result<PathBuf> {
+    record_project_root_at(&state_dir()?, project_root)
+}
+
+/// The project root recorded for `slot` by [`record_project_root_at`], if
+/// any. Slots created before recording existed (or by a host that wrote the
+/// bundle directly) have no sidecar and return `None`.
+pub fn recorded_project_root(slot: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(slot.join(SLOT_ROOT_FILE)).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
 /// Maps a failed `git` process spawn. A missing binary is a setup problem,
@@ -324,6 +375,31 @@ mod tests {
             "got {}",
             dir.display()
         );
+    }
+
+    #[test]
+    fn record_project_root_writes_and_reads_back_the_canonical_root() {
+        let tmp = TempDir::new().unwrap();
+        let state = tmp.path().join("state/argosy");
+        let project = tmp.path().join("work/myproj");
+        fs::create_dir_all(&project).unwrap();
+
+        let slot = record_project_root_at(&state, &project).unwrap();
+        assert_eq!(slot, project_argosy_dir_at(&state, &project));
+        let recorded = recorded_project_root(&slot).unwrap();
+        assert_eq!(recorded, canonical_project_root(&project));
+        assert!(recorded.is_absolute());
+
+        // A deleted project keeps its spelling (absolutized) so the slot map
+        // stays valid for stale detection.
+        fs::remove_dir_all(&project).unwrap();
+        assert_eq!(recorded_project_root(&slot), Some(recorded));
+    }
+
+    #[test]
+    fn recorded_project_root_is_none_without_a_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(recorded_project_root(tmp.path()), None);
     }
 
     #[test]

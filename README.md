@@ -20,7 +20,9 @@ default `~/.local/state/argosy`):
 <state>/
 ├── global/                   user-wide read-only imports (argosy pull --global)
 │   └── <name>/
+├── README.md                 generated global catalog (argosy catalog --write)
 └── projects/<slug>/          one slot per project, keyed by its root path
+    ├── .project-root         the slot's canonical project root (sidecar)
     ├── default/              the local, writable bundle (argosy init)
     ├── <name>/               pulled read-only imports (argosy pull)
     └── index.db              the derived semantic index (argosy index build)
@@ -28,7 +30,9 @@ default `~/.local/state/argosy`):
 
 `<slug>` is the project directory's name plus a short hash of its
 absolute path (e.g. `craft-1a2b3c4d`), so same-named projects never
-collide.
+collide. The `.project-root` sidecar is written when the slot is created
+(`argosy init`, a project-scoped `argosy pull`), letting the catalog map
+each slot back to its project and flag stale slots.
 
 Each bundle holds four reserved namespaces — `document/` (curated prose),
 `skill/` (harness skills), `memory/` (session learnings, never packaged),
@@ -100,7 +104,8 @@ The same `mcpServers` shape works for Cursor and ZCode; any MCP client that
 can spawn a stdio server can host argosy.
 
 The server exposes semantic `search` / `search_rules` tools, `argosy://`
-resources, a `read` tool for concepts in any active argosy (including
+resources (including the global `argosy://catalog`), a `read` tool for
+concepts in any active argosy (including
 read-only imports), skill listing with trust tiers, and write tools for the
 local argosy's `document/`, `memory/`, and `styleguide/` namespaces. `search`
 hits carry each concept's frontmatter `description`; `search_rules` hits
@@ -170,11 +175,34 @@ grounding and structured findings.
 | `argosy index build` / `status` / `query` | Build/diff/search the semantic index at `<state>/projects/<slug>/index.db`. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
+| `argosy catalog` | Generate the global catalog of every project slot (markdown; `--json` for machine output, `--write` to `<state>/README.md`, `--redact-home` to rewrite home paths as `~`). |
 | `argosy agent reviewer <harness>` | Install the read-only `reviewer` subagent definition into a harness (`opencode`, `claude`, `kiro-cli`); `--force` replaces an existing one. |
 | `argosy mcp` | Serve argosys over MCP on stdio; every tool call selects its project with `cwd` (no argosy needed at startup), sessions open lazily and are cached. |
 
 Most commands print machine-readable JSON with `--json` and quiet down
 with `--quiet`; exit codes: `0` success, `1` failure, `2` usage.
+
+## Catalog
+
+With many repositories and worktrees, the state dir is hard to reason
+about. `argosy catalog` regenerates a read-only index of every project
+slot — never hand-edit it:
+
+```sh
+argosy catalog            # markdown to stdout
+argosy catalog --json     # machine-readable
+argosy catalog --write    # materialize <state>/README.md
+```
+
+For each project it reports the canonical root, slug and path hash, the
+local (writable) bundle and its read-only imports, the active global
+argosies, per-namespace content counts, semantic-index status, and
+duplicate concept ids across active bundles. A slot whose recorded
+project directory has disappeared is flagged stale. `--redact-home`
+(or `catalog.redact_home` in `argosy.bml`) rewrites home-directory
+prefixes as `~`. Coding agents can read the same document through MCP at
+`argosy://catalog`. The catalog file lives outside every bundle, so
+packaging never includes it.
 
 ## Library
 

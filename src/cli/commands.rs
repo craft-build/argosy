@@ -21,6 +21,9 @@ pub(super) fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
     let (path, dir_name) = if default_project_path {
         let cwd = current_dir()?;
         let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+        // Record the slot's canonical project root so the catalog can map it
+        // back and flag stale slots.
+        argosy::pull::record_project_root(&cwd)?;
         (
             argosy::pull::project_argosy_dir(&cwd)?.join(argosy::pull::LOCAL_ARGOSY_NAME),
             name,
@@ -57,7 +60,11 @@ pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result
     let root = if global {
         argosy::pull::global_argosy_dir()?
     } else {
-        argosy::pull::project_argosy_dir(current_dir()?)?
+        // A project-scoped pull creates (or joins) the project's slot:
+        // record its canonical root for the catalog.
+        let cwd = current_dir()?;
+        argosy::pull::record_project_root(&cwd)?;
+        argosy::pull::project_argosy_dir(cwd)?
     };
     let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
     let dest = root.join(&args.name);
@@ -255,6 +262,36 @@ pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> 
             })
         }
     }
+}
+
+/// Builds and prints (or writes) the global catalog. Read-only: the scan
+/// opens bundles and index databases read-only; only `--write` touches disk,
+/// and only the catalog file at the state root.
+pub(super) fn cmd_catalog(out: &Output, config: &Config, args: &CatalogArgs) -> Result<ExitCode> {
+    use argosy::catalog::{CatalogOptions, redact_home, render_markdown, write};
+
+    let state_root = argosy::pull::state_dir()?;
+    let mut catalog = argosy::catalog::build(&state_root, &CatalogOptions::from_config(config))?;
+    let redact = args.redact_home.unwrap_or(config.catalog.redact_home);
+    if redact && let Some(home) = argosy::config::home_dir() {
+        redact_home(&mut catalog, &home);
+    }
+
+    let written = if args.write {
+        Some(write(&state_root, &catalog)?)
+    } else {
+        None
+    };
+
+    if out.json {
+        out.json(&catalog)?;
+    } else if written.is_none() {
+        print!("{}", render_markdown(&catalog));
+    }
+    if let Some(path) = written {
+        out.note(&format!("wrote catalog to {}", path.display()));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Reconciles the project's index after `convert styleguide` wrote rules
@@ -702,6 +739,10 @@ pub(super) fn cmd_config(out: &Output, _args: &ConfigArgs, config: &Config) -> R
                 argosy::config::PackageFormatConfig::TarGz => "tar.gz",
             },
             config.package.include_index
+        ));
+        out.note(&format!(
+            "catalog: redact_home={}",
+            config.catalog.redact_home
         ));
     }
     Ok(ExitCode::SUCCESS)

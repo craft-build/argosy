@@ -5,6 +5,7 @@
 //! downloaded model weights are `#[ignore]`d like the backend tests.
 
 mod agent;
+mod catalog;
 mod common;
 mod convert;
 mod help;

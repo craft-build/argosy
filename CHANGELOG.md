@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(catalog)* `argosy catalog` regenerates a global catalog of every project
+  slot (`--json`, `--write` to `<state>/README.md`, `--redact-home`); the
+  same document is served over MCP as `argosy://catalog`, which honors the
+  `catalog.redact_home` config (redacting when the config cannot be read).
+- *(catalog)* project slots record their canonical root in a `.project-root`
+  sidecar (`argosy init` / project-scoped `argosy pull`), so slots whose
+  project directory is gone are flagged stale and duplicate concept ids
+  across a slot's active bundles are reported.
+
 ## [0.3.1](https://github.com/craft-build/argosy/compare/v0.3.0...v0.3.1) - 2026-09-24
 
 ### Fixed

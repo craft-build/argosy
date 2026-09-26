@@ -29,6 +29,9 @@
 //!     format = "dir"        // or "tar.gz"
 //!     include_index = false
 //! }
+//! catalog {
+//!     redact_home = false
+//! }
 //! ```
 //!
 //! Paths honor `$XDG_CONFIG_HOME` (falling back to `~/.config`). Location
@@ -80,6 +83,8 @@ pub struct Config {
     pub index: IndexConfig,
     /// Defaults for `argosy package`.
     pub package: PackageConfig,
+    /// Defaults for `argosy catalog`.
+    pub catalog: CatalogConfig,
 }
 
 /// Output defaults for the CLI (`--quiet` / `--json`).
@@ -156,6 +161,14 @@ impl Default for PackageConfig {
             include_index: false,
         }
     }
+}
+
+/// Defaults for `argosy catalog`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CatalogConfig {
+    /// Rewrite home-directory path prefixes as `~` in generated catalogs.
+    pub redact_home: bool,
 }
 
 /// The configurable artifact format.
@@ -316,6 +329,12 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+/// The user's home directory (`$HOME`, falling back to `%USERPROFILE%`).
+/// Shared by configuration `~` expansion and catalog path redaction.
+pub fn home_dir() -> Option<PathBuf> {
+    home()
 }
 
 #[cfg(test)]

@@ -84,7 +84,9 @@ fn tool_error(err: &Error) -> CallToolResult {
 /// Base server instructions: the knowledge-tool posture (also the full
 /// text when the `code-tools` feature is compiled out).
 const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concepts via argosy:// resources; \
-                 manage documents, memory, and styleguide rules of the local argosy via \
+                 the argosy://catalog resource lists every project under the state dir (roots, \
+                 imports, counts, index status). manage documents, memory, and styleguide rules \
+                 of the local argosy via \
                  tools. The server hosts any number of projects: every tool call selects \
                  its project with `cwd` (the project root; each project's argosys live \
                  under the user state dir, keyed by that root, outside the project tree); \

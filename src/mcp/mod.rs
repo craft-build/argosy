@@ -28,6 +28,10 @@ pub use tools::tool_definitions;
 /// versions and local/imported roles.
 pub const ARGOSYS_URI: &str = "argosy://_argosys";
 
+/// The `argosy://catalog` pseudo-resource: the global catalog of every
+/// project slot under the argosy state dir (see [`crate::catalog`]).
+pub const CATALOG_URI: &str = "argosy://catalog";
+
 /// Suffix of the `argosy://<name>/_index` pseudo-resource: a bundle's root
 /// `index.md`.
 pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";

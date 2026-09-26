@@ -67,6 +67,7 @@ MCP distinguishes **Resources** (addressable, read-oriented data) from **Tools**
 | Write or delete a memory concept | `MEM-1`–`MEM-4` (write/delete) | Tool | Mutating, so a Tool rather than a Resource |
 | Promote memory into a document or styleguide rule | `PROM-1`–`PROM-4` | Tool | The MCP-side trigger for §6's promotion pathway (`PROM-5` leaves the trigger unspecified; this is one valid choice) |
 | List active argosys | §9 | Resource | Distinguishes the local argosy from imported ones (`MUL-5`) |
+| Global project catalog | §9 | Resource | `argosy://catalog`: every project slot under the state dir, with roots, imports, counts, index status, and stale slots |
 | Browse an argosy's contents | OKF §8 | Resource | Exposes a bundle's `index.md`, where present |
 | Search styleguide rules | §5.4, `QRY-1`–`QRY-3` | Tool | Semantic match against code or a change under review, filtered by `language`/`category` |
 | Read a styleguide rule | `QRY-4` | Resource | Same URI scheme as other concepts |

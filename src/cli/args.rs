@@ -164,6 +164,20 @@ pub(super) struct ConvertStyleguideArgs {
 #[derive(Args)]
 pub(super) struct ConfigArgs {}
 
+/// Generate the global catalog of every project slot under the argosy state
+/// dir (read-only scan; regenerate rather than hand-edit).
+#[derive(Args)]
+pub(super) struct CatalogArgs {
+    /// Write the markdown catalog to `<state>/README.md`.
+    #[arg(long)]
+    pub(super) write: bool,
+
+    /// Rewrite home-directory path prefixes as `~` (default: the configured
+    /// `catalog.redact_home`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) redact_home: Option<bool>,
+}
+
 /// Install agent definitions for a coding harness.
 #[derive(Args)]
 pub(super) struct AgentArgs {

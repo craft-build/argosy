@@ -14,7 +14,7 @@ use crate::local::{LocalArgosy, PromotionTarget};
 
 use super::params::*;
 use super::reports::*;
-use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, UNVERIFIED};
+use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, UNVERIFIED};
 
 /// One opened project: its argosy set and its semantic index, reconciled
 /// after every mutating tool — a written or deleted concept is visible to
@@ -42,6 +42,13 @@ pub type SessionFactory<P, S> = Arc<dyn Fn(&Path) -> Result<ProjectSession<P, S>
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     factory: SessionFactory<P, S>,
     sessions: HashMap<PathBuf, ProjectSession<P, S>>,
+    /// Overrides the argosy state root the `argosy://catalog` resource scans
+    /// (tests inject a tempdir; production resolves [`crate::pull::state_dir`]).
+    catalog_state_root: Option<PathBuf>,
+    /// Overrides home redaction for the `argosy://catalog` resource. `None`
+    /// derives it from user configuration (see [`Self::with_catalog_state_root`]
+    /// usage and `read_catalog`).
+    catalog_redact_home: Option<bool>,
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
@@ -495,12 +502,20 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// enumerate; clients discover them via `_index` listings and resource
     /// templates.
     pub fn list_resources(&self) -> Result<Vec<ResourceDescriptor>> {
-        let mut resources = vec![ResourceDescriptor {
-            uri: ARGOSYS_URI.to_string(),
-            name: "Active argosys".to_string(),
-            description: "Every active argosy: name, version, and whether it is the writable local or a read-only import.".to_string(),
-            mime: "application/json",
-        }];
+        let mut resources = vec![
+            ResourceDescriptor {
+                uri: ARGOSYS_URI.to_string(),
+                name: "Active argosys".to_string(),
+                description: "Every active argosy: name, version, and whether it is the writable local or a read-only import.".to_string(),
+                mime: "application/json",
+            },
+            ResourceDescriptor {
+                uri: CATALOG_URI.to_string(),
+                name: "Global catalog".to_string(),
+                description: "Every project slot under the argosy state dir: canonical root, local and imported argosies, content counts, index status, and stale slots (markdown).".to_string(),
+                mime: "text/markdown",
+            },
+        ];
         for info in self.argosy_infos() {
             let index_path = self
                 .context
@@ -555,7 +570,24 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         Self {
             factory,
             sessions: HashMap::new(),
+            catalog_state_root: None,
+            catalog_redact_home: None,
         }
+    }
+
+    /// Overrides the state root the `argosy://catalog` resource scans.
+    pub fn with_catalog_state_root(mut self, state_root: impl Into<PathBuf>) -> Self {
+        self.catalog_state_root = Some(state_root.into());
+        self
+    }
+
+    /// Forces home redaction for the `argosy://catalog` resource on,
+    /// overriding user configuration. There is deliberately no way to
+    /// force it off: the config is the only path to disabling redaction,
+    /// so an embedding host cannot leak absolute home paths by mistake.
+    pub fn force_catalog_redaction(mut self) -> Self {
+        self.catalog_redact_home = Some(true);
+        self
     }
 
     /// The session for `cwd` (the project root), opening it on first use.
@@ -661,9 +693,45 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// Reads an `argosy://` resource of the process working directory's
-    /// project.
+    /// project, or the global `argosy://catalog` (which needs no project).
     pub fn read_resource(&mut self, uri: &str) -> Result<ResourceBody> {
+        if uri == CATALOG_URI {
+            return self.read_catalog(uri);
+        }
         self.spawn_session()?.read_resource(uri)
+    }
+
+    /// Builds the global catalog and renders it as markdown. Best-effort
+    /// configuration: a malformed config still yields a catalog (without a
+    /// model-mismatch check). Home paths are redacted per user configuration
+    /// — failing closed to redaction when the config cannot be read, since
+    /// served text is the channel most likely to be pasted to a third party.
+    fn read_catalog(&self, uri: &str) -> Result<ResourceBody> {
+        let state_root = match &self.catalog_state_root {
+            Some(root) => root.clone(),
+            None => crate::pull::state_dir()?,
+        };
+        let config = crate::config::Config::load();
+        let options = config
+            .as_ref()
+            .map(crate::catalog::CatalogOptions::from_config)
+            .unwrap_or_default();
+        let redact = self.catalog_redact_home.unwrap_or_else(|| {
+            config
+                .as_ref()
+                .map(|c| c.catalog.redact_home)
+                .unwrap_or(true)
+        });
+        let mut catalog = crate::catalog::build(&state_root, &options)?;
+        if redact && let Some(home) = crate::config::home_dir() {
+            crate::catalog::redact_home(&mut catalog, &home);
+        }
+        Ok(ResourceBody {
+            uri: uri.to_string(),
+            text: crate::catalog::render_markdown(&catalog),
+            mime: "text/markdown",
+            meta: None,
+        })
     }
 
     /// Lists the browsable resources of the process working directory's

@@ -14,6 +14,17 @@ fn help_documents_the_package_memory_guarantee() {
         .stdout(predicate::str::contains("NEVER included"));
 }
 
+#[test]
+fn help_documents_the_catalog_write_target_and_redaction() {
+    argosy_bin()
+        .args(["catalog", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("state dir"))
+        .stdout(predicate::str::contains("README.md"))
+        .stdout(predicate::str::contains("redact_home"));
+}
+
 #[cfg(feature = "mcp")]
 #[test]
 fn help_documents_the_mcp_stdio_transport_and_model_download() {
