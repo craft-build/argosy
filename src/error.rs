@@ -51,8 +51,13 @@ pub enum Error {
     Validation { reason: String },
 
     /// The user-level BarkML configuration could not be read or parsed.
+    ///
+    /// `barkml::Error` is large; it is boxed to keep `Error` small.
     #[snafu(display("failed to load configuration: {source}"))]
-    Config { source: barkml::Error },
+    Config {
+        #[snafu(source(from(barkml::Error, Box::new)))]
+        source: Box<barkml::Error>,
+    },
 
     /// Serving infrastructure failed (async runtime startup, transport
     /// handshake, serve loop) — distinct from validation so callers can

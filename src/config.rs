@@ -267,34 +267,33 @@ impl Config {
                     .to_string(),
             });
         }
-        if let Some(name) = &self.paths.index_db_name {
-            if name.is_empty()
+        if let Some(name) = &self.paths.index_db_name
+            && (name.is_empty()
                 || name.contains('/')
                 || name.contains('\\')
                 || name == "."
-                || name == ".."
-            {
-                return Err(crate::error::Error::Validation {
-                    reason: format!(
-                        "configuration: paths.index_db_name must be a plain file name, not `{name}`"
-                    ),
-                });
-            }
+                || name == "..")
+        {
+            return Err(crate::error::Error::Validation {
+                reason: format!(
+                    "configuration: paths.index_db_name must be a plain file name, not `{name}`"
+                ),
+            });
         }
         #[cfg(feature = "default-index")]
-        if let Some(model) = &self.index.model {
-            if crate::index::tract::ModelSpec::from_name(model).is_none() {
-                let known: Vec<&str> = crate::index::tract::ModelSpec::ALL
-                    .iter()
-                    .map(|spec| spec.name())
-                    .collect();
-                return Err(crate::error::Error::Validation {
-                    reason: format!(
-                        "configuration: unknown index.model `{model}` (known models: {})",
-                        known.join(", ")
-                    ),
-                });
-            }
+        if let Some(model) = &self.index.model
+            && crate::index::tract::ModelSpec::from_name(model).is_none()
+        {
+            let known: Vec<&str> = crate::index::tract::ModelSpec::ALL
+                .iter()
+                .map(|spec| spec.name())
+                .collect();
+            return Err(crate::error::Error::Validation {
+                reason: format!(
+                    "configuration: unknown index.model `{model}` (known models: {})",
+                    known.join(", ")
+                ),
+            });
         }
         Ok(())
     }

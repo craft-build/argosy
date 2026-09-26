@@ -248,9 +248,11 @@ fn build_entry(slot: &Path, globals: &[ScannedBundle], options: &CatalogOptions)
     let hash = match &root {
         Some(root) => {
             let expected = &crate::hash::sha256_hex(root.as_os_str().as_encoded_bytes())[..8];
-            slug.ends_with(&format!("-{expected}"))
-                .then(|| expected.to_string())
-                .unwrap_or_default()
+            if slug.ends_with(&format!("-{expected}")) {
+                expected.to_string()
+            } else {
+                Default::default()
+            }
         }
         None => split_slug(&slug).1.to_string(),
     };
