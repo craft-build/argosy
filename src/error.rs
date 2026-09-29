@@ -127,6 +127,13 @@ pub enum Error {
     #[snafu(display("embedding model failed: {reason}"))]
     Embedding { reason: String },
 
+    /// A Jev-compatible decision-provider call failed: no endpoint is
+    /// enabled, the endpoint is unreachable, or it returned an unexpected
+    /// response. The reason names the endpoint and the failure so the caller
+    /// can act (start `laya-serve`, fix `decision.endpoint`, disable it).
+    #[snafu(display("decision provider failed: {reason}"))]
+    Decision { reason: String },
+
     /// A bundle file was a symlink whose resolved target escapes the bundle
     /// root. Packaging refuses to follow it (the same root-containment
     /// rule as the readers): materializing it would smuggle outside content

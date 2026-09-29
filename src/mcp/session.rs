@@ -12,6 +12,11 @@ use crate::error::{Error, Result};
 use crate::index::{EmbeddingProvider, Filter, Index, Query, VectorStore};
 use crate::local::{LocalArgosy, PromotionTarget};
 
+#[cfg(feature = "decision")]
+use crate::decision::{
+    ChoiceResolution, DecisionProvider, DecisionRequest, Question, resolve_choice,
+};
+
 use super::params::*;
 use super::reports::*;
 use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, UNVERIFIED};
@@ -49,6 +54,11 @@ pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     /// derives it from user configuration (see [`Self::with_catalog_state_root`]
     /// usage and `read_catalog`).
     catalog_redact_home: Option<bool>,
+    /// The process-global decision endpoint, shared across every project
+    /// session (one user, one endpoint). [`crate::decision::Disabled`] until
+    /// configured via [`Self::with_decision`].
+    #[cfg(feature = "decision")]
+    decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
@@ -96,6 +106,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             tags: hit.meta.tags,
             language: hit.meta.language,
             category: hit.meta.category,
+            applicability: None,
             good: None,
             bad: None,
         }
@@ -176,6 +187,125 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             hit.bad = rule.bad_examples().map(str::to_string);
         }
         Ok(report)
+    }
+
+    /// Retrieval augmented by the decision endpoint: embed the question,
+    /// retrieve the top candidates, then, when a decision endpoint is
+    /// enabled, ask it which candidate (if any) answers the question. When
+    /// decisions are disabled, the endpoint is unavailable, or no candidate
+    /// matches, returns the embedding hits alone (`mode: "search"`); a
+    /// decision failure never fails the call.
+    #[cfg(feature = "decision")]
+    pub fn ask(
+        &self,
+        params: AskParams,
+        decision: std::sync::Arc<dyn DecisionProvider>,
+    ) -> Result<AskReport> {
+        use std::collections::BTreeMap;
+
+        // The endpoint's `choice` degrades past ~20 options; keep the
+        // candidate set small.
+        const MAX_ASK_OPTIONS: usize = 10;
+
+        let k = params.k.unwrap_or(self.default_k).max(1);
+        let query = Query {
+            text: params.query.clone(),
+            k,
+            filter: Filter::default(),
+        };
+        let hits = self.index.search(&self.context, &query)?;
+        let candidates: Vec<SearchHitOut> = hits.into_iter().map(Self::hit_out).collect();
+
+        if !decision.is_enabled() {
+            return Ok(AskReport {
+                query: params.query,
+                mode: "search",
+                selected: None,
+                note: Some("decision endpoint disabled; returning embedding hits only".to_string()),
+                candidates,
+            });
+        }
+        if candidates.is_empty() {
+            return Ok(AskReport {
+                query: params.query,
+                mode: "search",
+                selected: None,
+                note: Some("no candidates retrieved".to_string()),
+                candidates,
+            });
+        }
+
+        // Neutral option labels; the concept's URI and description carry the
+        // meaning the model reads.
+        let mut labels: Vec<(String, String)> = Vec::new();
+        let mut criteria: BTreeMap<String, String> = BTreeMap::new();
+        for (index, hit) in candidates.iter().take(MAX_ASK_OPTIONS).enumerate() {
+            let label = char::from(b'A' + index as u8).to_string();
+            let description = hit.description.as_deref().unwrap_or("(no description)");
+            criteria.insert(label.clone(), format!("{} — {description}", hit.uri));
+            labels.push((label, hit.uri.clone()));
+        }
+        criteria.insert(
+            "NONE".to_string(),
+            "none of the documents answer the question".to_string(),
+        );
+
+        let state = serde_json::json!({ "question": params.query.clone() });
+        let request = DecisionRequest::new(state).ask(
+            "answer",
+            Question::choice(
+                "Which document answers the question? Choose NONE if none do.",
+                criteria,
+            ),
+        );
+
+        match decision.decide(&request) {
+            Ok(response) => {
+                let answer_confidence = response.answer_confidence("answer");
+                match resolve_choice(&response, "answer", "NONE", &labels) {
+                    ChoiceResolution::Selected { label, value } => Ok(AskReport {
+                        query: params.query,
+                        mode: "selected",
+                        selected: Some(AskSelection {
+                            uri: value,
+                            label,
+                            answer_confidence,
+                        }),
+                        note: None,
+                        candidates,
+                    }),
+                    ChoiceResolution::None => Ok(AskReport {
+                        query: params.query,
+                        mode: "search",
+                        selected: None,
+                        note: Some(
+                            "decision endpoint found no document answering the question"
+                                .to_string(),
+                        ),
+                        candidates,
+                    }),
+                    ChoiceResolution::Unknown(label) => Ok(AskReport {
+                        query: params.query,
+                        mode: "search",
+                        selected: None,
+                        note: Some(format!(
+                            "decision endpoint returned an unknown option `{label}`"
+                        )),
+                        candidates,
+                    }),
+                }
+            }
+            // Fail-open: an unavailable endpoint degrades to embedding hits.
+            Err(err) => Ok(AskReport {
+                query: params.query,
+                mode: "search",
+                selected: None,
+                note: Some(format!(
+                    "decision endpoint unavailable; returning embedding hits: {err}"
+                )),
+                candidates,
+            }),
+        }
     }
 
     /// Every skill across all active argosys, shadowed ones annotated, each
@@ -572,6 +702,8 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
             sessions: HashMap::new(),
             catalog_state_root: None,
             catalog_redact_home: None,
+            #[cfg(feature = "decision")]
+            decision: std::sync::Arc::new(crate::decision::Disabled),
         }
     }
 
@@ -588,6 +720,22 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     pub fn force_catalog_redaction(mut self) -> Self {
         self.catalog_redact_home = Some(true);
         self
+    }
+
+    /// Installs the process-global decision provider shared by every session.
+    #[cfg(feature = "decision")]
+    pub fn with_decision(
+        mut self,
+        decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
+    ) -> Self {
+        self.decision = decision;
+        self
+    }
+
+    /// The shared decision provider.
+    #[cfg(feature = "decision")]
+    pub fn decision(&self) -> &std::sync::Arc<dyn crate::decision::DecisionProvider> {
+        &self.decision
     }
 
     /// The session for `cwd` (the project root), opening it on first use.
@@ -622,9 +770,28 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.session(&params.cwd)?.search(params)
     }
 
-    /// The review-flow query for the project named by `params.cwd`.
+    /// The review-flow query for the project named by `params.cwd`. When a
+    /// decision endpoint is enabled, candidate rules are reranked by
+    /// applicability (advisory; a failure leaves the embedding order).
     pub fn search_rules(&mut self, params: RulesParams) -> Result<SearchReport> {
-        self.session(&params.cwd)?.search_rules(params)
+        #[cfg(feature = "decision")]
+        let query = params.query.clone();
+        let mut report = self.session(&params.cwd)?.search_rules(params)?;
+        #[cfg(feature = "decision")]
+        {
+            let decision = self.decision();
+            if report.hits.len() > 1 && decision.is_enabled() {
+                rerank_rules(decision.as_ref(), &query, &mut report.hits);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Decision-augmented retrieval for the project named by `params.cwd`.
+    #[cfg(feature = "decision")]
+    pub fn ask(&mut self, params: AskParams) -> Result<AskReport> {
+        let decision = std::sync::Arc::clone(&self.decision);
+        self.session(&params.cwd)?.ask(params, decision)
     }
 
     /// Every skill of the project named by `params.cwd`.
@@ -738,5 +905,150 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     /// project.
     pub fn list_resources(&mut self) -> Result<Vec<ResourceDescriptor>> {
         self.spawn_session()?.list_resources()
+    }
+}
+
+/// Reorders styleguide hits by a decision endpoint's applicability score
+/// (advisory): one `noul` question per candidate over a shared state, so all
+/// candidates are scored in one forward pass. On any failure the embedding
+/// order is left untouched.
+#[cfg(feature = "decision")]
+fn rerank_rules(
+    decision: &dyn crate::decision::DecisionProvider,
+    query: &str,
+    hits: &mut [SearchHitOut],
+) {
+    use crate::decision::{DecisionRequest, Question};
+
+    // Keep the candidate set and the prompt bounded.
+    const MAX_RERANK: usize = 8;
+    let n = hits.len().min(MAX_RERANK);
+    if n == 0 {
+        return;
+    }
+
+    let mut rules = serde_json::Map::new();
+    for hit in hits.iter().take(n) {
+        let mut text = hit.description.clone().unwrap_or_default();
+        if let Some(good) = &hit.good {
+            text.push_str("\nExample that follows the rule:\n");
+            text.push_str(good);
+        }
+        rules.insert(hit.uri.clone(), serde_json::Value::String(text));
+    }
+    let state = serde_json::json!({
+        "code_under_review": query,
+        "candidate_rules": serde_json::Value::Object(rules),
+    });
+
+    let mut request = DecisionRequest::new(state);
+    for (index, hit) in hits.iter().take(n).enumerate() {
+        request = request.ask(
+            format!("rule_{index}"),
+            Question::noul(format!(
+                "Does rule `{}` apply to the code under review? Report the probability that it applies.",
+                hit.uri
+            )),
+        );
+    }
+
+    let Ok(response) = decision.decide(&request) else {
+        return;
+    };
+    for (index, hit) in hits.iter_mut().take(n).enumerate() {
+        // A `noul` answer carries its probability under its own key.
+        hit.applicability = response
+            .primary(&format!("rule_{index}"))
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32);
+    }
+    hits.sort_by(|a, b| {
+        b.applicability
+            .partial_cmp(&a.applicability)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+#[cfg(all(test, feature = "decision"))]
+mod tests {
+    use super::*;
+    use crate::decision::{DecisionProvider, DecisionRequest, DecisionResponse};
+
+    struct FixedDecision {
+        answers: serde_json::Value,
+    }
+
+    impl DecisionProvider for FixedDecision {
+        fn is_enabled(&self) -> bool {
+            true
+        }
+
+        fn decide(&self, _request: &DecisionRequest) -> Result<DecisionResponse> {
+            Ok(serde_json::from_value(serde_json::json!({ "answers": self.answers })).unwrap())
+        }
+    }
+
+    fn hit(uri: &str, description: &str) -> SearchHitOut {
+        SearchHitOut {
+            uri: uri.to_string(),
+            argosy: "a".to_string(),
+            namespace: "styleguide".to_string(),
+            concept_id: uri.to_string(),
+            score: 0.0,
+            concept_type: Some("Styleguide Rule".to_string()),
+            description: Some(description.to_string()),
+            tags: Vec::new(),
+            language: None,
+            category: None,
+            applicability: None,
+            good: None,
+            bad: None,
+        }
+    }
+
+    #[test]
+    fn rerank_reorders_by_applicability() {
+        let decision = FixedDecision {
+            answers: serde_json::json!({
+                "rule_0": {"noul": 0.2},
+                "rule_1": {"noul": 0.9},
+                "rule_2": {"noul": 0.5},
+            }),
+        };
+        let mut hits = vec![
+            hit("u0", "rule zero"),
+            hit("u1", "rule one"),
+            hit("u2", "rule two"),
+        ];
+        rerank_rules(&decision, "some code", &mut hits);
+        assert_eq!(
+            hits.iter().map(|h| h.uri.as_str()).collect::<Vec<_>>(),
+            ["u1", "u2", "u0"],
+            "ordered by descending applicability"
+        );
+        assert_eq!(hits[0].applicability, Some(0.9));
+        assert_eq!(hits[2].applicability, Some(0.2));
+    }
+
+    #[test]
+    fn rerank_leaves_order_when_the_endpoint_errors() {
+        struct Failing;
+        impl DecisionProvider for Failing {
+            fn is_enabled(&self) -> bool {
+                true
+            }
+            fn decide(&self, _request: &DecisionRequest) -> Result<DecisionResponse> {
+                Err(Error::Decision {
+                    reason: "down".to_string(),
+                })
+            }
+        }
+        let mut hits = vec![hit("u0", "a"), hit("u1", "b")];
+        rerank_rules(&Failing, "code", &mut hits);
+        assert_eq!(
+            hits.iter().map(|h| h.uri.as_str()).collect::<Vec<_>>(),
+            ["u0", "u1"]
+        );
+        assert!(hits.iter().all(|h| h.applicability.is_none()));
     }
 }

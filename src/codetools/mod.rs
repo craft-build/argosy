@@ -110,6 +110,17 @@ impl CodeTools {
             .or_insert_with(|| RepoMap::new(root))
             .clone()
     }
+
+    /// Installs the process-global decision endpoint used for advisory
+    /// review-finding scoring.
+    #[cfg(feature = "decision")]
+    pub fn with_decision(
+        mut self,
+        decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
+    ) -> Self {
+        self.reviews.set_decision(decision);
+        self
+    }
 }
 
 /// Builds a tool error from any message, phrased for the LLM caller.

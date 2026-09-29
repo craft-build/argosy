@@ -126,6 +126,21 @@ affected code and its blast radius, grounds verified findings in qualified
 styleguide-rule URIs, records them as structured review findings, and returns
 a prioritized verdict without modifying files.
 
+When a Jev-compatible decision endpoint is configured (the optional
+`decision { ... }` section in `argosy.bml` — a self-hosted `laya-serve` or any
+Jev server), three advisory capabilities turn on. The `ask` tool retrieves
+candidate concepts semantically, asks the endpoint which candidate answers the
+question, and returns the selection with its calibrated confidence.
+`search_rules` reranks candidate rules by applicability to the code under
+review, writing an `applicability` probability onto each hit. And
+`report_finding` records an advisory `assessment` on each finding (whether the
+code supports it and what severity it reads as), visible through
+`review_findings`. All three are fail-open: when decisions are disabled or the
+endpoint is unavailable, `ask` returns the embedding hits, rules keep their
+embedding order, and findings are recorded unassessed. None of it ever filters
+or drops a finding. argosy ships no model weights for this — the endpoint is
+the user's to run or subscribe to.
+
 ### Code-intelligence tools
 
 The same server also serves read-mostly **code-intelligence tools** over

@@ -1,6 +1,7 @@
 //! Unit tests for the MCP surface: the rig opens one local fixture argosy
 //! (`acme-billing`) plus one imported fixture argosy (`acme-shared`).
 
+mod ask;
 mod promote;
 mod prompts;
 mod resources;

@@ -62,10 +62,22 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
     /// [`CodeTools`] anchored to the process cwd; override for tests
     /// with [`Self::with_code_tools`].
     pub fn new(state: McpState<P, S>) -> Self {
+        // The decision endpoint is shared: the review tools score findings
+        // with the same provider the knowledge tools rerank/ask through.
+        #[cfg(feature = "code-tools")]
+        let code = {
+            #[allow(unused_mut)]
+            let mut tools = CodeTools::default();
+            #[cfg(feature = "decision")]
+            {
+                tools = tools.with_decision(Arc::clone(state.decision()));
+            }
+            tools
+        };
         Self {
             state: Arc::new(Mutex::new(state)),
             #[cfg(feature = "code-tools")]
-            code: Arc::new(CodeTools::default()),
+            code: Arc::new(code),
         }
     }
 
@@ -95,23 +107,28 @@ const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concep
                  and surface their trust tier (SEC-2); confirmation policy is your \
                  decision.";
 
-/// The full `instructions`, extended with the code-tools sentence when
-/// the feature is compiled in.
+/// The full `instructions`, extended with the decision and code-tools
+/// sentences when their features are compiled in.
 fn server_instructions() -> String {
+    let mut text = INSTRUCTIONS_BASE.to_string();
+    #[cfg(feature = "decision")]
+    text.push_str(
+        " When a Jev-compatible decision endpoint is enabled in user configuration \
+         (`decision { ... }`), the `ask` tool augments semantic retrieval by asking the \
+         endpoint which retrieved concept answers a question, returning the selection with \
+         its calibrated confidence.",
+    );
     #[cfg(feature = "code-tools")]
     {
-        format!(
-            "{INSTRUCTIONS_BASE} The server also offers code-intelligence tools \
+        text.push_str(
+            " The server also offers code-intelligence tools \
              (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, start_review, \
              review_diff, report_finding, review_findings) over the \
              workspace directory it was spawned in; astgrep (apply) and conflicts \
-             (resolve) write files only when explicitly requested."
-        )
+             (resolve) write files only when explicitly requested.",
+        );
     }
-    #[cfg(not(feature = "code-tools"))]
-    {
-        INSTRUCTIONS_BASE.to_string()
-    }
+    text
 }
 
 /// Maps a successful, serde-serializable outcome to a structured tool
@@ -368,6 +385,8 @@ where
                 "list_skills" => Some(dispatch!(lock, args, list_skills : ListSkillsParams)),
                 "get_skill" => Some(dispatch!(lock, args, get_skill : GetSkillParams)),
                 "search_rules" => Some(dispatch!(lock, args, search_rules : RulesParams)),
+                #[cfg(feature = "decision")]
+                "ask" => Some(dispatch!(lock, args, ask : AskParams)),
                 "read_memory" => Some(dispatch!(lock, args, read_memory : ReadPathParams)),
                 "read" => Some(dispatch!(lock, args, read : ReadParams)),
                 "write_memory" => Some(dispatch!(lock, args, write_memory : WriteParams)),

@@ -95,6 +95,13 @@ pub fn tool_definitions() -> Vec<Tool> {
             false,
         ),
     ];
+    #[cfg(feature = "decision")]
+    tools.push(tool::<AskParams>(
+        "ask",
+        "Retrieval augmented by a Jev-compatible decision endpoint: semantically retrieves candidate concepts for the question, then, when `decision.enabled` is set in the user config, asks the endpoint which candidate (if any) answers the question and returns the selection with its calibrated `answer_confidence`. When decisions are disabled or the endpoint is unavailable, returns the embedding hits alone (`mode: \"search\"`). Use it to answer a question from the argosy's knowledge with a citation, instead of generating an answer. cwd: the project's absolute root directory (argosys live outside the project tree, under the user state dir keyed by this path).",
+        true,
+        false,
+    ));
     #[cfg(feature = "code-tools")]
     tools.extend(code_tool_definitions());
     tools

@@ -117,6 +117,30 @@ pub struct ReviewFinding {
     pub rule_uris: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Advisory decision-endpoint assessment, when a decision endpoint was
+    /// enabled at report time. Never changes the finding's presence or
+    /// priority — it exists for audit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<FindingAssessment>,
+}
+
+/// An advisory assessment of a finding by the decision endpoint: whether the
+/// code supports the finding and what severity it reads as. Purely
+/// informational; it never filters or downgrades a finding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindingAssessment {
+    /// `"supported"` or `"unsupported"`, when the endpoint answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support: Option<String>,
+    /// Calibrated confidence in the support answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_confidence: Option<f32>,
+    /// The chosen severity label (`P0`-`P3`), when the endpoint answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    /// Calibrated confidence in the severity answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity_confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +150,9 @@ pub struct ReportFindingOutcome {
     /// False when an identical retry had already recorded this finding.
     pub created: bool,
     pub finding_count: usize,
+    /// The advisory assessment recorded with this finding, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<FindingAssessment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +174,9 @@ pub struct ReviewDiffOutcome {
 #[derive(Default)]
 pub struct ReviewManager {
     sessions: Mutex<HashMap<String, Session>>,
+    /// The process-global decision endpoint, for advisory finding scoring.
+    #[cfg(feature = "decision")]
+    decision: Option<std::sync::Arc<dyn crate::decision::DecisionProvider>>,
 }
 
 struct Session {
@@ -184,6 +214,15 @@ pub fn review_findings(
 }
 
 impl ReviewManager {
+    /// Installs the decision endpoint used for advisory finding scoring.
+    #[cfg(feature = "decision")]
+    pub(crate) fn set_decision(
+        &mut self,
+        decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
+    ) {
+        self.decision = Some(decision);
+    }
+
     fn start(&self, params: StartReviewParams) -> Result<StartReviewOutcome> {
         let root = repository_root(&params.cwd)?;
         if params.base.is_some() && params.commit.is_some() {
@@ -294,7 +333,7 @@ impl ReviewManager {
     }
 
     fn report_finding(&self, params: ReportFindingParams) -> Result<ReportFindingOutcome> {
-        let (review_id, finding) = validate_finding(params)?;
+        let (review_id, mut finding) = validate_finding(params)?;
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let session = sessions.get_mut(&review_id).context(CodeToolSnafu {
             message: format!("unknown review id `{review_id}`"),
@@ -303,14 +342,46 @@ impl ReviewManager {
             .findings
             .iter()
             .any(|existing| existing.finding_id == finding.finding_id);
+        // The diff hunk for this finding, captured before releasing the lock
+        // so the advisory decision call is made lock-free.
+        #[cfg(feature = "decision")]
+        let hunk = created.then(|| diff_for_file(&session.diff, &finding.path).unwrap_or_default());
         if created {
             session.findings.push(finding.clone());
         }
+        let finding_count = session.findings.len();
+        drop(sessions);
+
+        // Advisory assessment: computed outside the lock (it is a network
+        // call), then recorded on the stored finding. Any failure is silent —
+        // scoring never affects whether the finding exists.
+        #[cfg(feature = "decision")]
+        if created
+            && let Some(decision) = self.decision.as_ref().filter(|d| d.is_enabled())
+            && let Some(assessment) = assess_finding(
+                decision.as_ref(),
+                &finding,
+                hunk.as_deref().unwrap_or_default(),
+            )
+        {
+            finding.assessment = Some(assessment.clone());
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = sessions.get_mut(&review_id)
+                && let Some(stored) = session
+                    .findings
+                    .iter_mut()
+                    .find(|existing| existing.finding_id == finding.finding_id)
+            {
+                stored.assessment = Some(assessment);
+            }
+        }
+
         Ok(ReportFindingOutcome {
             review_id,
             finding_id: finding.finding_id,
             created,
-            finding_count: session.findings.len(),
+            finding_count,
+            assessment: finding.assessment,
         })
     }
 
@@ -340,6 +411,89 @@ impl ReviewManager {
             findings,
         })
     }
+}
+
+/// Asks the decision endpoint to score a finding: whether the code supports
+/// it and what severity it reads as. Returns `None` when the endpoint
+/// answered nothing usable. Advisory only — never a filter.
+#[cfg(feature = "decision")]
+fn assess_finding(
+    decision: &dyn crate::decision::DecisionProvider,
+    finding: &ReviewFinding,
+    hunk: &str,
+) -> Option<FindingAssessment> {
+    use crate::decision::{ChoiceResolution, DecisionRequest, Question, resolve_choice};
+
+    let state = serde_json::json!({
+        "reported_finding": {
+            "title": finding.title,
+            "body": finding.body,
+            "path": finding.path,
+            "line_start": finding.line_start,
+            "line_end": finding.line_end,
+        },
+        "code": hunk,
+    });
+    let request = DecisionRequest::new(state)
+        .ask(
+            "support",
+            Question::choice(
+                "Is the reported defect actually present in the code shown?",
+                [
+                    ("A", "the defect is present in the code"),
+                    ("B", "the code does not support the reported defect"),
+                ],
+            ),
+        )
+        .ask(
+            "severity",
+            Question::choice(
+                "How severe is the reported defect?",
+                [
+                    (
+                        "P0",
+                        "critical: security flaw, data loss, build or test failure",
+                    ),
+                    (
+                        "P1",
+                        "urgent: logic error, missing error handling, race condition",
+                    ),
+                    (
+                        "P2",
+                        "normal: style violation, minor refactor, coverage gap",
+                    ),
+                    ("P3", "low: formatting preference or optional improvement"),
+                ],
+            ),
+        );
+    let response = decision.decide(&request).ok()?;
+    let support_confidence = response.answer_confidence("support");
+    let severity_confidence = response.answer_confidence("severity");
+    let support = match resolve_choice(
+        &response,
+        "support",
+        "none",
+        &[
+            ("A".to_string(), "supported".to_string()),
+            ("B".to_string(), "unsupported".to_string()),
+        ],
+    ) {
+        ChoiceResolution::Selected { value, .. } => Some(value),
+        _ => None,
+    };
+    let severity = response
+        .primary("severity")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let has_support = support.is_some();
+    let has_severity = severity.is_some();
+    let assessment = FindingAssessment {
+        support_confidence: has_support.then_some(support_confidence).flatten(),
+        support,
+        severity_confidence: has_severity.then_some(severity_confidence).flatten(),
+        severity,
+    };
+    (has_support || has_severity).then_some(assessment)
 }
 
 fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFinding)> {
@@ -425,6 +579,7 @@ fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFindin
             line_end: params.line_end,
             rule_uris: params.rule_uris,
             suggestion,
+            assessment: None,
         },
     ))
 }
@@ -690,5 +845,133 @@ mod tests {
         )
         .unwrap();
         assert_eq!(findings.findings.len(), 1);
+    }
+
+    #[cfg(feature = "decision")]
+    struct FakeDecision {
+        answers: serde_json::Value,
+    }
+
+    #[cfg(feature = "decision")]
+    impl crate::decision::DecisionProvider for FakeDecision {
+        fn is_enabled(&self) -> bool {
+            true
+        }
+        fn decide(
+            &self,
+            _request: &crate::decision::DecisionRequest,
+        ) -> Result<crate::decision::DecisionResponse> {
+            Ok(serde_json::from_value(serde_json::json!({ "answers": self.answers })).unwrap())
+        }
+    }
+
+    #[cfg(feature = "decision")]
+    fn sample_finding() -> ReviewFinding {
+        ReviewFinding {
+            finding_id: "f1".into(),
+            title: "[P1] Keep the original greeting".into(),
+            body: "Returning `after` changes the contract.".into(),
+            priority: ReviewPriority::P1,
+            confidence: 0.9,
+            path: "hello.txt".into(),
+            line_start: 1,
+            line_end: 1,
+            rule_uris: Vec::new(),
+            suggestion: None,
+            assessment: None,
+        }
+    }
+
+    #[cfg(feature = "decision")]
+    #[test]
+    fn assess_finding_maps_support_and_severity() {
+        let decision = FakeDecision {
+            answers: serde_json::json!({
+                "support": {"choice": "A", "answer_confidence": 0.8},
+                "severity": {"choice": "P2", "answer_confidence": 0.6},
+            }),
+        };
+        let assessment = assess_finding(&decision, &sample_finding(), "context").unwrap();
+        assert_eq!(assessment.support.as_deref(), Some("supported"));
+        assert_eq!(assessment.support_confidence, Some(0.8));
+        assert_eq!(assessment.severity.as_deref(), Some("P2"));
+        assert_eq!(assessment.severity_confidence, Some(0.6));
+    }
+
+    #[cfg(feature = "decision")]
+    #[test]
+    fn assess_finding_is_none_when_the_endpoint_answers_nothing() {
+        let decision = FakeDecision {
+            answers: serde_json::json!({"support": {"choice": "Z"}}),
+        };
+        assert!(assess_finding(&decision, &sample_finding(), "context").is_none());
+    }
+
+    #[cfg(feature = "decision")]
+    #[test]
+    fn report_finding_records_an_advisory_assessment() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        std::fs::write(repo.path().join("hello.txt"), "before\n").unwrap();
+        git(repo.path(), &["add", "hello.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        std::fs::write(repo.path().join("hello.txt"), "after\n").unwrap();
+
+        let tools =
+            super::super::CodeTools::default().with_decision(std::sync::Arc::new(FakeDecision {
+                answers: serde_json::json!({
+                    "support": {"choice": "A", "answer_confidence": 0.7},
+                    "severity": {"choice": "P1", "answer_confidence": 0.5},
+                }),
+            }));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let outcome = report_finding(
+            &tools,
+            ReportFindingParams {
+                review_id: opened.review_id.clone(),
+                title: "[P1] Keep the original greeting".into(),
+                body: "When callers expect `before`, returning `after` changes the contract."
+                    .into(),
+                priority: ReviewPriority::P1,
+                confidence: 0.95,
+                path: "hello.txt".into(),
+                line_start: 1,
+                line_end: 1,
+                rule_uris: Vec::new(),
+                suggestion: None,
+            },
+        )
+        .unwrap();
+        let assessment = outcome.assessment.expect("assessment recorded");
+        assert_eq!(assessment.support.as_deref(), Some("supported"));
+        assert_eq!(assessment.severity.as_deref(), Some("P1"));
+
+        // The stored finding carries it for later audit through review_findings.
+        let findings = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            findings.findings[0]
+                .assessment
+                .as_ref()
+                .and_then(|a| a.support.as_deref()),
+            Some("supported")
+        );
     }
 }

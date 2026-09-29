@@ -623,7 +623,22 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
         }
         Ok(ProjectSession::new(context, index).with_default_k(default_k))
     });
-    let server = ArgosyMcpServer::new(McpState::new(factory));
+    #[allow(unused_mut)]
+    let mut state = McpState::new(factory);
+    // The decision endpoint is process-global (one user, one endpoint) and
+    // shared by every session; disabled unless configured.
+    #[cfg(feature = "decision")]
+    {
+        let provider = argosy::decision::provider_from_config(&config.decision)?;
+        state = state.with_decision(Arc::from(provider));
+        if config.decision.enabled {
+            eprintln!(
+                "argosy mcp: decision endpoint {} enabled (advisory, fail-open)",
+                config.decision.endpoint().unwrap_or("<none>")
+            );
+        }
+    }
+    let server = ArgosyMcpServer::new(state);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

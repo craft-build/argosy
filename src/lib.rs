@@ -11,6 +11,8 @@ pub mod codetools;
 pub mod concept;
 pub mod config;
 pub mod context;
+#[cfg(feature = "decision")]
+pub mod decision;
 pub mod error;
 pub mod harness;
 mod hash;

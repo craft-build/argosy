@@ -36,6 +36,10 @@ pub struct SearchHitOut {
     /// Frontmatter `category` facet (styleguide rules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Applicability probability from the decision endpoint's styleguide
+    /// rerank (`search_rules` only, when a decision endpoint is enabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<f32>,
     /// The rule body's `## Good` section (`search_rules` hits only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub good: Option<String>,
@@ -49,6 +53,38 @@ pub struct SearchHitOut {
 pub struct SearchReport {
     /// Ranked hits, best first.
     pub hits: Vec<SearchHitOut>,
+}
+
+/// The `ask` tool outcome: embedding candidates plus, when a decision
+/// endpoint is enabled, which candidate answers the question.
+#[derive(Debug, Clone, Serialize)]
+pub struct AskReport {
+    /// The question asked.
+    pub query: String,
+    /// `"selected"` when the decision endpoint chose a candidate; `"search"`
+    /// when only embedding hits are returned (decisions disabled, endpoint
+    /// unavailable, or no document matched).
+    pub mode: &'static str,
+    /// The chosen document, when one was selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<AskSelection>,
+    /// Why the result degraded to embedding-only, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The retrieved candidates, best-first.
+    pub candidates: Vec<SearchHitOut>,
+}
+
+/// The document an `ask` decision selected.
+#[derive(Debug, Clone, Serialize)]
+pub struct AskSelection {
+    /// The chosen concept's `argosy://` URI.
+    pub uri: String,
+    /// The option label the model chose, for audit.
+    pub label: String,
+    /// The calibrated answer probability, when the endpoint reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_confidence: Option<f32>,
 }
 
 /// One skill in `list_skills`, with origin argosy, shadowing status, and

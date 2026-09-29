@@ -32,6 +32,14 @@
 //! catalog {
 //!     redact_home = false
 //! }
+//! decision {
+//!     enabled = false                    // Jev-compatible endpoint, off by default
+//!     provider = "laya-serve"            // or "jev" for a hosted/other endpoint
+//!     endpoint = "http://127.0.0.1:8000"
+//!     api_key_env = "LAYA_API_KEY"       // name of an env var, never the secret
+//!     timeout_ms = 3000
+//!     model = "english"                  // optional passthrough
+//! }
 //! ```
 //!
 //! Paths honor `$XDG_CONFIG_HOME` (falling back to `~/.config`). Location
@@ -85,6 +93,8 @@ pub struct Config {
     pub package: PackageConfig,
     /// Defaults for `argosy catalog`.
     pub catalog: CatalogConfig,
+    /// Defaults for the optional Jev-compatible decision endpoint.
+    pub decision: DecisionConfig,
 }
 
 /// Output defaults for the CLI (`--quiet` / `--json`).
@@ -169,6 +179,100 @@ impl Default for PackageConfig {
 pub struct CatalogConfig {
     /// Rewrite home-directory path prefixes as `~` in generated catalogs.
     pub redact_home: bool,
+}
+
+/// Defaults for the optional Jev-compatible decision endpoint (Laya's
+/// `laya-serve`, TypeSafe Jev, or any clone). Off by default; when disabled,
+/// every decision-backed feature degrades to its non-decision behavior.
+///
+/// The wire protocol is the same Jev `POST /v1/systemone` for every provider;
+/// `provider` selects defaults only (default port, API-key env var name), not
+/// behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DecisionConfig {
+    /// Enable calls to a Jev-compatible decision endpoint.
+    pub enabled: bool,
+    /// Which endpoint family this configuration targets.
+    pub provider: DecisionProviderConfig,
+    /// Base URL of the endpoint, e.g. `http://127.0.0.1:8000`. `None` uses the
+    /// provider's default (only `laya-serve` has one).
+    pub endpoint: Option<String>,
+    /// Name of the environment variable holding the bearer token. The secret
+    /// itself is never stored in configuration.
+    pub api_key_env: Option<String>,
+    /// Per-request timeout in milliseconds.
+    #[serde(deserialize_with = "flex_uint")]
+    pub timeout_ms: usize,
+    /// Optional checkpoint/model passthrough honored by servers that support
+    /// it (e.g. Laya's `english` / `multilingual` / `typed-decisions`).
+    pub model: Option<String>,
+}
+
+impl Default for DecisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: DecisionProviderConfig::LayaServe,
+            endpoint: None,
+            api_key_env: None,
+            timeout_ms: 3000,
+            model: None,
+        }
+    }
+}
+
+impl DecisionConfig {
+    /// The base URL to call: the configured endpoint, or the provider default.
+    /// `None` when neither exists (an enabled `jev` with no explicit endpoint).
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint
+            .as_deref()
+            .or_else(|| self.provider.default_endpoint())
+    }
+
+    /// The environment variable name to read the bearer token from.
+    pub fn api_key_env(&self) -> &str {
+        self.api_key_env
+            .as_deref()
+            .unwrap_or_else(|| self.provider.default_api_key_env())
+    }
+
+    /// The per-request timeout.
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_ms as u64)
+    }
+}
+
+/// The Jev-compatible endpoint families argosy knows a default for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecisionProviderConfig {
+    /// A local `laya-serve` (the `laya[serve]` HTTP server). Default.
+    #[default]
+    LayaServe,
+    /// Any other Jev-compatible endpoint, including TypeSafe Jev. Requires an
+    /// explicit `endpoint`.
+    Jev,
+}
+
+impl DecisionProviderConfig {
+    /// The provider's default base URL, if it has one.
+    fn default_endpoint(self) -> Option<&'static str> {
+        match self {
+            Self::LayaServe => Some("http://127.0.0.1:8000"),
+            // No known default for the hosted Jev API: require an endpoint.
+            Self::Jev => None,
+        }
+    }
+
+    /// The provider's default API-key environment variable name.
+    fn default_api_key_env(self) -> &'static str {
+        match self {
+            Self::LayaServe => "LAYA_API_KEY",
+            Self::Jev => "JEV_API_KEY",
+        }
+    }
 }
 
 /// The configurable artifact format.
@@ -292,6 +396,28 @@ impl Config {
                 reason: format!(
                     "configuration: unknown index.model `{model}` (known models: {})",
                     known.join(", ")
+                ),
+            });
+        }
+        if self.decision.timeout_ms == 0 {
+            return Err(crate::error::Error::Validation {
+                reason: "configuration: decision.timeout_ms must be >= 1".to_string(),
+            });
+        }
+        if self.decision.enabled && self.decision.endpoint().is_none() {
+            return Err(crate::error::Error::Validation {
+                reason:
+                    "configuration: decision.endpoint is required when decision.enabled is set \
+                         and the provider has no default (provider `jev`)"
+                        .to_string(),
+            });
+        }
+        if let Some(endpoint) = self.decision.endpoint()
+            && !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+        {
+            return Err(crate::error::Error::Validation {
+                reason: format!(
+                    "configuration: decision.endpoint must be an http(s) URL, not `{endpoint}`"
                 ),
             });
         }
@@ -479,5 +605,55 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write(&tmp.path().join("argosy.bml"), "this is { not barkml");
         assert!(Config::load_from(Some(&tmp.path().join("argosy"))).is_err());
+    }
+
+    #[test]
+    fn decision_defaults_are_disabled_laya_serve() {
+        let config = Config::default();
+        assert!(!config.decision.enabled);
+        assert_eq!(config.decision.provider, DecisionProviderConfig::LayaServe);
+        assert_eq!(config.decision.endpoint(), Some("http://127.0.0.1:8000"));
+        assert_eq!(config.decision.api_key_env(), "LAYA_API_KEY");
+        assert_eq!(config.decision.timeout_ms, 3000);
+    }
+
+    #[test]
+    fn decision_section_parses() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            r#"
+            decision {
+                enabled = true
+                provider = "jev"
+                endpoint = "https://jev.example.com/"
+                api_key_env = "JEV_KEY"
+                timeout_ms = 5000
+                model = "typed-decisions"
+            }
+            "#,
+        );
+        let config = load(&tmp.path().join("argosy"));
+        assert!(config.decision.enabled);
+        assert_eq!(config.decision.provider, DecisionProviderConfig::Jev);
+        assert_eq!(config.decision.endpoint(), Some("https://jev.example.com/"));
+        assert_eq!(config.decision.api_key_env(), "JEV_KEY");
+        assert_eq!(config.decision.timeout_ms, 5000);
+        assert_eq!(config.decision.model.as_deref(), Some("typed-decisions"));
+    }
+
+    #[test]
+    fn decision_validation_requires_endpoint_scheme_for_jev_and_positive_timeout() {
+        let mut config = Config::default();
+        config.decision.enabled = true;
+        config.decision.provider = DecisionProviderConfig::Jev;
+        // An enabled `jev` has no default endpoint.
+        assert!(config.validate().is_err());
+        config.decision.endpoint = Some("ftp://nope".into());
+        assert!(config.validate().is_err());
+        config.decision.endpoint = Some("https://ok.example.com".into());
+        assert!(config.validate().is_ok());
+        config.decision.timeout_ms = 0;
+        assert!(config.validate().is_err());
     }
 }

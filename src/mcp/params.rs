@@ -49,6 +49,19 @@ pub struct RulesParams {
     pub k: Option<usize>,
 }
 
+/// `ask` parameters: semantic retrieval augmented, when a decision endpoint
+/// is enabled, by a decision over the retrieved candidates.
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AskParams {
+    /// The project root to operate on.
+    pub cwd: PathBuf,
+    /// The natural-language question.
+    pub query: String,
+    /// Candidates to retrieve before asking (default 8; capped at 10 once a
+    /// decision endpoint is used, since option quality degrades past ~20).
+    pub k: Option<usize>,
+}
+
 /// `list_skills` parameters.
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ListSkillsParams {

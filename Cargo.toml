@@ -41,6 +41,16 @@ regex = {
   ],
   optional = true
 }
+reqwest = {
+  version = "0.13",
+  default-features = false,
+  features = [
+    "blocking",
+    "json",
+    "rustls",
+  ],
+  optional = true
+}
 rmcp = {
   version = "3.4",
   default-features = false,
@@ -148,7 +158,8 @@ tokio = {
 }
 
 [features]
-default = ["code-tools", "default-index", "mcp"]
+default = ["code-tools", "decision", "default-index", "mcp"]
+decision = ["dep:reqwest"]
 code-tools = [
   "dep:ast-grep-core",
   "dep:ast-grep-language",
