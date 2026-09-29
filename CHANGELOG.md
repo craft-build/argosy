@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/craft-build/argosy/compare/v0.4.0...v0.5.0) - 2026-09-29
+
+### Added
+
+- *(decision)* add generic Jev decision endpoint with ask, rule rerank, and finding scoring
+
+### Other
+
+- *(deps)* update dependencies
+- *(mcp)* direct agents to the argosy tools and resources, not the state dir
+
 ## [0.4.0](https://github.com/craft-build/argosy/compare/v0.3.1...v0.4.0) - 2026-09-26
 
 ### Added
