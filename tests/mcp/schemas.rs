@@ -40,9 +40,15 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
     ] {
         assert!(names.contains(&expected), "missing tool `{expected}`");
     }
-    #[cfg(feature = "code-tools")]
+    #[cfg(feature = "decision")]
+    assert!(names.contains(&"ask"), "missing tool `ask`");
+    #[cfg(all(feature = "code-tools", feature = "decision"))]
+    let expected_total = 25;
+    #[cfg(all(feature = "code-tools", not(feature = "decision")))]
     let expected_total = 24;
-    #[cfg(not(feature = "code-tools"))]
+    #[cfg(all(not(feature = "code-tools"), feature = "decision"))]
+    let expected_total = 14;
+    #[cfg(all(not(feature = "code-tools"), not(feature = "decision")))]
     let expected_total = 13;
     assert_eq!(
         tools.len(),

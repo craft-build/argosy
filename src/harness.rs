@@ -145,7 +145,7 @@ pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code
 
 # Styleguide grounding
 
-This project's rules live in its argosy, served over MCP. The argosy is stored outside the project tree (under the user's argosy state dir), so the MCP tools are the way to read it — do not hunt for rule files on disk. When the argosy MCP server is connected, ground the review in it. Every argosy tool call takes `cwd` — pass the project's absolute root directory on every call, or the call is rejected:
+This project's rules live in its argosy, served over MCP. The argosy is stored outside the project tree (under the user's argosy state dir), so the MCP tools and `argosy://` resources are the only way to read or write it — do not hunt for rule files on disk, and never read or write the argosy state directory directly. When the argosy MCP server is connected, ground the review in it. Every argosy tool call takes `cwd` — pass the project's absolute root directory on every call, or the call is rejected:
 
 - `search_rules` — semantic match of styleguide rules against a natural-language description of the code under review (narrow by `language`/`category`); each hit carries the rule's `## Good`/`## Bad` sections when present.
 - `search` — semantic search over every concept (documents, skills, rules, memory) for wider context.

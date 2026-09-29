@@ -126,6 +126,10 @@ affected code and its blast radius, grounds verified findings in qualified
 styleguide-rule URIs, records them as structured review findings, and returns
 a prioritized verdict without modifying files.
 
+Agents reach all of this through the tools and `argosy://` resources, never by
+reading the argosy state directory on disk — the on-disk layout is an
+implementation detail, not a supported interface.
+
 When a Jev-compatible decision endpoint is configured (the optional
 `decision { ... }` section in `argosy.bml` — a self-hosted `laya-serve` or any
 Jev server), three advisory capabilities turn on. The `ask` tool retrieves

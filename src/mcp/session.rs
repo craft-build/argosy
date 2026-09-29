@@ -636,13 +636,13 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             ResourceDescriptor {
                 uri: ARGOSYS_URI.to_string(),
                 name: "Active argosys".to_string(),
-                description: "Every active argosy: name, version, and whether it is the writable local or a read-only import.".to_string(),
+                description: "Every active argosy: name, version, and whether it is the writable local or a read-only import. Read it through this resource, never from the argosy state directory on disk.".to_string(),
                 mime: "application/json",
             },
             ResourceDescriptor {
                 uri: CATALOG_URI.to_string(),
                 name: "Global catalog".to_string(),
-                description: "Every project slot under the argosy state dir: canonical root, local and imported argosies, content counts, index status, and stale slots (markdown).".to_string(),
+                description: "Every project slot under the argosy state dir: canonical root, local and imported argosies, content counts, index status, and stale slots (markdown). Read it through this resource, never by scanning the argosy state directory on disk.".to_string(),
                 mime: "text/markdown",
             },
         ];
@@ -663,7 +663,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                     uri: format!("argosy://{}{ARGOSY_INDEX_SUFFIX}", info.name),
                     name: format!("{} index", info.name),
                     description: format!(
-                        "Root index.md of argosy `{}` — the progressive-disclosure entry point for browsing its concepts.",
+                        "Root index.md of argosy `{}` — the progressive-disclosure entry point for browsing its concepts. Read it through this resource, never from the argosy state directory on disk.",
                         info.name
                     ),
                     mime: "text/markdown",
