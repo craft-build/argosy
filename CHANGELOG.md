@@ -11,10 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(decision)* fit requests to a configurable input-token budget
-
-### Added
-
 - *(decision)* fit decision requests to a configurable input-token budget
   (`decision.max_input_tokens`, default 512): over-budget requests are trimmed
   before sending — longest fields first, each cut marked in place — so a large
