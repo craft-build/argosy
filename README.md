@@ -139,7 +139,12 @@ question, and returns the selection with its calibrated confidence.
 review, writing an `applicability` probability onto each hit. And
 `report_finding` records an advisory `assessment` on each finding (whether the
 code supports it and what severity it reads as), visible through
-`review_findings`. All three are fail-open: when decisions are disabled or the
+`review_findings`. Every decision request is fitted to a token budget
+(`decision.max_input_tokens`, default 512 — the smallest context laya's
+checkpoints read): over-budget requests are trimmed before sending, longest
+fields first and marked in place, so a long question, rule set, or diff hunk
+neither errors at the endpoint nor gets silently cut past its questions.
+All three are fail-open: when decisions are disabled or the
 endpoint is unavailable, `ask` returns the embedding hits, rules keep their
 embedding order, and findings are recorded unassessed. None of it ever filters
 or drops a finding. argosy ships no model weights for this — the endpoint is

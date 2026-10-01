@@ -39,6 +39,7 @@
 //!     api_key_env = "LAYA_API_KEY"       // name of an env var, never the secret
 //!     timeout_ms = 3000
 //!     model = "english"                  // optional passthrough
+//!     max_input_tokens = 512             // trim over-budget requests (estimated)
 //! }
 //! ```
 //!
@@ -207,6 +208,19 @@ pub struct DecisionConfig {
     /// Optional checkpoint/model passthrough honored by servers that support
     /// it (e.g. Laya's `english` / `multilingual` / `typed-decisions`).
     pub model: Option<String>,
+    /// Approximate input-token budget for one decision request (state plus
+    /// questions together). Over-budget requests are trimmed before
+    /// sending — longest string fields first, each cut marked in place —
+    /// because the Jev family runs small context windows (laya's shipped
+    /// checkpoints read 512, 1024, or up to 8192 tokens) and an overflowing
+    /// request is either rejected or silently cut past its questions. The
+    /// estimate is a heuristic (roughly 3 characters per token, one per CJK
+    /// character), not a tokenizer. The default 512 matches the smallest
+    /// context laya ships (the `english` checkpoint); raise it for wider
+    /// checkpoints (e.g. 8192 for `laya-multilingual` served with
+    /// `max_len=8192`).
+    #[serde(deserialize_with = "flex_uint")]
+    pub max_input_tokens: usize,
 }
 
 impl Default for DecisionConfig {
@@ -218,6 +232,7 @@ impl Default for DecisionConfig {
             api_key_env: None,
             timeout_ms: 3000,
             model: None,
+            max_input_tokens: 512,
         }
     }
 }
@@ -402,6 +417,11 @@ impl Config {
         if self.decision.timeout_ms == 0 {
             return Err(crate::error::Error::Validation {
                 reason: "configuration: decision.timeout_ms must be >= 1".to_string(),
+            });
+        }
+        if self.decision.max_input_tokens == 0 {
+            return Err(crate::error::Error::Validation {
+                reason: "configuration: decision.max_input_tokens must be >= 1".to_string(),
             });
         }
         if self.decision.enabled && self.decision.endpoint().is_none() {
@@ -615,6 +635,7 @@ mod tests {
         assert_eq!(config.decision.endpoint(), Some("http://127.0.0.1:8000"));
         assert_eq!(config.decision.api_key_env(), "LAYA_API_KEY");
         assert_eq!(config.decision.timeout_ms, 3000);
+        assert_eq!(config.decision.max_input_tokens, 512);
     }
 
     #[test]
@@ -630,6 +651,7 @@ mod tests {
                 api_key_env = "JEV_KEY"
                 timeout_ms = 5000
                 model = "typed-decisions"
+                max_input_tokens = 2048
             }
             "#,
         );
@@ -640,6 +662,7 @@ mod tests {
         assert_eq!(config.decision.api_key_env(), "JEV_KEY");
         assert_eq!(config.decision.timeout_ms, 5000);
         assert_eq!(config.decision.model.as_deref(), Some("typed-decisions"));
+        assert_eq!(config.decision.max_input_tokens, 2048);
     }
 
     #[test]
@@ -654,6 +677,9 @@ mod tests {
         config.decision.endpoint = Some("https://ok.example.com".into());
         assert!(config.validate().is_ok());
         config.decision.timeout_ms = 0;
+        assert!(config.validate().is_err());
+        config.decision.timeout_ms = 3000;
+        config.decision.max_input_tokens = 0;
         assert!(config.validate().is_err());
     }
 }

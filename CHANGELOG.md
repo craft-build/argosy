@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(decision)* fit decision requests to a configurable input-token budget
+  (`decision.max_input_tokens`, default 512): over-budget requests are trimmed
+  before sending — longest fields first, each cut marked in place — so a large
+  question, rule set, or diff hunk can no longer overflow the endpoint's
+  context window
+
 ## [0.5.0](https://github.com/craft-build/argosy/compare/v0.4.0...v0.5.0) - 2026-09-29
 
 ### Added

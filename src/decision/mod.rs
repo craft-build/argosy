@@ -21,6 +21,16 @@
 //! Calls are blocking (reqwest's blocking client) and must run off async
 //! workers — argosy's MCP dispatch already routes them through
 //! `spawn_blocking`.
+//!
+//! Requests are kept within a configured input-token estimate
+//! ([`crate::config::DecisionConfig::max_input_tokens`], default 512 — the
+//! smallest context laya's checkpoints read): an over-budget request is
+//! trimmed before sending, longest fields first and marked in place, so a
+//! long question, rule set, or diff hunk neither errors at the endpoint
+//! nor gets silently cut past its questions. See the private `budget`
+//! submodule for the estimate and the trimming rules.
+
+mod budget;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -269,6 +279,9 @@ pub struct JevClient {
     /// Configured checkpoint/model passthrough, applied to requests that do
     /// not set one.
     model: Option<String>,
+    /// Estimated input-token budget every request is fitted to before
+    /// sending ([`budget::fit_request`]).
+    max_input_tokens: usize,
     health: Mutex<Health>,
 }
 
@@ -305,8 +318,22 @@ impl JevClient {
             endpoint,
             api_key,
             model: config.model.clone(),
+            max_input_tokens: config.max_input_tokens,
             health: Mutex::new(Health::default()),
         })
+    }
+
+    /// The request as it will be sent: the configured model applied when
+    /// the caller left it open, then fitted to the input-token budget so
+    /// the endpoint's context window is never overflowed (longest fields
+    /// trimmed first, each cut marked in place).
+    fn prepared(&self, request: &DecisionRequest) -> DecisionRequest {
+        let mut owned = request.clone();
+        if owned.model.is_none() {
+            owned.model = self.model.clone();
+        }
+        budget::fit_request(&mut owned, self.max_input_tokens);
+        owned
     }
 
     /// The resolved base URL (no trailing slash).
@@ -348,11 +375,7 @@ impl DecisionProvider for JevClient {
             });
         }
         let url = format!("{}/v1/systemone", self.endpoint);
-        // Apply the configured model passthrough when the caller left it open.
-        let mut owned = request.clone();
-        if owned.model.is_none() {
-            owned.model = self.model.clone();
-        }
+        let owned = self.prepared(request);
         let mut builder = self.http.post(&url).json(&owned);
         if let Some(key) = &self.api_key {
             builder = builder.bearer_auth(key);
@@ -545,6 +568,39 @@ mod tests {
         };
         let client = JevClient::new(&config).unwrap();
         assert_eq!(client.endpoint(), "http://127.0.0.1:8000");
+    }
+
+    #[test]
+    fn prepared_applies_the_default_model_and_fits_the_budget() {
+        let config = DecisionConfig {
+            endpoint: Some("http://127.0.0.1:8000".to_string()),
+            model: Some("english".to_string()),
+            max_input_tokens: 64,
+            ..DecisionConfig::default()
+        };
+        let client = JevClient::new(&config).unwrap();
+
+        // Within budget: only the model default is applied.
+        let small = DecisionRequest::new(serde_json::json!({"question": "what is a bundle?"}));
+        let prepared = client.prepared(&small);
+        assert_eq!(prepared.model.as_deref(), Some("english"));
+        assert_eq!(prepared.state, small.state);
+
+        // An explicit request-side model wins over the configured one.
+        let pinned = small.clone().with_model("typed-decisions");
+        assert_eq!(
+            client.prepared(&pinned).model.as_deref(),
+            Some("typed-decisions")
+        );
+
+        // Over budget: the bulk field is trimmed and marked in place.
+        let large = DecisionRequest::new(serde_json::json!({
+            "code_under_review": "let x = 1;\n".repeat(500),
+        }));
+        let prepared = client.prepared(&large);
+        let code = prepared.state["code_under_review"].as_str().unwrap();
+        assert!(code.contains("chars cut…"));
+        assert!(budget::request_tokens(&prepared) <= 64);
     }
 
     #[test]
