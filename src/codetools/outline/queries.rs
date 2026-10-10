@@ -40,7 +40,6 @@ pub(super) fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'s
         LangId::Gdshader => (&GDSHADER_QUERY, GDSHADER_SRC),
         LangId::GodotResource => (&GODOT_RESOURCE_QUERY, GODOT_RESOURCE_SRC),
         LangId::ObjC => (&OBJC_QUERY, OBJC_SRC),
-        LangId::Perl => (&PERL_QUERY, PERL_SRC),
         LangId::SvelteNext => (&SVELTE_NEXT_QUERY, SVELTE_NEXT_SRC),
         LangId::Zsh => (&ZSH_QUERY, ZSH_SRC),
         LangId::Sql => (&SQL_QUERY, SQL_SRC),
@@ -99,7 +98,6 @@ pub(super) const ALL_LANGS: &[LangId] = &[
     LangId::Gdshader,
     LangId::GodotResource,
     LangId::ObjC,
-    LangId::Perl,
     LangId::SvelteNext,
     LangId::Zsh,
     LangId::Sql,
@@ -364,13 +362,6 @@ const OBJC_SRC: &str = r#"
 "#;
 static OBJC_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("objc", &tree_sitter_objc::LANGUAGE.into(), OBJC_SRC));
-
-const PERL_SRC: &str = r#"
-(package_statement (package_name) @mod.name) @mod.def
-(require_statement package_name: (package_name) @import.name) @import.def
-"#;
-static PERL_QUERY: LazyLock<Option<Query>> =
-    LazyLock::new(|| build_query("perl", &tree_sitter_perl::LANGUAGE.into(), PERL_SRC));
 
 const SVELTE_NEXT_SRC: &str = r#"
 (element (start_tag (tag_name) @heading.name)) @heading.def

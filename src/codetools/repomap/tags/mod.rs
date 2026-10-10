@@ -56,7 +56,6 @@ pub enum LangId {
     Zig,
     Css,
     Fish,
-    Perl,
     Sql,
 }
 
@@ -90,7 +89,6 @@ impl LangId {
             "zig" => Some(Self::Zig),
             "css" => Some(Self::Css),
             "fish" => Some(Self::Fish),
-            "perl" => Some(Self::Perl),
             "sql" => Some(Self::Sql),
             _ => None,
         }
@@ -123,7 +121,6 @@ impl LangId {
             Self::Zig => tree_sitter_zig::LANGUAGE.into(),
             Self::Css => tree_sitter_css::LANGUAGE.into(),
             Self::Fish => tree_sitter_fish::language(),
-            Self::Perl => tree_sitter_perl::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
@@ -159,7 +156,7 @@ pub fn extract_tags(content: &str, lang: LangId, rel_path: &str) -> Vec<Tag> {
         std::collections::HashSet::new();
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let names = query.capture_names();
             let capture_name = names[cap.index as usize];
             let node = cap.node;

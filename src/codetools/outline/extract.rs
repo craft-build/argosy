@@ -53,7 +53,7 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
         let mut kind = SymbolKind::Function;
         let mut is_child = false;
 
-        for c in m.captures {
+        for c in m.captures() {
             let idx = c.index;
             let node = c.node;
 

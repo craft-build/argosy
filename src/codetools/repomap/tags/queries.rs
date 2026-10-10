@@ -48,7 +48,6 @@ fn lang_tags_query(lang: LangId) -> &'static LazyLock<Option<Query>> {
         LangId::Zig => &ZIG_TAGS_QUERY,
         LangId::Css => &CSS_TAGS_QUERY,
         LangId::Fish => &FISH_TAGS_QUERY,
-        LangId::Perl => &PERL_TAGS_QUERY,
         LangId::Sql => &SQL_TAGS_QUERY,
     }
 }
@@ -314,13 +313,6 @@ const FISH_TAGS_SRC: &str = r#"
 "#;
 static FISH_TAGS_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_tags_query("fish", &tree_sitter_fish::language(), FISH_TAGS_SRC));
-
-const PERL_TAGS_SRC: &str = r#"
-(subroutine_declaration_statement name: (bareword) @name.definition.function) @definition.function
-(package_statement (package_name) @name.definition.class) @definition.class
-"#;
-static PERL_TAGS_QUERY: LazyLock<Option<Query>> =
-    LazyLock::new(|| build_tags_query("perl", &tree_sitter_perl::LANGUAGE.into(), PERL_TAGS_SRC));
 
 // SQL DDL: surface the names of schema objects an agent would navigate by.
 // DML (select/insert/update/delete) and ALTER/DROP are intentionally not
