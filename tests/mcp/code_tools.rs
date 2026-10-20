@@ -601,3 +601,82 @@ async fn structured_review_findings_round_trip_over_mcp() {
     drop(client);
     server.abort();
 }
+
+/// Item 1 of docs/next.md: `base`/`commit` reach `git diff`/`git show`
+/// before their `--` separator, so option-shaped values would be parsed
+/// as git options and `--output=<path>` writes to an arbitrary file.
+/// Over the wire, the tool must refuse them before git runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_review_rejects_option_shaped_revisions_over_mcp() {
+    let ws = workspace();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "review@example.com"][..],
+        &["config", "user.name", "Review Test"][..],
+        &["add", "."][..],
+        &["commit", "--quiet", "-m", "initial"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(ws.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+    std::fs::write(
+        ws.path().join("src/main.rs"),
+        "fn main() {\n    changed();\n}\n",
+    )
+    .unwrap();
+    let target = ws.path().join("pwned.txt");
+    let (client, server) = client().await;
+
+    let message = call_err(
+        &client,
+        "start_review",
+        serde_json::json!({
+            "cwd": ws.path(),
+            "base": format!("--output={}", target.display()),
+        }),
+    )
+    .await;
+    assert!(message.contains("not a git option"), "got: {message}");
+    assert!(
+        !target.exists(),
+        "git must never write the diff to an option-named path"
+    );
+
+    let message = call_err(
+        &client,
+        "start_review",
+        serde_json::json!({
+            "cwd": ws.path(),
+            "commit": format!("-o{}", target.display()),
+        }),
+    )
+    .await;
+    assert!(message.contains("not a git option"), "got: {message}");
+    assert!(
+        !target.exists(),
+        "git must never write the diff to an option-named path"
+    );
+
+    // The same session still works with an honest revision over the wire.
+    let opened = call_ok(
+        &client,
+        "start_review",
+        serde_json::json!({
+            "cwd": ws.path(),
+            "base": "HEAD",
+        }),
+    )
+    .await;
+    assert_eq!(opened["changed_files"], serde_json::json!(["src/main.rs"]));
+
+    drop(client);
+    server.abort();
+}

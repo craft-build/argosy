@@ -27,11 +27,16 @@ static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 pub struct StartReviewParams {
     /// Repository root (or a directory inside it).
     pub cwd: PathBuf,
-    /// Git revision to compare the working tree against (default `HEAD`).
+    /// Git revision to compare the working tree against (default
+    /// `HEAD`): any revision git resolves — a commit, branch, tag, or
+    /// tree — or a range like `start..end` / `start...end` for endpoint
+    /// and merge-base diffs. Values starting with `-` are rejected.
     /// Mutually exclusive with `commit`.
     pub base: Option<String>,
-    /// Review exactly this committed revision instead of the working tree.
-    /// Merge commits are compared with their first parent.
+    /// Review exactly this committed revision (or range of commits)
+    /// instead of the working tree: any revision or range git
+    /// resolves. Values starting with `-` are rejected. Merge commits
+    /// are compared with their first parent.
     pub commit: Option<String>,
 }
 
@@ -232,24 +237,14 @@ impl ReviewManager {
             .fail();
         }
         let (diff, comparison, base, commit) = if let Some(commit) = params.commit {
-            if commit.trim().is_empty() {
-                return CodeToolSnafu {
-                    message: "commit must not be empty",
-                }
-                .fail();
-            }
-            let diff = git_commit_diff(&root, &commit)?;
+            let resolved = resolve_revision(&root, &commit, "commit")?;
+            let diff = git_commit_diff(&root, &resolved)?;
             let comparison = format!("Commit {commit} against its first parent");
             (diff, comparison, None, Some(commit))
         } else {
             let base = params.base.unwrap_or_else(|| "HEAD".to_string());
-            if base.trim().is_empty() {
-                return CodeToolSnafu {
-                    message: "base must not be empty",
-                }
-                .fail();
-            }
-            let diff = git_diff(&root, &base)?;
+            let resolved = resolve_revision(&root, &base, "base")?;
+            let diff = git_diff(&root, &resolved)?;
             let comparison = format!("Working tree compared with {base}");
             (diff, comparison, Some(base), None)
         };
@@ -619,6 +614,161 @@ fn repository_root(cwd: &Path) -> Result<PathBuf> {
     ))
 }
 
+/// Resolves a caller-supplied `base`/`commit` revision expression into a
+/// canonical form that can never be parsed as a git option, before the
+/// value ever reaches `git diff` or `git show`.
+///
+/// The revision is passed to those commands as a positional argument
+/// *before* their `--` path separator, so without this gate an
+/// option-shaped value would be parsed as a git option — and both
+/// commands accept `--output=<path>`, which writes the diff to an
+/// arbitrary file. The tool is reachable by every MCP caller, including
+/// a model steered by prompt-injected content, so the write is not
+/// hypothetical; `crate::pull::clone_as_checkout` refuses leading-dash
+/// clone URLs for the same reason. This is the review tools' copy of
+/// that guard, shaped so that none of the reviewer's expressiveness is
+/// lost on the way: single revisions of any object type (commits,
+/// including annotated tags, and trees) resolve through `git rev-parse
+/// --verify`, and ranges `a..b` / `a...b` resolve both endpoints the
+/// same way and are recombined in SHA-only form. Three layers:
+///
+/// 1. A leading `-` (or whitespace-only input) is refused outright.
+/// 2. Everything else reaches only `git rev-parse --verify`, where
+///    `--end-of-options` ends option parsing entirely — whatever the
+///    spec says, it cannot select a git option there. Range endpoints
+///    append `^{commit}` because git itself requires range endpoints to
+///    name commits.
+/// 3. Only output that is a hex object SHA (recombined into
+///    `sha..sha`/`sha...sha` for ranges) is accepted; hex can never be
+///    mistaken for a dash-prefixed option, so only an inert value is
+///    ever passed to the diff commands.
+fn resolve_revision(root: &Path, spec: &str, param: &str) -> Result<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return CodeToolSnafu {
+            message: format!("{param} must not be empty"),
+        }
+        .fail();
+    }
+    if spec.starts_with('-') {
+        return CodeToolSnafu {
+            message: format!(
+                "invalid {param} `{spec}`: pass a revision expression \
+                 (commit, branch, tag, tree, or range), not a git option"
+            ),
+        }
+        .fail();
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(spec)
+        .output()
+        .context(ReviewIoSnafu {
+            operation: format!("resolving revision `{spec}`"),
+        })?;
+    if output.status.success() {
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !is_object_sha(&sha) {
+            // Unreachable with `--verify` today; kept because the whole
+            // contract of this function is that only an inert value
+            // ever reaches `git diff` / `git show`.
+            return CodeToolSnafu {
+                message: format!(
+                    "{param} `{spec}` resolved to unexpected revision `{sha}`; \
+                     refusing to pass it to git"
+                ),
+            }
+            .fail();
+        }
+        return Ok(sha);
+    }
+    // A range (`a..b`, merge-base `a...b`) legitimately fails `--verify`
+    // with "needed a single revision", so split and resolve each
+    // endpoint instead. Revision syntax cannot otherwise contain `..`:
+    // git rejects it inside refnames and inside `^{/regex}` blocks, so
+    // this split matches git's own grammar.
+    if let Some((left, right, dots)) = split_range(spec) {
+        let left_sha = resolve_endpoint(root, left, param, spec)?;
+        let right_sha = resolve_endpoint(root, right, param, spec)?;
+        return Ok(format!("{left_sha}{dots}{right_sha}"));
+    }
+    CodeToolSnafu {
+        message: format!(
+            "{param} `{spec}` does not resolve to a git revision in this repository: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+    .fail()
+}
+
+/// Splits `a..b` or `a...b` into its endpoints and separator; either
+/// side may be empty (git reads an empty side as `HEAD`). Returns `None`
+/// when the spec contains no range separator at all.
+fn split_range(spec: &str) -> Option<(&str, &str, &'static str)> {
+    let start = spec.find("..")?;
+    let rest = &spec[start..];
+    if let Some(right) = rest.strip_prefix("...") {
+        Some((&spec[..start], right, "..."))
+    } else if let Some(right) = rest.strip_prefix("..") {
+        Some((&spec[..start], right, ".."))
+    } else {
+        None
+    }
+}
+
+/// Resolves one endpoint of a range. Range endpoints must name
+/// commits — the same rule git applies when it parses `a..b` itself —
+/// so an empty side means `HEAD` and the appended `^{commit}` peels tags
+/// to their commit. Returns the verified hex SHA.
+fn resolve_endpoint(root: &Path, side: &str, param: &str, spec: &str) -> Result<String> {
+    let rev = if side.is_empty() { "HEAD" } else { side };
+    if rev.starts_with('-') {
+        return CodeToolSnafu {
+            message: format!(
+                "invalid {param} `{spec}`: pass a revision expression, not a git option"
+            ),
+        }
+        .fail();
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(format!("{rev}^{{commit}}"))
+        .output()
+        .context(ReviewIoSnafu {
+            operation: format!("resolving range endpoint `{rev}`"),
+        })?;
+    if !output.status.success() {
+        return CodeToolSnafu {
+            message: format!(
+                "{param} `{spec}`: side `{rev}` does not name a commit in this repository: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+        .fail();
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !is_object_sha(&sha) {
+        return CodeToolSnafu {
+            message: format!(
+                "{param} `{spec}`: side `{rev}` resolved to unexpected revision `{sha}`; \
+                 refusing to pass it to git"
+            ),
+        }
+        .fail();
+    }
+    Ok(sha)
+}
+
+/// A git object id as printed by `rev-parse --verify`: 40 (SHA-1) or 64
+/// (SHA-256) hex digits.
+fn is_object_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn git_diff(root: &Path, base: &str) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -767,6 +917,334 @@ mod tests {
         assert!(diff.contains("+two"));
         assert!(diff.contains("-one"));
         assert!(!diff.contains("three"));
+    }
+
+    /// One commit plus an uncommitted working-tree change: the minimal
+    /// repository every `start_review` call needs.
+    fn review_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        std::fs::write(repo.path().join("hello.txt"), "before\n").unwrap();
+        git(repo.path(), &["add", "hello.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        std::fs::write(repo.path().join("hello.txt"), "after\n").unwrap();
+        repo
+    }
+
+    #[test]
+    fn option_shaped_base_is_rejected_before_reaching_git() {
+        let repo = review_repo();
+        let target = repo.path().join("pwned.txt");
+        let tools = super::super::CodeTools::default();
+        let err = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some(format!("--output={}", target.display())),
+                commit: None,
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a git option"), "got: {message}");
+        assert!(
+            !target.exists(),
+            "git must never write the diff to an option-named path"
+        );
+    }
+
+    #[test]
+    fn option_shaped_commit_is_rejected_before_reaching_git() {
+        let repo = review_repo();
+        let target = repo.path().join("pwned.txt");
+        let tools = super::super::CodeTools::default();
+        let err = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: Some(format!("-o{}", target.display())),
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a git option"), "got: {message}");
+        assert!(
+            !target.exists(),
+            "git must never write the diff to an option-named path"
+        );
+    }
+
+    #[test]
+    fn unresolvable_revision_is_reported_actively() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let err = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("does-not-exist".into()),
+                commit: None,
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("does not resolve to a git revision"),
+            "got: {message}"
+        );
+        assert!(message.contains("does-not-exist"), "got: {message}");
+    }
+
+    #[test]
+    fn symbolic_revisions_resolve_in_both_review_modes() {
+        let repo = review_repo();
+        git(repo.path(), &["tag", "first"]);
+        git(repo.path(), &["commit", "--quiet", "-am", "second"]);
+        git(repo.path(), &["branch", "second"]);
+        std::fs::write(repo.path().join("hello.txt"), "later\n").unwrap();
+        let tools = super::super::CodeTools::default();
+
+        // Working-tree mode against a tag: the resolution must accept
+        // any commit-ish, and the outcome keeps the caller's spelling.
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("first".into()),
+                commit: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.base.as_deref(), Some("first"));
+        assert_eq!(opened.changed_files, vec!["hello.txt".to_string()]);
+        let snapshot = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id.clone(),
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let base_diff = snapshot.diff.unwrap();
+        assert!(base_diff.contains("-before"));
+        assert!(base_diff.contains("+later"));
+
+        // Commit mode against a branch name.
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: Some("second".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.commit.as_deref(), Some("second"));
+        assert_eq!(opened.changed_files, vec!["hello.txt".to_string()]);
+        let snapshot = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id.clone(),
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let diff = snapshot.diff.unwrap();
+        assert!(diff.contains("+after"));
+        assert!(diff.contains("-before"));
+    }
+
+    #[test]
+    fn range_base_diffs_endpoints_not_the_worktree() {
+        let repo = review_repo();
+        git(repo.path(), &["commit", "--quiet", "-am", "second"]);
+        std::fs::write(repo.path().join("hello.txt"), "later\n").unwrap();
+        let tools = super::super::CodeTools::default();
+
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("HEAD~1..HEAD".into()),
+                commit: None,
+            },
+        )
+        .unwrap();
+        let snapshot = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id,
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let diff = snapshot.diff.unwrap();
+        assert!(diff.contains("+after"), "the committed endpoint delta");
+        assert!(diff.contains("-before"), "the committed endpoint delta");
+        assert!(
+            !diff.contains("+later"),
+            "a range diffs its endpoint trees, not the working tree"
+        );
+    }
+
+    #[test]
+    fn three_dot_base_diffs_from_the_merge_base() {
+        let repo = review_repo();
+        git(repo.path(), &["commit", "--quiet", "-am", "second"]);
+        git(
+            repo.path(),
+            &["checkout", "--quiet", "-b", "side", "HEAD~1"],
+        );
+        std::fs::write(repo.path().join("side.txt"), "side\n").unwrap();
+        git(repo.path(), &["add", "side.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "side work"]);
+        git(repo.path(), &["checkout", "--quiet", "-"]);
+        std::fs::write(repo.path().join("hello.txt"), "later\n").unwrap();
+        let tools = super::super::CodeTools::default();
+
+        // Two dots: both endpoint trees changed relative to each other,
+        // so the side file shows as removed alongside hello.txt.
+        let two = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("side..HEAD".into()),
+                commit: None,
+            },
+        )
+        .unwrap();
+        assert!(two.changed_files.contains(&"side.txt".into()));
+        assert!(two.changed_files.contains(&"hello.txt".into()));
+        let hello = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: two.review_id.clone(),
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let hello_diff = hello.diff.unwrap();
+        assert!(hello_diff.contains("+after"));
+        assert!(
+            !hello_diff.contains("+later"),
+            "a range diffs its endpoint trees, not the working tree"
+        );
+        let side = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: two.review_id,
+                path: Some("side.txt".into()),
+            },
+        )
+        .unwrap();
+        assert!(side.diff.unwrap().contains("-side"));
+
+        // Three dots: from the merge base, where hello.txt did change
+        // but the side work predates the fork point and is invisible.
+        let three = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("side...HEAD".into()),
+                commit: None,
+            },
+        )
+        .unwrap();
+        assert!(!three.changed_files.contains(&"side.txt".into()));
+        assert!(three.changed_files.contains(&"hello.txt".into()));
+        let hello = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: three.review_id,
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        assert!(hello.diff.unwrap().contains("+after"));
+    }
+
+    #[test]
+    fn tree_revision_works_as_base() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("HEAD^{tree}".into()),
+                commit: None,
+            },
+        )
+        .unwrap();
+        let snapshot = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id,
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let diff = snapshot.diff.unwrap();
+        assert!(
+            diff.contains("-before"),
+            "the committed tree is the baseline"
+        );
+        assert!(diff.contains("+after"), "the working tree is the subject");
+    }
+
+    #[test]
+    fn commit_range_reviews_each_commit_patch() {
+        let repo = review_repo();
+        git(repo.path(), &["commit", "--quiet", "-am", "second"]);
+        std::fs::write(repo.path().join("other.txt"), "other\n").unwrap();
+        git(repo.path(), &["add", "other.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-am", "third"]);
+        std::fs::write(repo.path().join("hello.txt"), "final\n").unwrap();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: Some("HEAD~2..HEAD".into()),
+            },
+        )
+        .unwrap();
+        assert!(
+            opened.changed_files.contains(&"hello.txt".to_string())
+                && opened.changed_files.contains(&"other.txt".to_string()),
+            "both commits' files are in the snapshot: {:?}",
+            opened.changed_files
+        );
+        let hello = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id.clone(),
+                path: Some("hello.txt".into()),
+            },
+        )
+        .unwrap();
+        let hello_diff = hello.diff.unwrap();
+        assert!(hello_diff.contains("+after"), "the second commit's patch");
+        assert!(
+            !hello_diff.contains("+final"),
+            "ranges show committed work, not the working tree"
+        );
+        let other = review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id,
+                path: Some("other.txt".into()),
+            },
+        )
+        .unwrap();
+        assert!(
+            other.diff.unwrap().contains("+other"),
+            "the third commit's patch"
+        );
     }
 
     #[test]

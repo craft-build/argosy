@@ -158,7 +158,7 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::review::StartReviewParams>(
             "start_review",
-            "Start an in-process review session over a snapshotted git diff. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Returns a review_id used by review_diff, report_finding, and review_findings, plus changed_files. Working-tree mode excludes untracked files; the tool never modifies the repository or opens a network port.",
+            "Start an in-process review session over a snapshotted git diff. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Both accept any git revision expression — a SHA, branch, tag, tree, or range like start..end or start...end; values starting with `-` are rejected. Returns a review_id used by review_diff, report_finding, and review_findings, plus changed_files. Working-tree mode excludes untracked files; the tool never modifies the repository or opens a network port.",
             false,
             false,
         ),
