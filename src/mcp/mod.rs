@@ -5,9 +5,9 @@
 //!
 //! Multi-project: every tool call names its project with `cwd` (the project
 //! root); [`McpState`] opens each project once through its
-//! [`SessionFactory`] and caches by canonical root. Resources (which carry
-//! no cwd) resolve against the process working directory, opened the same
-//! lazy way.
+//! [`SessionFactory`] and caches by canonical root under a TTL/LRU bound.
+//! Resources (which carry no cwd) resolve against the process working
+//! directory, opened the same lazy way.
 
 mod params;
 mod reports;
@@ -38,6 +38,12 @@ pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";
 
 /// Default hit count for `search`/`search_rules`.
 pub(super) const DEFAULT_K: usize = 8;
+
+/// Default project-session idle TTL.
+pub(super) const DEFAULT_PROJECT_TTL: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// Default project-session cap.
+pub(super) const DEFAULT_MAX_PROJECT_SESSIONS: usize = 8;
 
 /// The trust tier reported for concepts with no `verified` frontmatter —
 /// the canonical spelling lives with the tier machinery ([`crate::trust`]).

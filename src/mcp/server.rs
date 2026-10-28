@@ -103,7 +103,9 @@ const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concep
                  tools. The server hosts any number of projects: every tool call selects \
                  its project with `cwd` (the project root; each project's argosys live \
                  under the user state dir, keyed by that root, outside the project tree); \
-                 projects open on first use and stay cached. Never read or write the argosy \
+                 projects open on first use and are cached under a bounded TTL/LRU policy — an \
+                 idle project session expires and reopens (re-discovering imports), so a book \
+                 pulled mid-run becomes visible without a restart. Never read or write the argosy \
                  state directory on disk; all argosy content is reached through these tools \
                  and argosy:// resources. Imported \
                  argosys are read-only. Every hit, read, and skill carries its provenance: \

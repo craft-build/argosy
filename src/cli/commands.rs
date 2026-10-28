@@ -607,7 +607,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let trust = config.trust_policy();
     // No project is opened at startup: the server runs from any directory,
     // and every tool call names its project (`cwd`). Projects open lazily
-    // through this factory and stay cached for the process lifetime.
+    // through this factory and are cached under a TTL/LRU bound.
     // stdout is the stdio protocol channel: every diagnostic is stderr.
     let factory: SessionFactory<LazyTractProvider, SqliteVecStore> = Arc::new(move |root| {
         let context = ProjectContext::open_project(root)?;
@@ -639,7 +639,8 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
             .with_trust_policy(trust.clone()))
     });
     #[allow(unused_mut)]
-    let mut state = McpState::new(factory);
+    let mut state = McpState::new(factory)
+        .with_session_limits(config.session.project_ttl(), config.session.project_max);
     // The decision endpoint is process-global (one user, one endpoint) and
     // shared by every session; disabled unless configured.
     #[cfg(feature = "decision")]
@@ -659,7 +660,8 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let code = {
         #[allow(unused_mut)]
         let mut tools = argosy::codetools::CodeTools::default()
-            .with_external_paths(config.code_tools.allow_external_paths);
+            .with_external_paths(config.code_tools.allow_external_paths)
+            .with_review_limits(config.session.review_ttl(), config.session.review_max);
         #[cfg(feature = "decision")]
         {
             tools = tools.with_decision(Arc::clone(state.decision()));
@@ -792,6 +794,13 @@ pub(super) fn cmd_config(out: &Output, _args: &ConfigArgs, config: &Config) -> R
         out.note(&format!(
             "code_tools: allow_external_paths={}",
             config.code_tools.allow_external_paths
+        ));
+        out.note(&format!(
+            "session: project_ttl_secs={}, project_max={}, review_ttl_secs={}, review_max={}",
+            config.session.project_ttl_secs,
+            config.session.project_max,
+            config.session.review_ttl_secs,
+            config.session.review_max
         ));
     }
     Ok(ExitCode::SUCCESS)

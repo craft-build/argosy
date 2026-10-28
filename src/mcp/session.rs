@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::bundle::Namespace;
 use crate::concept::{Concept, ConceptId};
@@ -20,7 +21,10 @@ use crate::decision::{
 
 use super::params::*;
 use super::reports::*;
-use super::{ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, UNVERIFIED};
+use super::{
+    ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, DEFAULT_MAX_PROJECT_SESSIONS,
+    DEFAULT_PROJECT_TTL, UNVERIFIED,
+};
 
 /// One opened project: its argosy set and its semantic index, reconciled
 /// after every mutating tool — a written or deleted concept is visible to
@@ -45,13 +49,23 @@ pub struct ProjectSession<P: EmbeddingProvider, S: VectorStore> {
 /// cached, so a later `argosy init` is picked up by the next call.
 pub type SessionFactory<P, S> = Arc<dyn Fn(&Path) -> Result<ProjectSession<P, S>> + Send + Sync>;
 
+/// One cached project session plus its recency stamp.
+struct CachedSession<P: EmbeddingProvider, S: VectorStore> {
+    session: ProjectSession<P, S>,
+    /// Last use.
+    touched: Instant,
+}
+
 /// Everything the server serves: one cached [`ProjectSession`] per project
-/// root, opened on first use through the [`SessionFactory`]. Mutations
-/// reconcile their session's index in place; argosys pulled or initialized
-/// after a session opened appear on the next open of that root.
+/// root, opened on first use through the [`SessionFactory`] and bounded by
+/// TTL/LRU. Mutations reconcile their session's index in place.
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     factory: SessionFactory<P, S>,
-    sessions: HashMap<PathBuf, ProjectSession<P, S>>,
+    sessions: HashMap<PathBuf, CachedSession<P, S>>,
+    /// Project-session idle TTL.
+    session_ttl: Duration,
+    /// Project-session cap.
+    max_sessions: usize,
     /// Overrides the argosy state root the `argosy://catalog` resource scans
     /// (tests inject a tempdir; production resolves [`crate::pull::state_dir`]).
     catalog_state_root: Option<PathBuf>,
@@ -841,16 +855,25 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
 
 impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     /// Multi-project server state over an opener: roots are opened by
-    /// `factory` on first use and cached for the state's lifetime.
+    /// `factory` on first use and cached.
     pub fn new(factory: SessionFactory<P, S>) -> Self {
         Self {
             factory,
             sessions: HashMap::new(),
+            session_ttl: DEFAULT_PROJECT_TTL,
+            max_sessions: DEFAULT_MAX_PROJECT_SESSIONS,
             catalog_state_root: None,
             catalog_redact_home: None,
             #[cfg(feature = "decision")]
             decision: std::sync::Arc::new(crate::decision::Disabled),
         }
+    }
+
+    /// Overrides the project-session cache bounds.
+    pub fn with_session_limits(mut self, ttl: Duration, max_sessions: usize) -> Self {
+        self.session_ttl = ttl;
+        self.max_sessions = max_sessions.max(1);
+        self
     }
 
     /// Overrides the state root the `argosy://catalog` resource scans.
@@ -885,18 +908,45 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// The session for `cwd` (the project root), opening it on first use.
-    /// The cache key is the canonicalized path, so different spellings of
-    /// one directory share a session; a failed open is never cached.
+    /// The cache key is the canonicalized path; a failed open is never
+    /// cached. Idle sessions expire and reopen; the cap evicts the LRU.
     pub fn session(&mut self, cwd: impl AsRef<Path>) -> Result<&mut ProjectSession<P, S>> {
         let as_ref = cwd.as_ref();
         let key = as_ref
             .canonicalize()
             .unwrap_or_else(|_| as_ref.to_path_buf());
+        let now = Instant::now();
+        let expired = self
+            .sessions
+            .get(&key)
+            .is_some_and(|cached| now.duration_since(cached.touched) >= self.session_ttl);
+        if expired {
+            self.sessions.remove(&key);
+        }
         if !self.sessions.contains_key(&key) {
             let session = (self.factory)(&key)?;
-            self.sessions.insert(key.clone(), session);
+            while self.sessions.len() >= self.max_sessions {
+                let Some(oldest) = self
+                    .sessions
+                    .iter()
+                    .min_by_key(|(_, cached)| cached.touched)
+                    .map(|(root, _)| root.clone())
+                else {
+                    break;
+                };
+                self.sessions.remove(&oldest);
+            }
+            self.sessions.insert(
+                key.clone(),
+                CachedSession {
+                    session,
+                    touched: now,
+                },
+            );
         }
-        Ok(self.sessions.get_mut(&key).expect("inserted above"))
+        let cached = self.sessions.get_mut(&key).expect("inserted above");
+        cached.touched = Instant::now();
+        Ok(&mut cached.session)
     }
 
     /// The session for the process working directory — the project the

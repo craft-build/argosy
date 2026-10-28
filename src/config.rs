@@ -35,6 +35,12 @@
 //! code_tools {
 //!     allow_external_paths = false
 //! }
+//! session {
+//!     project_ttl_secs = 1800
+//!     project_max = 8
+//!     review_ttl_secs = 7200
+//!     review_max = 16
+//! }
 //! trust {
 //!     // Per-import maximum OKF tier, keyed by manifest name. An import
 //!     // with no entry is capped at "unverified" whatever its concepts
@@ -107,6 +113,8 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// Defaults for the code-intelligence tools.
     pub code_tools: CodeToolsConfig,
+    /// Session-cache bounds for MCP project and review sessions.
+    pub session: SessionConfig,
     /// Per-import maximum OKF trust tiers (see [`TrustPolicy`]).
     pub trust: HashMap<String, TrustTier>,
     /// Defaults for the optional Jev-compatible decision endpoint.
@@ -208,6 +216,47 @@ pub struct CodeToolsConfig {
     /// injected caller cannot read — or, through `astgrep apply` /
     /// `conflicts resolve`, write — files outside it.
     pub allow_external_paths: bool,
+}
+
+/// Session-cache bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionConfig {
+    /// Project-session idle TTL, in seconds.
+    #[serde(deserialize_with = "flex_uint")]
+    pub project_ttl_secs: usize,
+    /// Maximum cached project sessions.
+    #[serde(deserialize_with = "flex_uint")]
+    pub project_max: usize,
+    /// Review-session idle TTL, in seconds.
+    #[serde(deserialize_with = "flex_uint")]
+    pub review_ttl_secs: usize,
+    /// Maximum review sessions.
+    #[serde(deserialize_with = "flex_uint")]
+    pub review_max: usize,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            project_ttl_secs: 1800,
+            project_max: 8,
+            review_ttl_secs: 7200,
+            review_max: 16,
+        }
+    }
+}
+
+impl SessionConfig {
+    /// The project-session idle TTL.
+    pub fn project_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.project_ttl_secs as u64)
+    }
+
+    /// The review-session idle TTL.
+    pub fn review_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.review_ttl_secs as u64)
+    }
 }
 
 /// Defaults for the optional Jev-compatible decision endpoint (Laya's
@@ -442,6 +491,18 @@ impl Config {
                 ),
             });
         }
+        if self.session.project_ttl_secs == 0 || self.session.review_ttl_secs == 0 {
+            return Err(crate::error::Error::Validation {
+                reason: "configuration: session.project_ttl_secs and session.review_ttl_secs must be >= 1"
+                    .to_string(),
+            });
+        }
+        if self.session.project_max == 0 || self.session.review_max == 0 {
+            return Err(crate::error::Error::Validation {
+                reason: "configuration: session.project_max and session.review_max must be >= 1"
+                    .to_string(),
+            });
+        }
         if self.decision.timeout_ms == 0 {
             return Err(crate::error::Error::Validation {
                 reason: "configuration: decision.timeout_ms must be >= 1".to_string(),
@@ -625,6 +686,62 @@ mod tests {
         assert_eq!(config.index.mcp_default_k, 20);
         assert_eq!(config.package.format, PackageFormatConfig::TarGz);
         assert!(config.package.include_index);
+    }
+
+    #[test]
+    fn session_defaults_are_bounded() {
+        let session = Config::default().session;
+        assert_eq!(session.project_ttl_secs, 1800);
+        assert_eq!(session.project_max, 8);
+        assert_eq!(session.review_ttl_secs, 7200);
+        assert_eq!(session.review_max, 16);
+    }
+
+    #[test]
+    fn session_section_parses() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            r#"
+            session {
+                project_ttl_secs = 60
+                project_max = 2
+                review_ttl_secs = 120
+                review_max = 4
+            }
+            "#,
+        );
+        let config = load(&tmp.path().join("argosy"));
+        assert_eq!(config.session.project_ttl_secs, 60);
+        assert_eq!(config.session.project_max, 2);
+        assert_eq!(config.session.review_ttl_secs, 120);
+        assert_eq!(config.session.review_max, 4);
+        assert_eq!(
+            config.session.project_ttl(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            config.session.review_ttl(),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn zero_session_bounds_are_rejected() {
+        let mut config = Config::default();
+        config.session.project_ttl_secs = 0;
+        assert!(config.validate().is_err());
+        config.session.project_ttl_secs = 1;
+        config.session.review_ttl_secs = 0;
+        assert!(config.validate().is_err());
+        config.session.review_ttl_secs = 1;
+        config.session.project_max = 0;
+        assert!(config.validate().is_err());
+        config.session.project_max = 1;
+        config.session.review_max = 0;
+        assert!(config.validate().is_err());
+        config.session.review_max = 1;
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "mcp")]
 use rmcp::schemars;
@@ -20,6 +20,10 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{CodeToolSnafu, Result, ReviewEncodingSnafu, ReviewIoSnafu};
 
 const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+/// Default review-session idle TTL.
+const DEFAULT_REVIEW_TTL: Duration = Duration::from_secs(7200);
+/// Default review-session cap.
+const DEFAULT_MAX_REVIEWS: usize = 16;
 static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -176,18 +180,35 @@ pub struct ReviewDiffOutcome {
     pub diff: Option<String>,
 }
 
-#[derive(Default)]
 pub struct ReviewManager {
     sessions: Mutex<HashMap<String, Session>>,
+    /// Session idle TTL.
+    ttl: Duration,
+    /// Session cap.
+    max_sessions: usize,
     /// The process-global decision endpoint, for advisory finding scoring.
     #[cfg(feature = "decision")]
     decision: Option<std::sync::Arc<dyn crate::decision::DecisionProvider>>,
+}
+
+impl Default for ReviewManager {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            ttl: DEFAULT_REVIEW_TTL,
+            max_sessions: DEFAULT_MAX_REVIEWS,
+            #[cfg(feature = "decision")]
+            decision: None,
+        }
+    }
 }
 
 struct Session {
     diff: String,
     changed_files: Vec<String>,
     findings: Vec<ReviewFinding>,
+    /// Last use.
+    touched: Instant,
 }
 
 pub fn start_review(
@@ -219,6 +240,51 @@ pub fn review_findings(
 }
 
 impl ReviewManager {
+    /// Overrides the session-cache bounds.
+    pub fn with_limits(mut self, ttl: Duration, max_sessions: usize) -> Self {
+        self.ttl = ttl;
+        self.max_sessions = max_sessions.max(1);
+        self
+    }
+
+    /// Drops sessions idle past the TTL.
+    fn purge_expired(sessions: &mut HashMap<String, Session>, ttl: Duration) {
+        let now = Instant::now();
+        sessions.retain(|_, session| now.duration_since(session.touched) < ttl);
+    }
+
+    /// Evicts the least-recently-used session until there is room.
+    fn evict_for_capacity(sessions: &mut HashMap<String, Session>, max_sessions: usize) {
+        while sessions.len() >= max_sessions {
+            let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.touched)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            sessions.remove(&oldest);
+        }
+    }
+
+    /// The session for `review_id`, stamped as most recently used.
+    fn touch<'a>(
+        sessions: &'a mut HashMap<String, Session>,
+        review_id: &str,
+    ) -> Result<&'a mut Session> {
+        let Some(session) = sessions.get_mut(review_id) else {
+            return CodeToolSnafu {
+                message: format!(
+                    "unknown review id `{review_id}` (it may have expired from the session cache; \
+                     call start_review again)"
+                ),
+            }
+            .fail();
+        };
+        session.touched = Instant::now();
+        Ok(session)
+    }
+
     /// Installs the decision endpoint used for advisory finding scoring.
     #[cfg(feature = "decision")]
     pub(crate) fn set_decision(
@@ -276,17 +342,19 @@ impl ReviewManager {
         let changed_files = changed_files(&diff);
         let files_changed = changed_files.len();
 
-        self.sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id.clone(),
-                Session {
-                    diff,
-                    changed_files: changed_files.clone(),
-                    findings: Vec::new(),
-                },
-            );
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        Self::purge_expired(&mut sessions, self.ttl);
+        Self::evict_for_capacity(&mut sessions, self.max_sessions);
+        sessions.insert(
+            id.clone(),
+            Session {
+                diff,
+                changed_files: changed_files.clone(),
+                findings: Vec::new(),
+                touched: Instant::now(),
+            },
+        );
+        drop(sessions);
 
         Ok(StartReviewOutcome {
             review_id: id,
@@ -300,10 +368,9 @@ impl ReviewManager {
     }
 
     fn diff(&self, params: ReviewDiffParams) -> Result<ReviewDiffOutcome> {
-        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let session = sessions.get(&params.review_id).context(CodeToolSnafu {
-            message: format!("unknown review id `{}`", params.review_id),
-        })?;
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        Self::purge_expired(&mut sessions, self.ttl);
+        let session = Self::touch(&mut sessions, &params.review_id)?;
         let Some(path) = params.path else {
             return Ok(ReviewDiffOutcome {
                 review_id: params.review_id,
@@ -330,9 +397,8 @@ impl ReviewManager {
     fn report_finding(&self, params: ReportFindingParams) -> Result<ReportFindingOutcome> {
         let (review_id, mut finding) = validate_finding(params)?;
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let session = sessions.get_mut(&review_id).context(CodeToolSnafu {
-            message: format!("unknown review id `{review_id}`"),
-        })?;
+        Self::purge_expired(&mut sessions, self.ttl);
+        let session = Self::touch(&mut sessions, &review_id)?;
         let created = !session
             .findings
             .iter()
@@ -381,10 +447,9 @@ impl ReviewManager {
     }
 
     fn findings(&self, params: ReviewFindingsParams) -> Result<ReviewFindingsOutcome> {
-        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let session = sessions.get(&params.review_id).context(CodeToolSnafu {
-            message: format!("unknown review id `{}`", params.review_id),
-        })?;
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        Self::purge_expired(&mut sessions, self.ttl);
+        let session = Self::touch(&mut sessions, &params.review_id)?;
         let findings = session
             .findings
             .iter()
@@ -996,6 +1061,116 @@ mod tests {
             "got: {message}"
         );
         assert!(message.contains("does-not-exist"), "got: {message}");
+    }
+
+    #[test]
+    fn review_sessions_expire_after_the_idle_ttl() {
+        let repo = review_repo();
+        // A zero TTL makes every cached session immediately stale.
+        let tools =
+            super::super::CodeTools::default().with_review_limits(std::time::Duration::ZERO, 16);
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let err = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown review id"), "got: {message}");
+        assert!(
+            message.contains("expired"),
+            "the error must suggest re-running start_review: {message}"
+        );
+    }
+
+    #[test]
+    fn the_lru_cap_evicts_the_least_recently_used_review() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default()
+            .with_review_limits(std::time::Duration::from_secs(3600), 2);
+        let open = || {
+            start_review(
+                &tools,
+                StartReviewParams {
+                    cwd: repo.path().to_path_buf(),
+                    base: None,
+                    commit: None,
+                },
+            )
+            .unwrap()
+            .review_id
+        };
+        let first = open();
+        let second = open();
+        // Touch the first so the second is the eviction candidate.
+        review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: first.clone(),
+                path: None,
+            },
+        )
+        .unwrap();
+        let third = open();
+
+        for (id, kept) in [(&first, true), (&second, false), (&third, true)] {
+            let result = review_diff(
+                &tools,
+                ReviewDiffParams {
+                    review_id: id.clone(),
+                    path: None,
+                },
+            );
+            assert_eq!(result.is_ok(), kept, "review `{id}` kept={kept}");
+        }
+    }
+
+    #[test]
+    fn reading_a_review_refreshes_its_idle_ttl() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default()
+            .with_review_limits(std::time::Duration::from_millis(2000), 16);
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        // Touch before the TTL lapses, then sleep past a creation-only TTL.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id.clone(),
+                path: None,
+            },
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1700));
+        review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+            },
+        )
+        .expect("an access refreshes the idle clock");
     }
 
     #[test]

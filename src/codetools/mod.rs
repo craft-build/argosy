@@ -126,6 +126,12 @@ impl CodeTools {
         self
     }
 
+    /// Bounds the review-session cache.
+    pub fn with_review_limits(mut self, ttl: std::time::Duration, max_sessions: usize) -> Self {
+        self.reviews = self.reviews.with_limits(ttl, max_sessions);
+        self
+    }
+
     /// Resolves a user-supplied path for a code tool: `~` expansion, then
     /// relative paths are anchored to the workspace root, then containment
     /// — the resolved path must stay inside the root unless

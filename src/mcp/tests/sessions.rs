@@ -103,3 +103,86 @@ fn a_cwd_without_an_argosy_errors_and_is_not_cached() {
     assert!(skills.skills.is_empty());
     assert_eq!(seen.load(Ordering::SeqCst), 2, "the failed open retried");
 }
+
+/// A session idle past the TTL is dropped and reopened on next use.
+#[test]
+fn an_idle_project_session_expires_and_reopens() {
+    let opens = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&opens);
+    let local = fixture_copy("valid-acme-billing");
+    let local_root = local.path().to_path_buf();
+    // A zero TTL makes every cached session immediately stale.
+    let mut state = McpState::new(Arc::new(move |_root| {
+        opens.fetch_add(1, Ordering::SeqCst);
+        let context = ProjectContext::open(&local_root, [])?;
+        let mut index = Index::new(MockEmbedder::new(), MemStore::new());
+        index.reconcile(&context)?;
+        Ok(ProjectSession::new(context, index))
+    }))
+    .with_session_limits(std::time::Duration::ZERO, 8);
+
+    state
+        .list_skills(ListSkillsParams { cwd: project() })
+        .unwrap();
+    state
+        .search(SearchParams {
+            cwd: project(),
+            query: "anything".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        2,
+        "an expired session is reopened through the factory"
+    );
+}
+
+/// The LRU cap drops the coldest root.
+#[test]
+fn the_project_session_cap_evicts_the_least_recently_used_root() {
+    let opens = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&opens);
+    let local = fixture_copy("valid-acme-billing");
+    let local_root = local.path().to_path_buf();
+    let mut state = McpState::new(Arc::new(move |_root| {
+        opens.fetch_add(1, Ordering::SeqCst);
+        let context = ProjectContext::open(&local_root, [])?;
+        let mut index = Index::new(MockEmbedder::new(), MemStore::new());
+        index.reconcile(&context)?;
+        Ok(ProjectSession::new(context, index))
+    }))
+    .with_session_limits(std::time::Duration::from_secs(3600), 2);
+
+    let first = PathBuf::from("/first");
+    let second = PathBuf::from("/second");
+    let third = PathBuf::from("/third");
+    for cwd in [&first, &second, &first] {
+        state
+            .list_skills(ListSkillsParams { cwd: cwd.clone() })
+            .unwrap();
+    }
+    // `second` is the coldest entry; opening `third` evicts it.
+    state
+        .list_skills(ListSkillsParams { cwd: third.clone() })
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "three opens, no reopens");
+
+    // The kept root is served from cache; the evicted root reopens.
+    state
+        .list_skills(ListSkillsParams { cwd: first.clone() })
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "`first` stayed cached");
+    state
+        .list_skills(ListSkillsParams {
+            cwd: second.clone(),
+        })
+        .unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 4, "`second` reopened");
+}
