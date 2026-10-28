@@ -26,6 +26,7 @@ pub mod skill;
 pub mod styleguide;
 #[cfg(test)]
 pub(crate) mod testutil;
+pub mod trust;
 
 pub use bundle::{Argosy, Finding, Manifest, Namespace, Severity, ValidationReport};
 pub use concept::{Concept, ConceptId};
@@ -36,3 +37,4 @@ pub use local::{LocalArgosy, Promotion, PromotionTarget};
 pub use package::{ImportReport, PackageFormat, PackageOptions, PackageReport};
 pub use skill::{Skill, SkillForm};
 pub use styleguide::StyleguideRule;
+pub use trust::{TrustPolicy, TrustTier};

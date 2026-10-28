@@ -60,20 +60,37 @@ struct Rig {
 /// open-on-demand factory: every cwd maps to the same fixture session,
 /// freshly opened and reconciled on first use (then cached).
 fn factory(local: PathBuf, imported: Vec<PathBuf>) -> SessionFactory<MockEmbedder, MemStore> {
+    factory_with_trust(local, imported, crate::trust::TrustPolicy::new())
+}
+
+/// [`factory`] with an explicit provenance trust policy (the CLI derives
+/// one from user configuration; tests inject it directly).
+fn factory_with_trust(
+    local: PathBuf,
+    imported: Vec<PathBuf>,
+    trust: crate::trust::TrustPolicy,
+) -> SessionFactory<MockEmbedder, MemStore> {
     Arc::new(move |_root| {
         let context = ProjectContext::open(&local, imported.clone())?;
         let mut index = Index::new(MockEmbedder::new(), MemStore::new());
         index.reconcile(&context)?;
-        Ok(ProjectSession::new(context, index))
+        Ok(ProjectSession::new(context, index).with_trust_policy(trust.clone()))
     })
 }
 
 fn rig() -> Rig {
+    rig_with_trust(crate::trust::TrustPolicy::new())
+}
+
+/// [`rig`] granting `acme-shared` a configured trust cap — the tier the
+/// fixture's imported skill *claims* in `verified` frontmatter.
+fn rig_with_trust(trust: crate::trust::TrustPolicy) -> Rig {
     let local = fixture_copy("valid-acme-billing");
     let imported = import_fixture();
-    let state = McpState::new(factory(
+    let state = McpState::new(factory_with_trust(
         local.path().to_path_buf(),
         vec![imported.path().to_path_buf()],
+        trust,
     ));
     Rig {
         _local: local,

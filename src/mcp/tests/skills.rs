@@ -1,10 +1,21 @@
 //! Trust surfacing: skill listing and precedence-resolved reads.
 
 use super::*;
+use crate::trust::TrustTier;
+
+/// A rig whose user configuration grants `acme-shared` exactly the tier
+/// its fixture skill claims.
+fn trusted_rig() -> Rig {
+    rig_with_trust(crate::trust::TrustPolicy::from_caps(
+        [("acme-shared".to_string(), TrustTier::MachineConfirmed)]
+            .into_iter()
+            .collect(),
+    ))
+}
 
 #[test]
 fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
-    let mut rig = rig();
+    let mut rig = trusted_rig();
     // A local skill shadowing the imported one by name.
     let shadow: Concept = ("---\n\
          type: Skill\n\
@@ -48,7 +59,7 @@ fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
 
 #[test]
 fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
-    let mut rig = rig();
+    let mut rig = trusted_rig();
     let out = rig.state.get_skill(GetSkillParams {
         cwd: project(),
         name: "shared-audit".to_string(),
@@ -92,4 +103,99 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
         })
         .unwrap_err();
     assert!(matches!(err, Error::ConceptNotFound { .. }), "got {err:?}");
+}
+
+// --- Provenance-capped tiers (imported claims are never self-serving) ---
+
+#[test]
+fn imported_tier_defaults_to_unverified_without_configured_trust() {
+    // The default rig has no `trust` configuration, so the import's
+    // `verified: machine-confirmed` self-claim must not relay.
+    let mut rig = rig();
+    let report = rig
+        .state
+        .list_skills(ListSkillsParams { cwd: project() })
+        .unwrap();
+    let imported = report
+        .skills
+        .iter()
+        .find(|s| s.argosy == "acme-shared" && s.name == "shared-audit")
+        .unwrap();
+    assert_eq!(imported.verified, "unverified");
+}
+
+#[test]
+fn configured_cap_above_the_claim_leaves_the_claim_standing() {
+    let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
+        [("acme-shared".to_string(), TrustTier::HumanReviewed)]
+            .into_iter()
+            .collect(),
+    ));
+    let out = rig
+        .state
+        .get_skill(GetSkillParams {
+            cwd: project(),
+            name: "shared-audit".to_string(),
+        })
+        .unwrap();
+    assert_eq!(out.skill.verified, "machine-confirmed");
+}
+
+#[test]
+fn configured_cap_below_the_claim_caps_the_reported_tier() {
+    let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
+        [("acme-shared".to_string(), TrustTier::Unverified)]
+            .into_iter()
+            .collect(),
+    ));
+    let out = rig
+        .state
+        .get_skill(GetSkillParams {
+            cwd: project(),
+            name: "shared-audit".to_string(),
+        })
+        .unwrap();
+    assert_eq!(out.skill.verified, "unverified");
+}
+
+#[test]
+fn local_claims_are_never_capped_by_the_import_policy() {
+    // A local skill that claims `human-reviewed` relays verbatim even when
+    // the trust section caps the local manifest name at `unverified`:
+    // caps apply to imports only — the local book is the user's own hand.
+    let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
+        [("acme-billing".to_string(), TrustTier::Unverified)]
+            .into_iter()
+            .collect(),
+    ));
+    let claiming: Concept = ("---\n\
+         type: Skill\n\
+         description: Locally vouched deploy runbook.\n\
+         verified: human-reviewed\n\
+         ---\n\
+         # Deploy\n\nLocal steps.\n")
+        .parse()
+        .unwrap();
+    rig.state
+        .session(project())
+        .unwrap()
+        .context
+        .local()
+        .write_concept(
+            Namespace::Skill,
+            &"skill/local-runbook".parse().unwrap(),
+            &claiming,
+        )
+        .unwrap();
+
+    let report = rig
+        .state
+        .list_skills(ListSkillsParams { cwd: project() })
+        .unwrap();
+    let local = report
+        .skills
+        .iter()
+        .find(|s| s.argosy == "acme-billing" && s.name == "local-runbook")
+        .unwrap();
+    assert_eq!(local.verified, "human-reviewed");
 }

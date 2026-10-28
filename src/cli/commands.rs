@@ -68,19 +68,24 @@ pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result
     };
     let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
     let dest = root.join(&args.name);
+    // A present sidecar on an accepted clone has passed verification
+    // (clone_as_checkout refuses mismatches); report which is which.
+    let integrity = argosy::pull::integrity_status(&dest);
     if out.json {
         out.json(&serde_json::json!({
             "name": argosy.manifest().name(),
             "argosy_version": argosy.manifest().argosy_version(),
             "path": dest,
             "global": global,
+            "integrity": integrity,
         }))?;
     } else {
         out.note(&format!(
-            "pulled {} {} into {}",
+            "pulled {} {} into {} (integrity: {})",
             argosy.manifest().name(),
             argosy.manifest().argosy_version(),
-            dest.display()
+            dest.display(),
+            integrity
         ));
     }
     Ok(ExitCode::SUCCESS)
@@ -592,6 +597,9 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let db_name = config.index_db_name().to_string();
     let embed_cache = embed_cache_override(config);
     let spec = model_spec(config)?;
+    // Trust tiers come from local configuration, never a book's
+    // self-claim: imports are capped per the `trust` section (SEC-2).
+    let trust = config.trust_policy();
     // No project is opened at startup: the server runs from any directory,
     // and every tool call names its project (`cwd`). Projects open lazily
     // through this factory and stay cached for the process lifetime.
@@ -621,7 +629,9 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
                 root.display()
             ),
         }
-        Ok(ProjectSession::new(context, index).with_default_k(default_k))
+        Ok(ProjectSession::new(context, index)
+            .with_default_k(default_k)
+            .with_trust_policy(trust.clone()))
     });
     #[allow(unused_mut)]
     let mut state = McpState::new(factory);

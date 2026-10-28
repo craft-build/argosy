@@ -36,6 +36,17 @@ pub const INDEX_DB_NAME: &str = "index.db";
 /// project and flag slots whose project directory no longer exists.
 pub const SLOT_ROOT_FILE: &str = ".project-root";
 
+/// The sibling stamp `argosy pull` records beside every checkout
+/// (`<checkout>.import-integrity`): the SHA-256 of the sidecar it verified,
+/// or `absent` when the book shipped none. It lives in importer-controlled
+/// state *outside* the cloned tree, so tampering with the checkout —
+/// including deleting the sidecar (making the book look never-packaged) or
+/// rewriting it to match injected content — is caught at the next open.
+pub const IMPORT_INTEGRITY_SUFFIX: &str = ".import-integrity";
+
+/// The stamp body for a checkout that shipped no integrity sidecar.
+const STAMP_NO_SIDECAR: &str = "absent";
+
 /// The user's argosy state root: `$XDG_STATE_HOME/argosy` (falling back
 /// to `~/.local/state/argosy`, and on Windows — where neither
 /// `$XDG_STATE_HOME` nor `$HOME` is set by default — to
@@ -169,11 +180,15 @@ fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
     .into_error(err)
 }
 
-/// Clones the argosy at `url` into `<root>/<name>` via `git clone` and
-/// opens it, refusing to overwrite an existing checkout and rejecting
-/// `name` outside the URI charset (see
+/// Clones the argosy at `url` into `<root>/<name>` via `git clone`, opens
+/// it, and — when the clone carries an integrity sidecar
+/// ([`crate::package::INTEGRITY_FILENAME`], emitted by
+/// [`crate::package::package`]) — verifies every hash in it before the
+/// checkout is accepted, refusing to overwrite an existing checkout and
+/// rejecting `name` outside the URI charset (see
 /// [`crate::bundle::is_safe_bundle_name`]). All-or-nothing: a failed or
-/// non-bundle clone leaves no partial checkout behind.
+/// non-bundle clone, or one whose sidecar disagrees with its contents,
+/// leaves no partial checkout behind.
 pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
     // The URL reaches `git` verbatim: a leading dash would be parsed as a
     // git option (`--upload-pack=<cmd>` executes commands), and `ext::`
@@ -235,7 +250,29 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
         .fail();
     }
     match Argosy::open(&dest) {
-        Ok(argosy) => Ok(argosy),
+        Ok(argosy) => {
+            // A packaged bundle ships an integrity sidecar; a book that
+            // carries one is verified before it becomes an import, so a
+            // clone tampered with in transit (or a repo whose sidecar
+            // disagrees with its contents) is refused at the door. No
+            // sidecar means nothing was ever packaged — nothing to verify
+            // (tier policy, not this check, governs trust).
+            if sidecar_is_regular_file(&dest)
+                && let Err(error) = crate::package::validate_integrity(&dest)
+            {
+                let _ = fs::remove_dir_all(&dest);
+                return Err(error);
+            }
+            // Record what was verified beside the checkout, in
+            // importer-controlled state: the stamp is what makes a *later*
+            // tamper with the cloned tree (sidecar deleted or rewritten
+            // included) detectable at the next open.
+            if let Err(error) = write_import_integrity_stamp(&dest) {
+                let _ = fs::remove_dir_all(&dest);
+                return Err(error);
+            }
+            Ok(argosy)
+        }
         Err(error) => {
             let _ = fs::remove_dir_all(&dest);
             NotAnArgosySnafu {
@@ -244,6 +281,106 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
             }
             .fail()
         }
+    }
+}
+
+/// Whether an accepted checkout carries a verified integrity sidecar:
+/// `"verified"` when [`crate::package::INTEGRITY_FILENAME`] is present (a
+/// present sidecar on an accepted checkout has necessarily passed
+/// [`crate::package::validate_integrity`]), `"no sidecar"` when the book
+/// was never packaged. Pull output relays this so the user can see which
+/// imports are tamper-checked.
+pub fn integrity_status(checkout: &Path) -> &'static str {
+    if sidecar_is_regular_file(checkout) {
+        "verified"
+    } else {
+        "no sidecar"
+    }
+}
+
+/// The pull-time stamp path beside a checkout:
+/// `<parent>/<name>.import-integrity` (see [`IMPORT_INTEGRITY_SUFFIX`]).
+pub fn import_integrity_stamp(checkout: &Path) -> PathBuf {
+    let name = checkout
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "checkout".to_string());
+    checkout.with_file_name(format!("{name}{IMPORT_INTEGRITY_SUFFIX}"))
+}
+
+/// The sidecar is present as a real regular file — symlinks do not count:
+/// the sidecar lives inside the (attacker-reachable) checkout, and a
+/// symlinked `argosy-integrity.txt` must read as absent, not as a stream
+/// to follow.
+fn sidecar_is_regular_file(checkout: &Path) -> bool {
+    std::fs::symlink_metadata(checkout.join(crate::package::INTEGRITY_FILENAME))
+        .is_ok_and(|m| m.file_type().is_file())
+}
+
+/// The stamp body for a freshly pulled `checkout`: the SHA-256 of its
+/// verified sidecar, or [`STAMP_NO_SIDECAR`] when it shipped none.
+fn stamp_body(checkout: &Path) -> Result<String> {
+    if !sidecar_is_regular_file(checkout) {
+        return Ok(STAMP_NO_SIDECAR.to_string());
+    }
+    let path = checkout.join(crate::package::INTEGRITY_FILENAME);
+    let bytes = fs::read(&path).context(IoSnafu { path })?;
+    Ok(crate::hash::sha256_hex(&bytes))
+}
+
+/// Writes the pull-time integrity stamp beside `checkout`. Called only
+/// after the checkout was accepted (sidecar verified when present).
+fn write_import_integrity_stamp(checkout: &Path) -> Result<()> {
+    let stamp = import_integrity_stamp(checkout);
+    fs::write(&stamp, stamp_body(checkout)?).context(IoSnafu { path: stamp })
+}
+
+/// Verifies a checkout against its pull-time stamp
+/// ([`IMPORT_INTEGRITY_SUFFIX`]). `Err(reason)` means the checkout must be
+/// excluded from the active set — never served:
+///
+/// - a stamped sidecar must still exist byte-for-byte (delete it, or
+///   rewrite it to match injected content, and the import is out);
+/// - a checkout pulled *without* a sidecar must not grow one;
+/// - whenever a sidecar is present its hashes must still cover the
+///   checkout's contents ([`crate::package::validate_integrity`]).
+///
+/// Checkouts pulled before stamps existed (or pointed at directly by a
+/// host) have no stamp: the standing rule applies — a present sidecar is
+/// verified, an absent one means nothing was ever packaged.
+pub fn verify_import_integrity(checkout: &Path) -> std::result::Result<(), String> {
+    let repull = "remove the checkout and `argosy pull` it again";
+    let stamp = fs::read_to_string(import_integrity_stamp(checkout))
+        .ok()
+        .map(|s| s.trim().to_string());
+    let sidecar_path = checkout.join(crate::package::INTEGRITY_FILENAME);
+    match (stamp.as_deref(), sidecar_is_regular_file(checkout)) {
+        (None, false) => Ok(()),
+        (None, true) => crate::package::validate_integrity(checkout)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}")),
+        (Some(STAMP_NO_SIDECAR), false) => Ok(()),
+        (Some(STAMP_NO_SIDECAR), true) => Err(format!(
+            "an integrity sidecar appeared after `argosy pull` (the book was pulled without \
+             one); {repull}"
+        )),
+        (Some(expected), true) => {
+            let bytes = fs::read(&sidecar_path)
+                .map_err(|e| format!("cannot read the integrity sidecar: {e}"))?;
+            if crate::hash::sha256_hex(&bytes) != expected {
+                return Err(format!(
+                    "the integrity sidecar changed since `argosy pull` (rewritten or \
+                     re-committed upstream); {repull}"
+                ));
+            }
+            crate::package::validate_integrity(checkout)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        }
+        (Some(_), false) => Err(format!(
+            "the integrity sidecar is missing — it was verified when the book was pulled, so \
+             the checkout changed underneath it; {repull}"
+        )),
     }
 }
 
@@ -468,5 +605,148 @@ mod tests {
 
         assert!(err.to_string().contains("not an argosy"), "{err}");
         assert!(!root.join("notargosy").exists(), "partial checkout removed");
+    }
+
+    /// Builds a git repo from a *packaged* copy of the minimal bundle, so
+    /// the clone carries an integrity sidecar.
+    fn packaged_repo(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: remote-rules\nargosy_version: \"1.2.0\"\n---\n# remote-rules\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source.path().join("document")).unwrap();
+        fs::write(source.path().join("document/guide.md"), "Guide.\n").unwrap();
+        crate::package::package(
+            &crate::bundle::Argosy::open(source.path()).unwrap(),
+            dir,
+            &crate::package::PackageOptions::default(),
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "x",
+        ]);
+    }
+
+    #[test]
+    fn clone_accepts_a_repo_whose_sidecar_matches_its_contents() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("pkg-repo");
+        packaged_repo(&repo);
+        let root = tmp.path().join("store");
+
+        let argosy = clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        assert_eq!(argosy.manifest().name(), "remote-rules");
+        assert_eq!(integrity_status(&root.join("shared")), "verified");
+    }
+
+    #[test]
+    fn pull_records_an_integrity_stamp_beside_the_checkout() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("pkg-repo");
+        packaged_repo(&repo);
+        let root = tmp.path().join("store");
+
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        // The stamp hashes the *verified* sidecar and lives outside the
+        // cloned tree — the importer's record of what it accepted.
+        let stamp = fs::read_to_string(import_integrity_stamp(&root.join("shared"))).unwrap();
+        let sidecar =
+            fs::read(root.join("shared").join(crate::package::INTEGRITY_FILENAME)).unwrap();
+        assert_eq!(stamp, crate::hash::sha256_hex(&sidecar));
+        assert_eq!(stamp.len(), 64, "a sha256 hex digest: {stamp}");
+
+        // Accepting against the stamp: unchanged checkout verifies.
+        assert!(verify_import_integrity(&root.join("shared")).is_ok());
+    }
+
+    #[test]
+    fn a_sidecarless_pull_stamps_absent() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        git_repo(&repo); // hand-rolled: no sidecar
+        let root = tmp.path().join("store");
+
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        let stamp = fs::read_to_string(import_integrity_stamp(&root.join("shared"))).unwrap();
+        assert_eq!(stamp, "absent");
+        assert!(verify_import_integrity(&root.join("shared")).is_ok());
+    }
+
+    #[test]
+    fn clone_refuses_a_tampered_sidecar_and_leaves_no_checkout() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("pkg-repo");
+        packaged_repo(&repo);
+        // Tamper *after* the sidecar was committed, and commit the tamper:
+        // a book whose sidecar no longer matches its contents is exactly
+        // what a rug-pulled or tampered repo looks like.
+        fs::write(repo.join("document/guide.md"), "Injected.\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--quiet",
+            "-m",
+            "tamper",
+        ]);
+        let root = tmp.path().join("store");
+
+        let err = clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap_err();
+
+        assert!(
+            err.to_string().contains("integrity"),
+            "error names the integrity failure: {err}"
+        );
+        assert!(
+            !root.join("shared").exists(),
+            "refused clone leaves nothing"
+        );
+    }
+
+    #[test]
+    fn a_clone_without_a_sidecar_is_accepted_with_nothing_to_verify() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        git_repo(&repo); // hand-rolled: no sidecar
+        let root = tmp.path().join("store");
+
+        let argosy = clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        assert_eq!(argosy.manifest().name(), "remote-rules");
+        assert_eq!(integrity_status(&root.join("shared")), "no sidecar");
     }
 }

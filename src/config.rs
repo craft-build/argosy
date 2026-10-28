@@ -35,6 +35,12 @@
 //! code_tools {
 //!     allow_external_paths = false
 //! }
+//! trust {
+//!     // Per-import maximum OKF tier, keyed by manifest name. An import
+//!     // with no entry is capped at "unverified" whatever its concepts
+//!     // claim in `verified` frontmatter.
+//!     "acme-shared" = "machine-confirmed"
+//! }
 //! decision {
 //!     enabled = false                    // Jev-compatible endpoint, off by default
 //!     provider = "laya-serve"            // or "jev" for a hosted/other endpoint
@@ -51,6 +57,7 @@
 //! (`$XDG_STATE_HOME`, `$ARGOSY_EMBED_CACHE_DIR`) except where this
 //! config explicitly overrides it.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +86,7 @@ fn flex_uint<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<
 }
 
 use crate::error::{ConfigSnafu, Result};
+use crate::trust::{TrustPolicy, TrustTier};
 
 /// The user-level configuration. Every field has a default matching the
 /// pre-configuration behavior; command-line flags always win over it.
@@ -99,6 +107,8 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// Defaults for the code-intelligence tools.
     pub code_tools: CodeToolsConfig,
+    /// Per-import maximum OKF trust tiers (see [`TrustPolicy`]).
+    pub trust: HashMap<String, TrustTier>,
     /// Defaults for the optional Jev-compatible decision endpoint.
     pub decision: DecisionConfig,
 }
@@ -459,7 +469,25 @@ impl Config {
                 ),
             });
         }
+        for name in self.trust.keys() {
+            if !crate::bundle::is_safe_bundle_name(name) {
+                return Err(crate::error::Error::Validation {
+                    reason: format!(
+                        "configuration: trust key `{name}` is not a valid argosy manifest name \
+                         (only [A-Za-z0-9._-] are allowed — the key must spell the import's \
+                         manifest name, the `argosy://` URI spelling)"
+                    ),
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// The provenance trust policy derived from the `trust` section: the
+    /// maximum OKF tier each named import may carry. Imports with no entry
+    /// are capped at `unverified` whatever their concepts claim.
+    pub fn trust_policy(&self) -> TrustPolicy {
+        TrustPolicy::from_caps(self.trust.clone())
     }
 
     /// The configured embedding model's registry name (default included).
@@ -666,6 +694,55 @@ mod tests {
         let config = load(&tmp.path().join("argosy"));
         assert!(config.code_tools.allow_external_paths);
         assert!(!Config::default().code_tools.allow_external_paths);
+    }
+
+    #[test]
+    fn trust_section_parses_into_provenance_caps() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            r#"
+            trust {
+                "acme-shared" = "machine-confirmed"
+                "acme-vetted" = "human-reviewed"
+            }
+            "#,
+        );
+        let config = load(&tmp.path().join("argosy"));
+        let policy = config.trust_policy();
+        assert_eq!(policy.cap("acme-shared"), TrustTier::MachineConfirmed);
+        assert_eq!(policy.cap("acme-vetted"), TrustTier::HumanReviewed);
+        // An import with no configured entry caps at unverified, and the
+        // default configuration grants nothing.
+        assert_eq!(policy.cap("anything-else"), TrustTier::Unverified);
+        assert_eq!(
+            Config::default().trust_policy().cap("acme-shared"),
+            TrustTier::Unverified
+        );
+    }
+
+    #[test]
+    fn trust_rejects_unknown_tier_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            r#"trust { "acme-shared" = "trust-me" }"#,
+        );
+        let err = Config::load_from(Some(&tmp.path().join("argosy"))).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("trust") || msg.contains("tier"), "{msg}");
+    }
+
+    #[test]
+    fn trust_rejects_keys_that_cannot_be_manifest_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            r#"trust { "acme shared" = "human-reviewed" }"#,
+        );
+        let err = Config::load_from(Some(&tmp.path().join("argosy"))).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("trust key"), "{msg}");
     }
 
     #[test]

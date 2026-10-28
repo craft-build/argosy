@@ -150,6 +150,39 @@ embedding order, and findings are recorded unassessed. None of it ever filters
 or drops a finding. argosy ships no model weights for this — the endpoint is
 the user's to run or subscribe to.
 
+### Trust and integrity of imported argosys
+
+Imported books are shared content, so they are never taken at their word:
+
+- **Integrity sidecar.** `argosy package` emits an `argosy-integrity.txt`
+  sidecar (one SHA-256 per file). `argosy pull` verifies it after cloning —
+  a book whose sidecar disagrees with its contents is refused and leaves no
+  checkout — and records what it verified in a stamp beside the checkout
+  (`<name>.import-integrity`, outside the cloned tree). Every later open
+  re-verifies against that stamp: content tampered with after the pull, a
+  deleted sidecar, or a rewritten "self-consistent" one all fail closed.
+  A tampered import is *excluded* from the session (never served) and
+  reported under `excluded` in the `argosy://_argosys` resource and as
+  `INTEGRITY FAILED` in the catalog; remove the checkout and re-pull. A
+  book that ships no sidecar was never packaged and simply has nothing to
+  verify.
+- **Provenance-capped trust tiers.** A skill's `verified` frontmatter is
+  relayed verbatim only for your local book. An import's self-claim is
+  capped at what *you* configured for it, defaulting to `unverified` —
+  `list_skills` and `get_skill` surface the capped tier:
+
+  ```bml
+  # ~/.config/argosy/argosy.bml
+  trust {
+      "acme-shared" = "machine-confirmed"   # unverified | machine-confirmed | human-reviewed
+  }
+  ```
+
+  Keys are manifest names (the `argosy://` URI spelling); an import with no
+  entry reads as `unverified` whatever it claims. Treat imported content as
+  untrusted input regardless of tier: confirmation policy is your harness's
+  decision (the spec's SEC-1/SEC-2/SEC-3).
+
 ### Code-intelligence tools
 
 The same server also serves read-mostly **code-intelligence tools** over

@@ -26,8 +26,12 @@ pub(crate) struct WalkResult {
 }
 
 /// Recursively collects every entry under `root.join(rel)`. `.argosy/` index
-/// directories are skipped entirely: the index is a derivative artifact, not
-/// bundle content. Directory symlinks are not followed
+/// directories and `.git/` repositories are skipped entirely: both are
+/// derivative metadata, not bundle content — skipping `.git` is also what
+/// lets a *clone* of a packaged book verify against the packaged sidecar
+/// (`validate_integrity` checks completeness against this same walk) and
+/// keeps `bundle_content_hash` identical across clones of one tree.
+/// Directory symlinks are not followed
 /// (`file_type`, not `metadata`), so cycles are impossible.
 pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
     let rd = match fs::read_dir(root.join(rel)) {
@@ -57,7 +61,7 @@ pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
                 continue;
             }
         };
-        if is_dir && name == ".argosy" {
+        if is_dir && (name == ".argosy" || name == ".git") {
             continue;
         }
         let is_symlink = entry.file_type().is_ok_and(|ty| ty.is_symlink());

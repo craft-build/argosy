@@ -149,6 +149,22 @@ pub struct RuleListing {
     pub rule: StyleguideRule,
 }
 
+/// An import refused at open: its integrity sidecar
+/// ([`crate::package::INTEGRITY_FILENAME`]) disagreed with the checkout's
+/// contents, so it was tampered with after packaging. An excluded import is
+/// never served — none of its concepts, skills or rules are visible — which
+/// is why the exclusion is recorded rather than swallowed: surfaces such as
+/// the `argosy://_argosys` listing report it so the missing content is
+/// investigated instead of silently lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcludedImport {
+    /// Best-effort identity of the refused checkout: its directory name
+    /// (a state-dir checkout is named after the `argosy pull`).
+    pub name: String,
+    /// Why it was refused: the `{:#}` chain of the integrity error.
+    pub reason: String,
+}
+
 /// The active argosys of a project: exactly one local (writable) argosy and
 /// any number of imported (read-only) ones. The composition rules live here
 /// as enforced behavior; see the module docs.
@@ -156,21 +172,43 @@ pub struct RuleListing {
 pub struct ProjectContext {
     local: LocalArgosy,
     imported: Vec<Argosy>,
+    excluded: Vec<ExcludedImport>,
 }
 
 impl ProjectContext {
-    /// Opens the local argosy plus every imported one, in registration order.
-    /// Fails if any argosy fails to open or if two share a manifest name —
-    /// erroring at open keeps identity-by-name unambiguous.
+    /// Opens the local argosy plus every imported one, in registration
+    /// order. An import that ships an integrity sidecar is verified first:
+    /// one whose contents disagree with the sidecar is *excluded* (recorded
+    /// via [`ProjectContext::excluded_imports`], never served) rather than
+    /// failing the whole open — the local book and the healthy imports
+    /// stay usable. Fails if any surviving argosy fails to open or if two
+    /// share a manifest name — erroring at open keeps identity-by-name
+    /// unambiguous.
     pub fn open(
         local_path: impl AsRef<Path>,
         imported_paths: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self> {
         let local = LocalArgosy::open(local_path)?;
-        let imported = imported_paths
-            .into_iter()
-            .map(Argosy::open)
-            .collect::<Result<Vec<_>>>()?;
+        let mut imported = Vec::new();
+        let mut excluded = Vec::new();
+        for path in imported_paths {
+            // Integrity first: a pulled checkout is verified against its
+            // pull-time stamp (sidecar present, unchanged, and still
+            // covering the contents). `Err` means tampered — *excluded*,
+            // never served — while the rest of the context still opens.
+            // Books without a stamp (pre-stamp checkouts, hosts pointing
+            // at arbitrary trees) keep the standing rule: a present
+            // sidecar is verified, an absent one was never packaged (a
+            // trust/tier question, see [`crate::trust`]).
+            if let Err(reason) = crate::pull::verify_import_integrity(&path) {
+                excluded.push(ExcludedImport {
+                    name: checkout_label(&path),
+                    reason,
+                });
+                continue;
+            }
+            imported.push(Argosy::open(path)?);
+        }
 
         let local_name = local.manifest().name();
         ensure!(
@@ -188,7 +226,11 @@ impl ProjectContext {
                 }
             );
         }
-        Ok(Self { local, imported })
+        Ok(Self {
+            local,
+            imported,
+            excluded,
+        })
     }
 
     /// The local argosy with its full write surface. The only mutable
@@ -247,6 +289,13 @@ impl ProjectContext {
     /// The imported argosys, read-only, in registration (precedence) order.
     pub fn imported(&self) -> impl Iterator<Item = &Argosy> {
         self.imported.iter()
+    }
+
+    /// Imports refused at open because their integrity sidecar disagreed
+    /// with the checkout's contents (see [`ExcludedImport`]). Empty for a
+    /// healthy context.
+    pub fn excluded_imports(&self) -> &[ExcludedImport] {
+        &self.excluded
     }
 
     /// Finds an active argosy by manifest name — the local one first, then
@@ -386,6 +435,15 @@ impl ProjectContext {
         }
         Ok(listings)
     }
+}
+
+/// Best-effort identity of an excluded import for surfacing: the
+/// checkout's directory name (a state-dir checkout is named after the
+/// `argosy pull`), or the whole path when it has no file name.
+fn checkout_label(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Appends the bundle checkouts directly under `dir`: every subdirectory

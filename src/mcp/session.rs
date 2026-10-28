@@ -11,6 +11,7 @@ use crate::context::{ProjectContext, QualifiedConceptId};
 use crate::error::{Error, Result};
 use crate::index::{EmbeddingProvider, Filter, Index, Query, VectorStore};
 use crate::local::{LocalArgosy, PromotionTarget};
+use crate::trust::{Origin, TrustPolicy};
 
 #[cfg(feature = "decision")]
 use crate::decision::{
@@ -32,6 +33,10 @@ pub struct ProjectSession<P: EmbeddingProvider, S: VectorStore> {
     /// The hit count when a search tool call omits `k` (user
     /// configuration; defaults to [`super::DEFAULT_K`]).
     pub default_k: usize,
+    /// Provenance trust policy: the maximum tier each imported argosy may
+    /// carry (user configuration; empty means every import reads as
+    /// `unverified` whatever its concepts claim — see [`crate::trust`]).
+    pub trust: TrustPolicy,
 }
 
 /// Opens the [`ProjectSession`] for a project root: context discovery,
@@ -70,6 +75,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             context,
             index,
             default_k: super::DEFAULT_K,
+            trust: TrustPolicy::new(),
         }
     }
 
@@ -77,6 +83,25 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     pub fn with_default_k(mut self, default_k: usize) -> Self {
         self.default_k = default_k;
         self
+    }
+
+    /// Overrides the provenance trust policy (from user configuration —
+    /// see [`crate::config::Config::trust_policy`]). The default caps
+    /// every import at `unverified`.
+    pub fn with_trust_policy(mut self, trust: TrustPolicy) -> Self {
+        self.trust = trust;
+        self
+    }
+
+    /// The effective trust tier of a concept in argosy `name`: verbatim
+    /// claims for the local book, configuration-capped for imports
+    /// ([`TrustPolicy::effective`]).
+    fn verified_tier(&self, name: &str, concept: &Concept) -> String {
+        let origin = match self.context.argosy_named(name) {
+            Some(crate::context::ArgosyRef::Local(_)) => Origin::Local,
+            Some(crate::context::ArgosyRef::Imported(_)) | None => Origin::Imported,
+        };
+        self.trust.effective_for(origin, name, concept)
     }
 
     /// Brings the index back in line with disk after a mutation. The write
@@ -325,7 +350,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                 let verified = self
                     .context
                     .resolve(&qid)
-                    .map(|c| verified_tier(&c))
+                    .map(|c| self.verified_tier(&listing.argosy, &c))
                     .unwrap_or_else(|_| UNVERIFIED.to_string());
                 SkillOut {
                     name: listing.skill.name,
@@ -354,7 +379,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             id: listing.skill.entry_point.clone(),
         };
         let concept = self.context.resolve(&qid)?;
-        let verified = verified_tier(&concept);
+        let verified = self.verified_tier(&listing.argosy, &concept);
         Ok(SkillContent {
             skill: SkillOut {
                 name: listing.skill.name,
@@ -565,8 +590,20 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     pub fn read_resource(&self, uri: &str) -> Result<ResourceBody> {
         if uri == ARGOSYS_URI {
             let infos = self.argosy_infos();
-            let text = serde_json::to_string_pretty(&ArgosysReport { argosys: infos })
-                .expect("ArgosysReport always serializes");
+            let excluded = self
+                .context
+                .excluded_imports()
+                .iter()
+                .map(|e| ExcludedArgosy {
+                    name: e.name.clone(),
+                    reason: e.reason.clone(),
+                })
+                .collect();
+            let text = serde_json::to_string_pretty(&ArgosysReport {
+                argosys: infos,
+                excluded,
+            })
+            .expect("ArgosysReport always serializes");
             return Ok(ResourceBody {
                 uri: uri.to_string(),
                 text,
@@ -636,7 +673,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             ResourceDescriptor {
                 uri: ARGOSYS_URI.to_string(),
                 name: "Active argosys".to_string(),
-                description: "Every active argosy: name, version, and whether it is the writable local or a read-only import. Read it through this resource, never from the argosy state directory on disk.".to_string(),
+                description: "Every active argosy: name, version, and whether it is the writable local or a read-only import — plus any import refused at open for failing integrity verification (its content is not served; remove the checkout and re-pull). Read it through this resource, never from the argosy state directory on disk.".to_string(),
                 mime: "application/json",
             },
             ResourceDescriptor {

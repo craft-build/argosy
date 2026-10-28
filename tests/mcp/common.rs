@@ -244,11 +244,23 @@ pub(crate) fn rig() -> Rig {
     let factory: SessionFactory<FakeEmbedder, MemVec> = {
         let local_root = local.path().to_path_buf();
         let imported_root = imported.path().to_path_buf();
+        // The e2e double of the CLI's config-derived policy: the user has
+        // granted `acme-shared` exactly the tier its skill claims, so the
+        // wire tests see the granted tier relay (an unconfigured import
+        // would read as `unverified` whatever it claims).
+        let trust = argosy::trust::TrustPolicy::from_caps(
+            [(
+                "acme-shared".to_string(),
+                argosy::trust::TrustTier::MachineConfirmed,
+            )]
+            .into_iter()
+            .collect(),
+        );
         Arc::new(move |_root| {
             let context = ProjectContext::open(&local_root, [imported_root.clone()])?;
             let mut index = Index::new(FakeEmbedder, MemVec::default());
             index.reconcile(&context)?;
-            Ok(ProjectSession::new(context, index))
+            Ok(ProjectSession::new(context, index).with_trust_policy(trust.clone()))
         })
     };
     Rig {

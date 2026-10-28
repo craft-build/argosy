@@ -3,10 +3,6 @@
 
 use serde::Serialize;
 
-use crate::concept::Concept;
-
-use super::UNVERIFIED;
-
 /// One search hit, with the qualified `argosy://` URI and the unit's facets
 /// so clients can re-filter without resolving.
 #[derive(Debug, Clone, Serialize)]
@@ -200,11 +196,28 @@ pub struct ArgosyInfo {
     pub kind: &'static str,
 }
 
+/// An imported argosy refused at open because its integrity sidecar
+/// disagreed with the checkout's contents (see
+/// [`crate::context::ExcludedImport`]). Reported by the
+/// `argosy://_argosys` listing so the silently-missing content is
+/// investigated — remove the checkout and re-pull it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExcludedArgosy {
+    /// Best-effort identity of the refused checkout (its directory name).
+    pub name: String,
+    /// The `{:#}` chain of the integrity error.
+    pub reason: String,
+}
+
 /// The `argosy://_argosys` resource body.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArgosysReport {
     /// Every active argosy, local first, imports in registration order.
     pub argosys: Vec<ArgosyInfo>,
+    /// Imports refused at open for failing integrity verification. Their
+    /// content is *not* served; the key is omitted for a healthy context.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<ExcludedArgosy>,
 }
 
 /// One read resource's body, pre-rmcp.
@@ -231,17 +244,6 @@ pub struct ResourceDescriptor {
     pub description: String,
     /// MIME type.
     pub mime: &'static str,
-}
-
-/// The verified tier of a concept: its `verified` frontmatter value, or
-/// `"unverified"` when absent. A non-string value is treated as absent —
-/// tool output is for LLM consumers, and a surprise structure is not a
-/// trust signal to relay.
-pub(super) fn verified_tier(concept: &Concept) -> String {
-    concept
-        .get_str("verified")
-        .map(str::to_string)
-        .unwrap_or_else(|| UNVERIFIED.to_string())
 }
 
 /// `_meta` identity blob attached to resource reads.

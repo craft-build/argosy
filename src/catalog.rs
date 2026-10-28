@@ -116,6 +116,11 @@ pub struct BundleInfo {
     pub argosy_version: String,
     /// Per-namespace content counts for this bundle.
     pub contents: NamespaceCounts,
+    /// Present iff the checkout fails integrity verification: such an
+    /// import is *excluded* from every session (never served) — the
+    /// catalog still lists it, flagged, so the gap is visible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
 }
 
 /// Per-namespace concept counts. Skills and styleguide rules are counted by
@@ -452,7 +457,15 @@ fn scan_bundles(dir: &Path, exclude: Option<&str>) -> Vec<ScannedBundle> {
             continue;
         }
         if let Ok(argosy) = Argosy::open(&path) {
-            out.push(scan_one(&argosy));
+            let mut scanned = scan_one(&argosy);
+            // An import that fails integrity verification is excluded
+            // from every session — flag it here too, so the catalog never
+            // presents as healthy what `argosy://_argosys` reports
+            // excluded.
+            if let Err(reason) = pull::verify_import_integrity(&path) {
+                scanned.info.integrity = Some(reason);
+            }
+            out.push(scanned);
         }
     }
     out
@@ -487,6 +500,7 @@ fn scan_one(argosy: &Argosy) -> ScannedBundle {
             writable: false,
             argosy_version: argosy.manifest().argosy_version().to_string(),
             contents: counts(argosy),
+            integrity: None,
         },
         ids,
     }
@@ -715,6 +729,11 @@ fn render_bundle_list(out: &mut String, label: &str, bundles: &[BundleInfo]) {
             "  - {} ({role}; {} document(s), {} memor(ies), {} skill(s), {} styleguide(s))\n",
             bundle.name, counts.documents, counts.memories, counts.skills, counts.styleguides
         ));
+        if let Some(reason) = &bundle.integrity {
+            out.push_str(&format!(
+                "    - INTEGRITY FAILED — excluded from every session, not served; {reason}\n"
+            ));
+        }
     }
 }
 
@@ -791,6 +810,42 @@ mod tests {
         assert_eq!(entry.root_exists, Some(true));
         assert!(!entry.stale);
         assert_eq!(entry.hash.len(), 8);
+    }
+
+    #[test]
+    fn a_tampered_import_is_listed_but_flagged_as_not_served() {
+        // The catalog must not present as healthy an import that every
+        // session excludes: it stays listed, flagged INTEGRITY FAILED.
+        let scratch = TempDir::new().unwrap();
+        let state = scratch.path().join("argosy");
+        let project_root = scratch.path().join("myproj");
+        fs::create_dir_all(&project_root).unwrap();
+
+        let slot = pull::record_project_root_at(&state, &project_root).unwrap();
+        bundle(&slot.join("default"), "myproj", 1, 0);
+
+        // A packaged, stamped import that is tampered with afterwards.
+        let source = TempDir::new().unwrap();
+        let shared = bundle(source.path(), "shared-knowledge", 1, 0);
+        let import = slot.join("shared");
+        crate::package::package(&shared, &import, &crate::package::PackageOptions::default())
+            .unwrap();
+        let stamp = pull::import_integrity_stamp(&import);
+        let sidecar_bytes = fs::read(import.join(crate::package::INTEGRITY_FILENAME)).unwrap();
+        fs::write(&stamp, crate::hash::sha256_hex(&sidecar_bytes)).unwrap();
+        // Tamper content only: the stamped sidecar no longer covers it.
+        fs::write(import.join("document/doc-0.md"), "Injected.\n").unwrap();
+
+        let catalog = build(&state, &options()).unwrap();
+        let entry = &catalog.projects[0];
+        assert_eq!(entry.imports.len(), 1, "still listed, never hidden");
+        let reason = entry.imports[0].integrity.as_ref().unwrap();
+        assert!(reason.contains("integrity"), "got {reason}");
+        let rendered = render_markdown(&catalog);
+        assert!(
+            rendered.contains("INTEGRITY FAILED") && rendered.contains("not served"),
+            "flagged in the rendered catalog: {rendered}"
+        );
     }
 
     #[test]

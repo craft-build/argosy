@@ -39,8 +39,9 @@ pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";
 /// Default hit count for `search`/`search_rules`.
 pub(super) const DEFAULT_K: usize = 8;
 
-/// The trust tier reported for concepts with no `verified` frontmatter.
-pub(super) const UNVERIFIED: &str = "unverified";
+/// The trust tier reported for concepts with no `verified` frontmatter —
+/// the canonical spelling lives with the tier machinery ([`crate::trust`]).
+pub(super) use crate::trust::UNVERIFIED;
 
 #[cfg(test)]
 mod tests;

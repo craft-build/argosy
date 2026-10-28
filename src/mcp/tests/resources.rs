@@ -32,6 +32,43 @@ fn read_argosys_resource_lists_local_and_imported() {
 }
 
 #[test]
+fn read_argosys_resource_reports_a_tampered_import_as_excluded() {
+    // A packaged import whose contents are tampered with after the sidecar
+    // was written: open excludes it, and the listing is where the exclusion
+    // becomes visible (the import's content is not served at all).
+    let local = fixture_copy("valid-acme-billing");
+    let imported = import_fixture();
+    let packaged = tempfile::tempdir().unwrap();
+    let book = packaged.path().join("book");
+    crate::package::package(
+        &crate::bundle::Argosy::open(imported.path()).unwrap(),
+        &book,
+        &crate::package::PackageOptions::default(),
+    )
+    .unwrap();
+    fs::write(book.join("skill/shared-audit.md"), "Injected.\n").unwrap();
+    let mut state = McpState::new(factory_with_trust(
+        local.path().to_path_buf(),
+        vec![book],
+        crate::trust::TrustPolicy::new(),
+    ));
+
+    let body = state.read_resource(ARGOSYS_URI).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body.text).unwrap();
+    let argosys = parsed["argosys"].as_array().unwrap();
+    assert_eq!(argosys.len(), 1, "only the local book serves, got {parsed}");
+    let excluded = parsed["excluded"].as_array().unwrap();
+    assert_eq!(excluded[0]["name"], "book");
+    assert!(
+        excluded[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("integrity"),
+        "got {parsed}"
+    );
+}
+
+#[test]
 fn read_argosy_index_reads_the_root_index_md() {
     let mut rig = rig();
     let local_root = rig
