@@ -167,3 +167,36 @@ fn reopening_the_store_reuses_the_index_with_zero_reembeds() {
         "NFR-4: nothing re-embedded"
     );
 }
+
+/// Passage fields survive the sqlite round trip: the matched chunk's
+/// ordinal, breadcrumb, line range and text come back exactly as upserted.
+#[test]
+fn search_returns_the_matched_passage_fields() {
+    let (_dir, mut store) = open_in_tmp();
+    let embedder = MockEmbedder::new();
+    let mut chunk = make_unit(
+        &embedder,
+        "local",
+        Namespace::Document,
+        "document/arch",
+        "Concept: Architecture\nSection: Storage\n\ndatabase locking and retries",
+        meta(Some("Note"), &["db"], None, None),
+    );
+    chunk.chunk_ordinal = 3;
+    chunk.heading_path = "Storage › Retries".to_string();
+    chunk.start_line = 12;
+    chunk.end_line = 20;
+    store.upsert(&[chunk.clone()]).unwrap();
+
+    let query = embedder
+        .embed(&["database locking and retries".to_string()])
+        .unwrap()
+        .remove(0);
+    let hits = store.search(&query, 1, &Filter::default()).unwrap();
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit.chunk_ordinal, 3);
+    assert_eq!(hit.heading_path, "Storage › Retries");
+    assert_eq!((hit.start_line, hit.end_line), (12, 20));
+    assert_eq!(hit.passage, chunk.passage);
+}

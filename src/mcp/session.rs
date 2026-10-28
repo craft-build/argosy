@@ -148,11 +148,11 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     }
 
     /// One index hit as the wire shape, tagged with its provenance
-    /// (`kind`, `trust`, `source_commit`). The tier needs the concept's
-    /// own `verified` claim, so this reads the concept — tolerantly, like
-    /// the `search_rules` enrichment: a hit whose concept can no longer
-    /// be read (deleted mid-flight) keeps its index facets with the floor
-    /// trust tier rather than failing the whole search.
+    /// (`kind`, `trust`, `source_commit`) and its matched passage. The tier
+    /// needs the concept's own `verified` claim, so this reads the concept —
+    /// tolerantly, like the `search_rules` enrichment: a hit whose concept
+    /// can no longer be read (deleted mid-flight) keeps its index facets
+    /// with the floor trust tier rather than failing the whole search.
     fn hit_out(&self, hit: crate::index::SearchHit) -> SearchHitOut {
         let uri = hit.concept.to_uri();
         let argosy = hit.concept.argosy;
@@ -164,12 +164,28 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             .map(|c| self.verified_tier(&argosy, &c))
             .unwrap_or_else(|| UNVERIFIED.to_string());
         let source_commit = self.source_commit(&argosy);
+        // Bound the inline passage: a long section must not blow the tool
+        // result (or the `ask` candidate payload) up. The line range stays
+        // exact, so `read` is always the expansion path.
+        let passage = cap_chars(&hit.passage, MAX_PASSAGE_CHARS);
+        // Imported passages are free text from a shared book — the same
+        // untrusted-content delimiters full bodies get (SEC-1).
+        let passage = if kind == "imported" {
+            untrusted_wrap(&uri, &argosy, &trust, &passage)
+        } else {
+            passage
+        };
         SearchHitOut {
             uri,
             argosy,
             namespace: hit.concept.namespace.as_dir_name().to_string(),
             concept_id: hit.concept.id.to_string(),
             score: hit.score,
+            chunk_ordinal: hit.chunk_ordinal,
+            heading_path: hit.heading_path,
+            start_line: hit.start_line,
+            end_line: hit.end_line,
+            passage,
             concept_type: hit.meta.concept_type,
             description: hit.meta.description,
             tags: hit.meta.tags,
@@ -298,7 +314,16 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             filter: Filter::default(),
         };
         let hits = self.index.search(&self.context, &query)?;
-        let candidates: Vec<SearchHitOut> = hits.into_iter().map(|h| self.hit_out(h)).collect();
+        // Passage-level hits: several chunks of one concept can be in the
+        // top-k. The decision endpoint asks "which document answers", so
+        // collapse to the best-ranked passage per concept first — otherwise
+        // one long document crowds out the rest of the candidate set.
+        let mut seen = std::collections::HashSet::new();
+        let candidates: Vec<SearchHitOut> = hits
+            .into_iter()
+            .map(|h| self.hit_out(h))
+            .filter(|h| seen.insert(h.uri.clone()))
+            .collect();
 
         if !decision.is_enabled() {
             return Ok(AskReport {
@@ -490,6 +515,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// surface cannot serve (the resource protocol carries no `cwd`).
     /// A search hit from an imported argosy is fetched with `argosy` set to
     /// the hit's `argosy` name. Imported content is untrusted input (SEC-1).
+    ///
+    /// `start_line`/`end_line` slice the *body* (frontmatter excluded, 1-based)
+    /// for small-to-big expansion of a passage hit: a ranged read returns the
+    /// body slice alone, tagged with the range it covers.
     pub fn read_concept(&self, params: ReadParams) -> Result<ConceptContent> {
         let (name, kind) = match params.argosy.as_deref() {
             None => (self.context.local().manifest().name().to_string(), "local"),
@@ -507,13 +536,17 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         let concept = self.context.read_uri(&uri)?;
         let trust = self.verified_tier(&name, &concept);
         let source_commit = self.source_commit(&name);
+        let (raw, lines) = match slice_body(&concept, params.start_line, params.end_line)? {
+            Some((slice, range)) => (slice, Some(range)),
+            None => (concept.to_string(), None),
+        };
         // Imported bodies are wrapped in the untrusted-content delimiters
         // (SEC-1); the local book is the user's own writing and is served
         // as-is.
         let content = if kind == "imported" {
-            untrusted_wrap(&uri, &name, &trust, &concept.to_string())
+            untrusted_wrap(&uri, &name, &trust, &raw)
         } else {
-            concept.to_string()
+            raw
         };
         Ok(ConceptContent {
             uri,
@@ -522,6 +555,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             trust,
             source_commit,
             content,
+            lines,
         })
     }
 
@@ -1116,6 +1150,67 @@ pub(crate) fn untrusted_wrap(uri: &str, argosy: &str, trust: &str, body: &str) -
     )
 }
 
+/// Inline passage cap for search hits: long enough for a full section,
+/// small enough that a k=8 result (or an `ask` candidate list) stays
+/// bounded. The line range is always exact, so `read` can widen.
+pub(crate) const MAX_PASSAGE_CHARS: usize = 2_000;
+
+/// Truncates to at most `max` characters (not bytes), appending an
+/// expansion hint when it actually cut.
+pub(crate) fn cap_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push_str(
+        "\n… (passage truncated; use `read` with this hit's start_line/end_line to expand)",
+    );
+    out
+}
+
+/// Slices a concept body to 1-based inclusive lines for a ranged `read`.
+/// `Ok(None)` means "no range requested — return the whole concept".
+/// Validation is actionable: a zero line, a reversed range, or a start past
+/// the body's end is an argument error, never a silent empty read.
+fn slice_body(
+    concept: &Concept,
+    start: Option<u32>,
+    end: Option<u32>,
+) -> Result<Option<(String, LineRange)>> {
+    if start.is_none() && end.is_none() {
+        return Ok(None);
+    }
+    let lines: Vec<&str> = concept.body().lines().collect();
+    let total = lines.len() as u32;
+    if total == 0 {
+        return Err(Error::Validation {
+            reason: "line range requested but the concept has an empty body".to_string(),
+        });
+    }
+    let start = start.unwrap_or(1);
+    if start == 0 {
+        return Err(Error::Validation {
+            reason: "start_line is 1-based; 0 is not a valid line".to_string(),
+        });
+    }
+    if start > total {
+        return Err(Error::Validation {
+            reason: format!(
+                "start_line {start} is past the end of the body ({total} line(s)); \
+                 line numbers refer to the body, frontmatter excluded"
+            ),
+        });
+    }
+    let end = end.unwrap_or(total).min(total);
+    if end < start {
+        return Err(Error::Validation {
+            reason: format!("end_line {end} precedes start_line {start}"),
+        });
+    }
+    let slice = lines[(start - 1) as usize..end as usize].join("\n");
+    Ok(Some((slice, LineRange { start, end })))
+}
+
 /// Reorders styleguide hits by a decision endpoint's applicability score
 /// (advisory): one `noul` question per candidate over a shared state, so all
 /// candidates are scored in one forward pass. On any failure the embedding
@@ -1203,6 +1298,11 @@ mod tests {
             namespace: "styleguide".to_string(),
             concept_id: uri.to_string(),
             score: 0.0,
+            chunk_ordinal: 0,
+            heading_path: String::new(),
+            start_line: 1,
+            end_line: 1,
+            passage: String::new(),
             concept_type: Some("Styleguide Rule".to_string()),
             description: Some(description.to_string()),
             tags: Vec::new(),

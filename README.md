@@ -108,7 +108,10 @@ resources (including the global `argosy://catalog`), a `read` tool for
 concepts in any active argosy (including
 read-only imports), skill listing with trust tiers, and write tools for the
 local argosy's `document/`, `memory/`, and `styleguide/` namespaces. `search`
-hits carry each concept's frontmatter `description`; `search_rules` hits
+hits carry the matched passage: long concepts are chunked by heading, and each
+hit returns the passage text, its heading breadcrumb, and a 1-based body line
+range that `read` accepts (`start_line`/`end_line`) to widen without fetching
+the whole concept. `search_rules` hits
 additionally carry the rule's `## Good` / `## Bad` sections, so a review
 sees the examples in one call. Writes
 reconcile the index immediately — a concept written through MCP is

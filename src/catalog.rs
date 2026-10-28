@@ -44,6 +44,9 @@ pub struct CatalogOptions {
     pub expected_model_id: Option<String>,
     /// The index file name (default: [`pull::INDEX_DB_NAME`]).
     pub index_db_name: Option<String>,
+    /// The chunking budget, so the staleness preview matches what a build
+    /// with this configuration would (re)embed.
+    pub chunk_config: crate::index::ChunkConfig,
 }
 
 impl CatalogOptions {
@@ -56,6 +59,7 @@ impl CatalogOptions {
             #[cfg(not(feature = "default-index"))]
             expected_model_id: None,
             index_db_name: Some(config.index_db_name().to_string()),
+            chunk_config: config.chunk_config(),
         }
     }
 }
@@ -407,7 +411,8 @@ fn index_status(
                     .expected_model_id
                     .clone()
                     .unwrap_or_else(|| store.model_id().unwrap_or_default().to_string());
-                status.staleness = staleness_report(&context, &store, &expected).ok();
+                status.staleness =
+                    staleness_report(&context, &store, &expected, options.chunk_config).ok();
             }
         }
         status

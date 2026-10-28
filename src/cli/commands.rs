@@ -323,7 +323,7 @@ fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index:
     let store = SqliteVecStore::open(&db)?;
     let provider =
         TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
-    let mut index = Index::new(provider, store);
+    let mut index = Index::new(provider, store).with_chunk_config(config.chunk_config());
     Ok(Some(index.reconcile(&context)?))
 }
 
@@ -388,7 +388,7 @@ impl IndexProgress {
         let width = total.to_string().len();
         let _ = write!(
             std::io::stderr(),
-            "\rargosy: embedding {completed:width$}/{total} concepts"
+            "\rargosy: embedding {completed:width$}/{total} passages"
         );
         let _ = std::io::stderr().flush();
         self.displayed = true;
@@ -437,11 +437,11 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             // no DDL).
             let store = SqliteVecStore::open_read_only(&db)?;
             let expected_model = model_spec(config)?.model_id();
-            let stale = staleness_report(&context, &store, &expected_model)?;
+            let stale = staleness_report(&context, &store, &expected_model, config.chunk_config())?;
 
-            // Unit counts per argosy/namespace, derived from `unit_hashes`
-            // keys: one unit per concept in v1's chunking (this would count
-            // chunks, not concepts, if multi-chunk embedding ever lands).
+            // Concept counts per argosy/namespace, derived from
+            // `unit_hashes` keys: one entry per concept (a concept may hold
+            // several passages; `index build`'s report counts those).
             let mut units: Vec<(&str, &str, usize)> = Vec::new();
             let hashes = store.unit_hashes()?;
             for qid in hashes.keys() {
@@ -461,7 +461,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                         serde_json::json!({
                             "argosy": argosy,
                             "namespace": namespace,
-                            "units": count,
+                            "concepts": count,
                         })
                     })
                     .collect();
@@ -469,7 +469,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                     "db": db,
                     "model_id": store.model_id(),
                     "expected_model_id": expected_model,
-                    "units": total,
+                    "concepts": total,
                     "by_argosy_namespace": by,
                     "staleness": stale,
                 }))?;
@@ -481,7 +481,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                 out.note(&format!(
                     "expected model (current default): {expected_model}"
                 ));
-                out.note(&format!("units: {total}"));
+                out.note(&format!("concepts: {total}"));
                 for (argosy, namespace, count) in &units {
                     out.note(&format!("  {argosy}/{namespace}: {count}"));
                 }
@@ -512,7 +512,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             }
             let provider =
                 TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
-            let mut index = Index::new(provider, store);
+            let mut index = Index::new(provider, store).with_chunk_config(config.chunk_config());
             let mut progress = IndexProgress::new(out);
             let report = index
                 .reconcile_with_progress(&context, |done, total| progress.update(done, total))?;
@@ -522,8 +522,12 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             } else {
                 let how = if report.rebuilt { "rebuilt" } else { "updated" };
                 out.note(&format!(
-                    "index {how}: {} upserted, {} removed, {} unchanged [{}]",
-                    report.upserted, report.removed, report.unchanged, report.model_id
+                    "index {how}: {} concept(s) ({} passage(s)) upserted, {} removed, {} unchanged [{}]",
+                    report.upserted,
+                    report.passages,
+                    report.removed,
+                    report.unchanged,
+                    report.model_id
                 ));
             }
             // Invisible-Unicode flags: poisoning payloads stripped from the
@@ -564,8 +568,16 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             } else {
                 for hit in &hits {
                     let description = hit.meta.description.as_deref().unwrap_or("");
+                    let section = if hit.heading_path.is_empty() {
+                        format!("  [lines {}-{}]", hit.start_line, hit.end_line)
+                    } else {
+                        format!(
+                            "  [{} · lines {}-{}]",
+                            hit.heading_path, hit.start_line, hit.end_line
+                        )
+                    };
                     println!(
-                        "{:.4}  {}  —  {}",
+                        "{:.4}  {}  —  {}{section}",
                         hit.score,
                         hit.concept.to_uri(),
                         description
@@ -602,6 +614,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let db_name = config.index_db_name().to_string();
     let embed_cache = embed_cache_override(config);
     let spec = model_spec(config)?;
+    let chunk_config = config.chunk_config();
     // Trust tiers come from local configuration, never a book's
     // self-claim: imports are capped per the `trust` section (SEC-2).
     let trust = config.trust_policy();
@@ -615,7 +628,8 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
         // The lazy provider makes the open instant and offline-tolerant:
         // the model (and its ~90 MB first-run download) loads only when
         // something actually needs embedding.
-        let mut index = Index::new(LazyTractProvider::new(spec, embed_cache.clone())?, store);
+        let mut index = Index::new(LazyTractProvider::new(spec, embed_cache.clone())?, store)
+            .with_chunk_config(chunk_config);
         // A failed reconcile degrades retrieval, it must not fail the open
         // (spec §11: an out-of-date index degrades search quality, never
         // correctness) — warn on stderr and serve the session anyway;

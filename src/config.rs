@@ -24,6 +24,7 @@
 //!     model = "all-minilm-l6-v2"
 //!     default_k = 5
 //!     mcp_default_k = 8
+//!     chunk_max_tokens = 220
 //! }
 //! package {
 //!     format = "dir"        // or "tar.gz"
@@ -166,6 +167,12 @@ pub struct IndexConfig {
     /// Default hit count for the MCP `search`/`search_rules` tools.
     #[serde(deserialize_with = "flex_uint")]
     pub mcp_default_k: usize,
+    /// Token budget for one embedded passage (prefix included). Long
+    /// concepts split by heading into passages at or under this size;
+    /// changing it re-chunks and re-embeds affected concepts on the next
+    /// reconcile. Capped at the embedder's 256-token truncation.
+    #[serde(deserialize_with = "flex_uint")]
+    pub chunk_max_tokens: usize,
 }
 
 impl Default for IndexConfig {
@@ -174,6 +181,7 @@ impl Default for IndexConfig {
             model: None,
             default_k: 5,
             mcp_default_k: 8,
+            chunk_max_tokens: crate::index::chunk::DEFAULT_MAX_TOKENS,
         }
     }
 }
@@ -463,6 +471,16 @@ impl Config {
                     .to_string(),
             });
         }
+        // The default embedder truncates at 256 tokens; a chunk budget above
+        // that would silently re-introduce the unsearchable tail chunking is
+        // meant to remove.
+        if !(1..=256).contains(&self.index.chunk_max_tokens) {
+            return Err(crate::error::Error::Validation {
+                reason: "configuration: index.chunk_max_tokens must be between 1 and 256 \
+                         (the default embedder's truncation limit)"
+                    .to_string(),
+            });
+        }
         if let Some(name) = &self.paths.index_db_name
             && (name.is_empty()
                 || name.contains('/')
@@ -564,6 +582,13 @@ impl Config {
     /// The index file name (default `index.db`).
     pub fn index_db_name(&self) -> &str {
         self.paths.index_db_name.as_deref().unwrap_or("index.db")
+    }
+
+    /// The per-passage token budget (`index.chunk_max_tokens`).
+    pub fn chunk_config(&self) -> crate::index::ChunkConfig {
+        crate::index::ChunkConfig {
+            max_tokens: self.index.chunk_max_tokens,
+        }
     }
 }
 
@@ -670,7 +695,8 @@ mod tests {
                 index_db_name = "my.index.db"
             }
             index { default_k = 12
-                mcp_default_k = 20 }
+                mcp_default_k = 20
+                chunk_max_tokens = 128 }
             package { format = "tar.gz"
                 include_index = true }
 
@@ -684,6 +710,8 @@ mod tests {
         assert_eq!(config.index_db_name(), "my.index.db");
         assert_eq!(config.index.default_k, 12);
         assert_eq!(config.index.mcp_default_k, 20);
+        assert_eq!(config.index.chunk_max_tokens, 128);
+        assert_eq!(config.chunk_config().max_tokens, 128);
         assert_eq!(config.package.format, PackageFormatConfig::TarGz);
         assert!(config.package.include_index);
     }
@@ -757,6 +785,27 @@ mod tests {
         let mut config = Config::default();
         config.index.default_k = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn chunk_budget_is_bounded_by_the_embedder_limit() {
+        assert_eq!(Config::default().index.chunk_max_tokens, 220);
+        assert_eq!(
+            Config::default().chunk_config(),
+            crate::index::ChunkConfig { max_tokens: 220 }
+        );
+
+        let mut config = Config::default();
+        config.index.chunk_max_tokens = 0;
+        assert!(config.validate().is_err(), "0 is not a budget");
+        config.index.chunk_max_tokens = 257;
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("chunk_max_tokens"),
+            "names the key: {err}"
+        );
+        config.index.chunk_max_tokens = 256;
+        assert!(config.validate().is_ok(), "the truncation limit is allowed");
     }
 
     #[test]

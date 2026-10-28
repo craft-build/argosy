@@ -1,8 +1,10 @@
 //! The semantic index: trait boundaries, embedding units, reconciliation,
 //! and ranked search. The index is a derived, rebuildable artifact whose
 //! only inputs are on-disk bundles and an [`EmbeddingProvider`]; custom
-//! backends implement the traits, sqlite-vec + tract by default. One
-//! unit per concept; search via [`Index::search`], lookup via resolve.
+//! backends implement the traits, sqlite-vec + tract by default. One or
+//! more units per concept — a short concept is a single unit, a long one is
+//! split into heading-based passages ([`chunk`]) — and every hit names the
+//! passage it matched; search via [`Index::search`], lookup via resolve.
 
 use std::collections::HashMap;
 
@@ -11,6 +13,10 @@ use crate::concept::Concept;
 use crate::context::{ProjectContext, QualifiedConceptId};
 use crate::error::{IndexSnafu, Result, UnknownArgosySnafu};
 use crate::hash::sha256_hex;
+
+pub mod chunk;
+
+pub use chunk::{Chunk, ChunkConfig};
 
 #[cfg(feature = "default-index")]
 pub mod sqlite;
@@ -77,16 +83,16 @@ impl UnitMeta {
 }
 
 /// One embedded unit of a concept: enough to trace any retrieval
-/// back to its source concept unambiguously. Multi-chunk concepts would
-/// record one unit per chunk, distinguished by [`EmbeddingUnit::chunk_ordinal`];
-/// in v1 there is always exactly one unit per concept (module docs).
+/// back to its source concept unambiguously. A concept is one unit when it
+/// fits the chunk budget, or one unit per heading-based passage when it does
+/// not ([`chunk::chunk_concept`]), distinguished by
+/// [`EmbeddingUnit::chunk_ordinal`].
 #[derive(Debug, Clone)]
 pub struct EmbeddingUnit {
     /// The source concept's qualified identity.
     pub concept: QualifiedConceptId,
-    /// The unit's position within its source concept. Always `0`
-    /// in v1's one-unit-per-concept chunking; kept from day one so a future
-    /// multi-passage chunking strategy extends the data without changing it.
+    /// The unit's position within its source concept (`0` for the first
+    /// passage).
     pub chunk_ordinal: u32,
     /// The lowercase hex SHA-256 of the exact text that was embedded. Doubles
     /// as the staleness signal and the content-change detector
@@ -96,6 +102,18 @@ pub struct EmbeddingUnit {
     pub vector: Vec<f32>,
     /// The filterable facets of the source concept.
     pub meta: UnitMeta,
+    /// The passage's heading breadcrumb (`"Setup › Database"`); empty for a
+    /// whole-concept chunk or a pre-heading passage.
+    pub heading_path: String,
+    /// 1-based first line of the concept body the passage covers
+    /// (frontmatter excluded) — the range `read` accepts for expansion.
+    pub start_line: u32,
+    /// 1-based last line of the concept body the passage covers.
+    pub end_line: u32,
+    /// The passage text as embedded (prefix included, invisible characters
+    /// stripped), returned in hits so an agent can answer without a second
+    /// `read`.
+    pub passage: String,
 }
 
 /// The structured constraints a search composes with its query text.
@@ -128,6 +146,19 @@ pub struct SearchHit {
     /// The retrieved unit's facets, so callers can present/filter further
     /// without resolving the concept.
     pub meta: UnitMeta,
+    /// The matched passage's position within its concept.
+    pub chunk_ordinal: u32,
+    /// The passage's heading breadcrumb (`"Setup › Database"`); empty for a
+    /// whole-concept chunk or a pre-heading passage.
+    pub heading_path: String,
+    /// 1-based first body line of the matched passage.
+    pub start_line: u32,
+    /// 1-based last body line of the matched passage.
+    pub end_line: u32,
+    /// The matched passage text (prefix included, invisible characters
+    /// stripped). Imported passages are delimiter-wrapped at the MCP layer,
+    /// like every other imported free text.
+    pub passage: String,
 }
 
 /// One semantic query.
@@ -210,6 +241,11 @@ pub struct IndexReport {
     pub rebuilt: bool,
     /// Concepts embedded and upserted (new or content-changed).
     pub upserted: usize,
+    /// Passages (embedding units) those concepts expanded to: equal to
+    /// `upserted` when every concept fit one chunk, larger when long
+    /// concepts were split by heading.
+    #[serde(default)]
+    pub passages: usize,
     /// Concepts removed from the store (deleted from disk).
     pub removed: usize,
     /// Concepts whose content hash was unchanged — each cost one hash and no
@@ -242,12 +278,13 @@ fn default_namespaces() -> Vec<Namespace> {
 /// concept's would-be embedded text. Sorted by URI so downstream embedding
 /// batches are deterministic. Shared by [`Index::reconcile`] and
 /// [`staleness_report`], which must never drift apart. Each gathered
-/// concept also carries its invisible-format character count
-/// ([`index_text`]) for reconcile-time warnings.
+/// concept carries its chunks (see [`chunk::chunk_concept`]) and their
+/// invisible-format character count for reconcile-time warnings.
 fn gather_concepts(
     context: &ProjectContext,
     namespaces: &[Namespace],
     include_imported_memory: bool,
+    chunk_config: ChunkConfig,
 ) -> Result<Vec<GatheredConcept>> {
     let mut out = Vec::new();
     let mut visit = |name: &str, argosy: &Argosy, is_local: bool| -> Result<()> {
@@ -256,17 +293,23 @@ fn gather_concepts(
                 continue;
             }
             for (id, concept) in argosy.concepts(namespace)? {
-                let (text, invisible) = index_text(&concept);
+                let fallback = id
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                let chunks = chunk::chunk_concept(&concept, &fallback, chunk_config);
                 out.push(GatheredConcept {
                     qid: QualifiedConceptId {
                         argosy: name.to_string(),
                         namespace: namespace.clone(),
                         id,
                     },
-                    hash: sha256_hex(text.as_bytes()),
-                    text,
+                    hash: concept_hash(&chunks),
+                    invisible: chunks.iter().map(|c| c.invisible).sum(),
+                    chunks,
                     meta: UnitMeta::from_concept(&concept),
-                    invisible,
                 });
             }
         }
@@ -279,6 +322,19 @@ fn gather_concepts(
     }
     out.sort_by_key(|a| a.qid.to_uri());
     Ok(out)
+}
+
+/// The concept-level staleness hash: SHA-256 over every chunk's text, in
+/// order, length-delimited so no two chunkings collide. Stored on every
+/// unit row of the concept, which is what keeps [`VectorStore::unit_hashes`]
+/// (one entry per concept) and the reconcile diff unchanged.
+pub(crate) fn concept_hash(chunks: &[Chunk]) -> String {
+    let mut buffer = Vec::new();
+    for chunk in chunks {
+        buffer.extend_from_slice(&(chunk.text.len() as u64).to_le_bytes());
+        buffer.extend_from_slice(chunk.text.as_bytes());
+    }
+    sha256_hex(&buffer)
 }
 
 /// The diff [`staleness_report`] computes: what [`Index::reconcile`] would
@@ -302,14 +358,15 @@ pub struct StalenessReport {
 
 /// A read-only, embed-free preview of what [`Index::reconcile`] would apply
 /// (the CLI's `index status`): gathers the default namespace
-/// selection from disk, hashes each concept, and diffs against
+/// selection from disk, chunks and hashes each concept, and diffs against
 /// [`VectorStore::unit_hashes`]. Makes no embed calls and no writes.
 pub fn staleness_report(
     context: &ProjectContext,
     store: &impl VectorStore,
     expected_model_id: &str,
+    chunk_config: ChunkConfig,
 ) -> Result<StalenessReport> {
-    let current = gather_concepts(context, &default_namespaces(), false)?;
+    let current = gather_concepts(context, &default_namespaces(), false, chunk_config)?;
     let stored = store.unit_hashes()?;
 
     // Mirrors reconcile's identity check exactly: a store holding
@@ -347,12 +404,15 @@ pub fn staleness_report(
 /// A concept gathered from disk, pre-hash, on its way through reconcile.
 struct GatheredConcept {
     qid: QualifiedConceptId,
-    text: String,
+    /// The concept's chunks, ordered by ordinal.
+    chunks: Vec<Chunk>,
+    /// The concept-level hash over all chunk texts (see [`concept_hash`]);
+    /// stored on every unit row.
     hash: String,
     meta: UnitMeta,
-    /// How many invisible format characters were stripped from `text`
-    /// (see [`is_invisible_format`]); zero for honest text. Reported as
-    /// a warning when — and only when — the concept is (re)embedded, so
+    /// How many invisible format characters were stripped across the
+    /// chunks (see [`is_invisible_format`]); zero for honest text. Reported
+    /// as a warning when — and only when — the concept is (re)embedded, so
     /// an unchanged book does not re-warn on every reconcile.
     invisible: usize,
 }
@@ -364,19 +424,22 @@ pub struct Index<P: EmbeddingProvider, S: VectorStore> {
     store: S,
     namespaces: Vec<Namespace>,
     include_imported_memory: bool,
+    chunk_config: ChunkConfig,
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// An index over the default namespace set: `document`, `skill`, and
     /// `styleguide` of every active argosy, plus `memory` of the *local*
     /// argosy only. Custom namespaces are not indexed by default; use
-    /// [`Index::with_namespaces`].
+    /// [`Index::with_namespaces`]. Chunking uses [`ChunkConfig::default`];
+    /// use [`Index::with_chunk_config`] to honor user configuration.
     pub fn new(provider: P, store: S) -> Self {
         Self {
             provider,
             store,
             namespaces: default_namespaces(),
             include_imported_memory: false,
+            chunk_config: ChunkConfig::default(),
         }
     }
 
@@ -390,7 +453,21 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             store,
             namespaces,
             include_imported_memory: true,
+            chunk_config: ChunkConfig::default(),
         }
+    }
+
+    /// Overrides the chunking budget (user configuration
+    /// `index.chunk_max_tokens`). A different budget re-chunks and re-hashes
+    /// affected concepts, so the next reconcile re-embeds them.
+    pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
+        self.chunk_config = chunk_config;
+        self
+    }
+
+    /// The chunking budget this index reconciles with.
+    pub fn chunk_config(&self) -> ChunkConfig {
+        self.chunk_config
     }
 
     /// The embedding provider.
@@ -426,7 +503,12 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     /// each concept's would-be embedded text. Sorted by URI so downstream
     /// embedding batches are deterministic.
     fn gather(&self, context: &ProjectContext) -> Result<Vec<GatheredConcept>> {
-        gather_concepts(context, &self.namespaces, self.include_imported_memory)
+        gather_concepts(
+            context,
+            &self.namespaces,
+            self.include_imported_memory,
+            self.chunk_config,
+        )
     }
 
     /// Brings the store in line with the disk. An identity mismatch (or
@@ -438,7 +520,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         self.reconcile_with_progress(context, |_, _| {})
     }
 
-    /// Like [`Index::reconcile`], reporting `(completed, total)` concepts
+    /// Like [`Index::reconcile`], reporting `(completed, total)` passages
     /// needing embeddings once the diff is known and after each committed
     /// batch. An unchanged run reports `(0, 0)`. The callback is not invoked
     /// for scanning, deletions, or model loading.
@@ -461,6 +543,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         let mut report = IndexReport {
             rebuilt: identity_mismatch,
             upserted: 0,
+            passages: 0,
             removed: 0,
             unchanged: 0,
             model_id: model.clone(),
@@ -500,11 +583,27 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         // Each upsert is atomic in the sqlite store; a later failure can leave
         // completed batches in place, which the next reconcile will diff and
         // resume (or rebuild if the model identity was not recorded yet).
+        // Batches are grouped by CONCEPT, because the store's upsert replaces
+        // a concept's units wholesale — splitting one concept's chunks across
+        // two batches would drop the first batch's rows.
         const EMBED_BATCH: usize = 32;
-        let total = to_embed.len();
+        let total: usize = to_embed.iter().map(|g| g.chunks.len()).sum();
         progress(0, total);
-        for batch in to_embed.chunks(EMBED_BATCH) {
-            let texts: Vec<String> = batch.iter().map(|g| g.text.clone()).collect();
+        let mut start = 0;
+        while start < to_embed.len() {
+            let mut end = start;
+            let mut units = 0usize;
+            while end < to_embed.len()
+                && (end == start || units + to_embed[end].chunks.len() <= EMBED_BATCH)
+            {
+                units += to_embed[end].chunks.len();
+                end += 1;
+            }
+            let batch = &to_embed[start..end];
+            let texts: Vec<String> = batch
+                .iter()
+                .flat_map(|g| g.chunks.iter().map(|c| c.text.clone()))
+                .collect();
             let vectors = self.provider.embed(&texts)?;
             if vectors.len() != texts.len() {
                 return IndexSnafu {
@@ -517,20 +616,34 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
                 }
                 .fail();
             }
-            let units: Vec<EmbeddingUnit> = batch
-                .iter()
-                .zip(vectors)
-                .map(|(g, vector)| EmbeddingUnit {
-                    concept: g.qid.clone(),
-                    chunk_ordinal: 0,
-                    text_hash: g.hash.clone(),
-                    vector,
-                    meta: g.meta.clone(),
-                })
-                .collect();
-            self.store.upsert(&units)?;
-            report.upserted += units.len();
-            progress(report.upserted, total);
+            let mut produced = vectors.into_iter();
+            let mut new_units = Vec::with_capacity(texts.len());
+            for gathered in batch {
+                for chunk in &gathered.chunks {
+                    let Some(vector) = produced.next() else {
+                        return IndexSnafu {
+                            reason: "provider returned fewer vectors than chunk texts".to_string(),
+                        }
+                        .fail();
+                    };
+                    new_units.push(EmbeddingUnit {
+                        concept: gathered.qid.clone(),
+                        chunk_ordinal: chunk.ordinal,
+                        text_hash: gathered.hash.clone(),
+                        vector,
+                        meta: gathered.meta.clone(),
+                        heading_path: chunk.heading_path.clone(),
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        passage: chunk.text.clone(),
+                    });
+                }
+            }
+            self.store.upsert(&new_units)?;
+            report.upserted += batch.len();
+            report.passages += new_units.len();
+            progress(report.passages, total);
+            start = end;
         }
 
         // Invisible-Unicode flagging (RAG-poisoning defense): warn for the
@@ -657,34 +770,12 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
-/// The exact text that gets embedded for a concept (module docs, chunking
-/// decision): `description` plus body when a description exists, body
-/// alone otherwise — with invisible format characters stripped
-/// ([`is_invisible_format`]) and the strip count returned so the caller
-/// can warn. Stripping touches the indexed text only: bytes on disk stay
-/// exactly as written, so the integrity sidecar still verifies and the
-/// payload a poisoned book planted remains inspectable by `read`.
-fn index_text(concept: &Concept) -> (String, usize) {
-    let raw = match concept.description() {
-        Some(description) if !description.trim().is_empty() => {
-            format!("{}\n\n{}", description, concept.body())
-        }
-        _ => concept.body().to_string(),
-    };
-    if !raw.contains(is_invisible_format) {
-        return (raw, 0);
-    }
-    let mut stripped = 0usize;
-    let mut text = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        if is_invisible_format(c) {
-            stripped += 1;
-        } else {
-            text.push(c);
-        }
-    }
-    (text, stripped)
-}
+// The exact text embedded for a concept is per-passage now (see
+// `chunk::chunk_concept`): invisible format characters are stripped there
+// (`is_invisible_format`) and counted on each `Chunk` so the caller can
+// warn. Stripping touches the indexed text only: bytes on disk stay exactly
+// as written, so the integrity sidecar still verifies and the payload a
+// poisoned book planted remains inspectable by `read`.
 
 /// Builds the id callers use for [`ConceptId`] plumbing in tests.
 #[cfg(test)]

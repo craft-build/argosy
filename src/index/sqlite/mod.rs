@@ -28,8 +28,9 @@ mod store;
 mod tests;
 
 /// Schema generation (`PRAGMA user_version`); bump with a migration when the
-/// layout changes.
-const SCHEMA_VERSION: i32 = 1;
+/// layout changes. v2 adds passage columns (`heading_path`, `start_line`,
+/// `end_line`, `passage`) and real multi-chunk concepts.
+const SCHEMA_VERSION: i32 = 2;
 
 /// Pointer signature SQLite expects for an extension init function.
 type SqliteExtensionInit = unsafe extern "C" fn(
@@ -120,6 +121,25 @@ impl SqliteVecStore {
                 .context(SqliteSnafu {
                     path: path.to_path_buf(),
                 })?;
+        } else if existing_version < SCHEMA_VERSION as i64 {
+            // The index is a derived artifact (spec §3.1, IDX-1): the
+            // cheapest correct migration is to drop the old layout and let
+            // the next reconcile rebuild it from the bundles.
+            conn.execute_batch("DROP TABLE IF EXISTS unit_vectors; DROP TABLE IF EXISTS units;")
+                .context(SqliteSnafu {
+                    path: path.to_path_buf(),
+                })?;
+            conn.execute(
+                "UPDATE meta SET model_id = NULL, dimensions = NULL, updated_at = datetime('now') WHERE id = 1",
+                [],
+            )
+            .context(SqliteSnafu {
+                path: path.to_path_buf(),
+            })?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+                .context(SqliteSnafu {
+                    path: path.to_path_buf(),
+                })?;
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
@@ -141,6 +161,10 @@ impl SqliteVecStore {
                 tags TEXT NOT NULL DEFAULT '[]',
                 language TEXT,
                 category TEXT,
+                heading_path TEXT NOT NULL DEFAULT '',
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
+                passage TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (argosy, namespace, concept_id, chunk_ordinal)
             );",
         )
@@ -165,6 +189,9 @@ impl SqliteVecStore {
     /// database must already exist and remain untouched. This lets
     /// `status` answer on a read-only or permission-locked index where
     /// [`Self::open`] would fail before reading a single row.
+    ///
+    /// A database from an older schema cannot be migrated without writing:
+    /// it fails with the rebuild hint instead of misreading columns.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         register_extension();
         let path = path.as_ref();
@@ -177,7 +204,16 @@ impl SqliteVecStore {
             .context(SqliteSnafu {
                 path: path.to_path_buf(),
             })?;
-        Self::check_schema_version(&conn, path)?;
+        let version = Self::check_schema_version(&conn, path)?;
+        if version < SCHEMA_VERSION as i64 {
+            return IndexSnafu {
+                reason: format!(
+                    "index schema version {version} predates this build's {SCHEMA_VERSION}; \
+                     run `argosy index build` to rebuild it"
+                ),
+            }
+            .fail();
+        }
         let (model_id, dimensions) = Self::read_meta(&conn, path)?;
         Ok(Self {
             path: path.to_path_buf(),

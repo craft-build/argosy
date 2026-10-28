@@ -90,7 +90,8 @@ pub struct ReadPathParams {
     pub path: String,
 }
 
-/// `read` parameters: one concept from any active argosy.
+/// `read` parameters: one concept from any active argosy, optionally sliced
+/// to a line range for small-to-big expansion of a search passage.
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ReadParams {
     /// The project root to operate on.
@@ -101,6 +102,13 @@ pub struct ReadParams {
     /// Argosy manifest name to read from; defaults to the local argosy.
     /// Unknown names error.
     pub argosy: Option<String>,
+    /// First body line to return (1-based, frontmatter excluded); defaults
+    /// to the first line. Use a search hit's `start_line`.
+    pub start_line: Option<u32>,
+    /// Last body line to return (1-based, inclusive); defaults to the last
+    /// line and is clamped to the body length. Use a search hit's
+    /// `end_line`, or a wider range to expand around a passage.
+    pub end_line: Option<u32>,
 }
 
 /// Write parameters (`write_memory`, `write_rule`, `write_document`).

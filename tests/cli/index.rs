@@ -81,7 +81,9 @@ fn index_build_status_query_round_trip() {
         .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
-        .stdout(predicate::str::contains("0 upserted, 0 removed"));
+        .stdout(predicate::str::contains(
+            "0 concept(s) (0 passage(s)) upserted, 0 removed",
+        ));
 
     // A second checkout in the project's store joins the index
     // automatically (no --import): rebuilding discovers it.
@@ -103,7 +105,9 @@ fn index_build_status_query_round_trip() {
         .env("XDG_STATE_HOME", &xdg)
         .assert()
         .success()
-        .stdout(predicate::str::contains("1 upserted, 0 removed"));
+        .stdout(predicate::str::contains(
+            "1 concept(s) (1 passage(s)) upserted, 0 removed",
+        ));
     argosy_bin()
         .args(["index", "status"])
         .current_dir(&project)

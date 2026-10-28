@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(index)* heading-based passage chunking: long concepts split at ATX
+  headings (then paragraphs) into units embedded behind a
+  `Concept:`/`Section:` breadcrumb prefix, so text past the first ~200 words
+  is retrievable; short concepts stay a single passage. Configurable with
+  `index.chunk_max_tokens` (default 220, capped at the embedder's 256-token
+  truncation)
+- *(mcp)* search hits carry the matched `passage`, its `heading_path`, and a
+  1-based body line range (`start_line`/`end_line`); imported passages are
+  wrapped in the untrusted-content delimiters like every imported free text
+- *(mcp)* `read` accepts `start_line`/`end_line` for small-to-big expansion of
+  a passage hit, reporting the sliced `lines` range
+
+### Other
+
+- the index schema is now v2: an existing index is cleared and rebuilt on
+  first open after the upgrade (it is a derived artifact), so the first
+  search after upgrading re-embeds the book
+- `argosy index status` JSON reports `concepts` (and per-namespace
+  `concepts`) where it previously reported one unit per concept; `index
+  build` prints concepts and passages separately
+
 ## [0.7.0](https://github.com/craft-build/argosy/compare/v0.6.0...v0.7.0) - 2026-10-10
 
 ### Other

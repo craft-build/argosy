@@ -94,8 +94,9 @@ impl VectorStore for SqliteVecStore {
                 .prepare_cached(
                     "INSERT INTO units (argosy, namespace, concept_id, chunk_ordinal,
                                         text_hash, concept_type, description, tags,
-                                        language, category)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                        language, category, heading_path, start_line,
+                                        end_line, passage)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )
                 .context(SqliteSnafu {
                     path: self.path.clone(),
@@ -141,6 +142,10 @@ impl VectorStore for SqliteVecStore {
                         tags,
                         unit.meta.language,
                         unit.meta.category,
+                        unit.heading_path,
+                        unit.start_line,
+                        unit.end_line,
+                        unit.passage,
                     ])
                     .context(SqliteSnafu {
                         path: self.path.clone(),
@@ -296,7 +301,8 @@ impl VectorStore for SqliteVecStore {
         // placeholders (from counts) shapes the text.
         let mut sql = String::from(
             "SELECT u.argosy, u.namespace, u.concept_id, u.concept_type,
-                    u.description, u.tags, u.language, u.category, v.distance
+                    u.description, u.tags, u.language, u.category, u.chunk_ordinal,
+                    u.heading_path, u.start_line, u.end_line, u.passage, v.distance
              FROM unit_vectors AS v
              JOIN units AS u ON u.rowid = v.rowid
              WHERE v.vector MATCH ? AND k = ?",
@@ -366,9 +372,14 @@ impl VectorStore for SqliteVecStore {
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, String>(12)?,
                     // Score = -distance: descending order is descending
                     // similarity (module docs).
-                    -row.get::<_, f64>(8)? as f32,
+                    -row.get::<_, f64>(13)? as f32,
                 ))
             })
             .context(SqliteSnafu {
@@ -382,7 +393,23 @@ impl VectorStore for SqliteVecStore {
         let mut hits = rows
             .into_iter()
             .map(
-                |(a, ns, cid, ty, desc, tags, lang, cat, score)| -> Result<SearchHit> {
+                |(
+                    a,
+                    ns,
+                    cid,
+                    ty,
+                    desc,
+                    tags,
+                    lang,
+                    cat,
+                    chunk_ordinal,
+                    heading_path,
+                    start_line,
+                    end_line,
+                    passage,
+                    score,
+                )|
+                 -> Result<SearchHit> {
                     let tags: Vec<String> = serde_json::from_str(&tags).map_err(|e| -> Error {
                         IndexSnafu {
                             reason: format!("corrupt index row: tags JSON failed to parse: {e}"),
@@ -399,6 +426,11 @@ impl VectorStore for SqliteVecStore {
                             language: lang,
                             category: cat,
                         },
+                        chunk_ordinal: chunk_ordinal.max(0) as u32,
+                        heading_path,
+                        start_line: start_line.max(0) as u32,
+                        end_line: end_line.max(0) as u32,
+                        passage,
                     })
                 },
             )

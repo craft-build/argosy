@@ -77,3 +77,77 @@ fn checkpoint_wal_fails_when_a_reader_reaches_into_the_wal() {
     // Once the reader is gone, the same checkpoint completes.
     checkpoint_wal(&db).unwrap();
 }
+
+#[test]
+fn an_older_schema_is_cleared_and_rebuilt_on_writable_open() {
+    use rusqlite::Connection;
+
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("index.db");
+    // Forge a v1 database: the pre-passage layout plus data.
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 1;
+             CREATE TABLE meta (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 model_id TEXT,
+                 dimensions INTEGER,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO meta (id, model_id, dimensions) VALUES (1, 'old-model@1', 3);
+             CREATE TABLE units (
+                 argosy TEXT NOT NULL,
+                 namespace TEXT NOT NULL,
+                 concept_id TEXT NOT NULL,
+                 chunk_ordinal INTEGER NOT NULL,
+                 text_hash TEXT NOT NULL,
+                 concept_type TEXT,
+                 description TEXT,
+                 tags TEXT NOT NULL DEFAULT '[]',
+                 language TEXT,
+                 category TEXT,
+                 PRIMARY KEY (argosy, namespace, concept_id, chunk_ordinal)
+             );
+             INSERT INTO units (argosy, namespace, concept_id, chunk_ordinal, text_hash)
+                 VALUES ('local', 'document', 'document/a', 0, 'old-hash');",
+        )
+        .unwrap();
+    }
+    // The read-only path cannot migrate: it says how.
+    let err = match SqliteVecStore::open_read_only(&db) {
+        Ok(_) => panic!("the read-only open must refuse an older schema"),
+        Err(err) => err,
+    };
+    assert!(
+        format!("{err:#}").contains("argosy index build"),
+        "got {err:#}"
+    );
+
+    // The writable open migrates by dropping the stale layout; the next
+    // reconcile rebuilds (the index is a derived artifact, IDX-1).
+    let store = SqliteVecStore::open(&db).unwrap();
+    assert_eq!(store.model_id(), None, "the stale identity is released");
+    assert_eq!(store.dimensions, None);
+    assert!(store.unit_hashes().unwrap().is_empty());
+    let version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION as i64);
+    let columns: Vec<String> = store
+        .conn
+        .prepare("SELECT name FROM pragma_table_info('units')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .unwrap();
+    assert!(
+        ["heading_path", "start_line", "end_line", "passage"]
+            .iter()
+            .all(|c| columns.iter().any(|found| found == c)),
+        "the v2 columns exist: {columns:?}"
+    );
+}

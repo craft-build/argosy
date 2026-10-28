@@ -123,6 +123,10 @@ impl VectorStore for MemVec {
     }
 
     fn upsert(&mut self, units: &[EmbeddingUnit]) -> Result<()> {
+        // Replace each concept's units wholesale, like the sqlite store.
+        let replaced: std::collections::HashSet<&QualifiedConceptId> =
+            units.iter().map(|u| &u.concept).collect();
+        self.units.retain(|(qid, _), _| !replaced.contains(qid));
         for unit in units {
             if self.dimensions.is_none() && !unit.vector.is_empty() {
                 self.dimensions = Some(unit.vector.len());
@@ -172,6 +176,11 @@ impl VectorStore for MemVec {
                     concept: u.concept.clone(),
                     score,
                     meta: u.meta.clone(),
+                    chunk_ordinal: u.chunk_ordinal,
+                    heading_path: u.heading_path.clone(),
+                    start_line: u.start_line,
+                    end_line: u.end_line,
+                    passage: u.passage.clone(),
                 }
             })
             .collect();

@@ -269,6 +269,8 @@ fn read_defaults_to_local_and_reads_imported_by_name() {
             cwd: project(),
             path: "memory/gotchas".to_string(),
             argosy: None,
+            start_line: None,
+            end_line: None,
         })
         .unwrap();
     assert_eq!(local.argosy, "acme-billing");
@@ -285,6 +287,8 @@ fn read_defaults_to_local_and_reads_imported_by_name() {
             cwd: project(),
             path: "skill/shared-audit".to_string(),
             argosy: Some("acme-shared".to_string()),
+            start_line: None,
+            end_line: None,
         })
         .unwrap();
     assert_eq!(imported.argosy, "acme-shared");
@@ -302,6 +306,8 @@ fn read_with_unknown_argosy_errors() {
             cwd: project(),
             path: "memory/gotchas".to_string(),
             argosy: Some("not-active".to_string()),
+            start_line: None,
+            end_line: None,
         })
         .unwrap_err();
     assert!(matches!(err, Error::UnknownArgosy { .. }), "got {err:?}");
@@ -488,6 +494,8 @@ fn imported_reads_arrive_delimiter_wrapped() {
             cwd: project(),
             path: "skill/shared-audit".to_string(),
             argosy: Some("acme-shared".to_string()),
+            start_line: None,
+            end_line: None,
         })
         .unwrap();
     assert_eq!(imported.kind, "imported");
@@ -511,6 +519,8 @@ fn imported_reads_arrive_delimiter_wrapped() {
             cwd: project(),
             path: "memory/gotchas".to_string(),
             argosy: None,
+            start_line: None,
+            end_line: None,
         })
         .unwrap();
     assert_eq!(local.kind, "local");
@@ -598,4 +608,212 @@ fn search_rules_wraps_imported_examples_in_untrusted_delimiters() {
     assert_eq!(local_hit.kind, "local");
     assert_eq!(local_hit.good.as_deref(), Some("let retry_count = 0;"));
     assert_eq!(local_hit.bad.as_deref(), Some("let retryCount = 0;"));
+}
+
+// --- Passage-level hits and paid ranged reads ---
+
+#[test]
+fn hits_carry_passage_heading_and_line_range() {
+    let mut rig = rig();
+    let report = rig
+        .state
+        .search(SearchParams {
+            cwd: project(),
+            query: "rate limit retries original request timestamp".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    let hit = report
+        .hits
+        .iter()
+        .find(|h| h.uri == "argosy://acme-billing/document/rate-limit-behavior")
+        .expect("the rate-limit note is a hit");
+    assert!(
+        hit.passage.contains("rate limit")
+            || hit.passage.contains("Rate limit")
+            || hit.passage.contains("Rate Limit"),
+        "the passage carries the matched text: {}",
+        hit.passage
+    );
+    assert!(hit.passage.starts_with("Concept: "), "{}", hit.passage);
+    assert_eq!((hit.start_line, hit.end_line), (1, 4));
+    assert_eq!(hit.chunk_ordinal, 0, "a short concept is one passage");
+}
+
+#[test]
+fn imported_passages_arrive_delimiter_wrapped() {
+    let mut rig = rig();
+    let report = rig
+        .state
+        .search(SearchParams {
+            cwd: project(),
+            query: "audit the shared provisioner".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    let imported = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-shared")
+        .expect("imported skill is a hit");
+    let open = format!(
+        "<untrusted-content argosy=\"acme-shared\" uri=\"{}\" trust=\"unverified\">",
+        imported.uri
+    );
+    assert!(imported.passage.starts_with(&open), "{}", imported.passage);
+    assert!(imported.passage.ends_with("</untrusted-content>"));
+    assert!(imported.passage.contains("Steps."));
+
+    let local = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-billing")
+        .expect("local concept is a hit");
+    assert!(
+        !local.passage.contains("untrusted-content"),
+        "local passages stay bare: {}",
+        local.passage
+    );
+}
+
+#[test]
+fn read_slices_the_body_by_line_range() {
+    let mut rig = rig();
+    let full = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "memory/gotchas".to_string(),
+            argosy: None,
+            start_line: None,
+            end_line: None,
+        })
+        .unwrap();
+    assert!(full.lines.is_none(), "an unranged read reports no range");
+
+    let ranged = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "memory/gotchas".to_string(),
+            argosy: None,
+            start_line: Some(3),
+            end_line: Some(4),
+        })
+        .unwrap();
+    let lines = ranged.lines.expect("ranged read reports its slice");
+    assert_eq!((lines.start, lines.end), (3, 4));
+    assert!(
+        ranged.content.contains("The processor rate-limits"),
+        "body lines 3–4: {}",
+        ranged.content
+    );
+    assert!(
+        !ranged.content.contains("# Gotchas"),
+        "frontmatter and line 1 are excluded: {}",
+        ranged.content
+    );
+    assert!(
+        !ranged.content.contains("---"),
+        "frontmatter is never part of the body slice: {}",
+        ranged.content
+    );
+
+    // An open-ended range runs to the end; an out-of-range end clamps.
+    let tail = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "memory/gotchas".to_string(),
+            argosy: None,
+            start_line: Some(4),
+            end_line: None,
+        })
+        .unwrap();
+    assert!(
+        tail.content
+            .contains("see `document/rate-limit-behavior.md`")
+    );
+}
+
+#[test]
+fn read_rejects_invalid_line_ranges_with_actionable_errors() {
+    let mut rig = rig();
+    let base = |start, end| ReadParams {
+        cwd: project(),
+        path: "memory/gotchas".to_string(),
+        argosy: None,
+        start_line: start,
+        end_line: end,
+    };
+
+    let err = rig.state.read(base(Some(0), None)).unwrap_err();
+    assert!(err.to_string().contains("1-based"), "got {err}");
+    let err = rig.state.read(base(Some(99), None)).unwrap_err();
+    assert!(
+        err.to_string().contains("past the end of the body"),
+        "got {err}"
+    );
+    let err = rig.state.read(base(Some(4), Some(2))).unwrap_err();
+    assert!(err.to_string().contains("precedes"), "got {err}");
+}
+
+#[test]
+fn a_long_passage_is_capped_with_an_expansion_hint() {
+    // A single passage can approach the chunk budget (~2k chars is possible
+    // with long words); the wire shape caps it and points at the ranged
+    // read rather than shipping an unbounded payload.
+    let capped = crate::mcp::session::cap_chars(
+        &"x".repeat(crate::mcp::session::MAX_PASSAGE_CHARS + 10),
+        crate::mcp::session::MAX_PASSAGE_CHARS,
+    );
+    assert!(
+        capped.chars().count() < crate::mcp::session::MAX_PASSAGE_CHARS + 200,
+        "the payload stays bounded: {} chars",
+        capped.chars().count()
+    );
+    assert!(
+        capped.contains("use `read` with this hit's start_line/end_line"),
+        "the hint names the expansion path: {capped}"
+    );
+    // A passage under the cap is untouched.
+    let short = crate::mcp::session::cap_chars("short passage", 2_000);
+    assert_eq!(short, "short passage");
+}
+
+#[test]
+fn imported_ranged_reads_stay_delimiter_wrapped() {
+    let mut rig = rig();
+    let ranged = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "skill/shared-audit".to_string(),
+            argosy: Some("acme-shared".to_string()),
+            start_line: Some(1),
+            end_line: Some(1),
+        })
+        .unwrap();
+    assert_eq!(ranged.kind, "imported");
+    assert!(ranged.content.starts_with("<untrusted-content"));
+    assert!(ranged.content.ends_with("</untrusted-content>"));
+    assert_eq!(ranged.lines.map(|l| (l.start, l.end)), Some((1, 1)));
+    assert!(ranged.content.contains("# Audit"), "{}", ranged.content);
+    assert!(
+        !ranged.content.contains("Steps."),
+        "the slice is one body line: {}",
+        ranged.content
+    );
 }

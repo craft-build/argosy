@@ -11,7 +11,13 @@ fn staleness_after_reconcile_is_all_unchanged() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+    let report = staleness_report(
+        &ctx,
+        index.store(),
+        "mock-embedder@1",
+        ChunkConfig::default(),
+    )
+    .unwrap();
 
     assert_eq!(report.added, 0);
     assert_eq!(report.changed, 0);
@@ -35,7 +41,13 @@ fn staleness_preview_matches_the_diff_reconcile_applies() {
         "---\ntype: Note\n---\nA new note.\n",
     );
 
-    let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+    let report = staleness_report(
+        &ctx,
+        index.store(),
+        "mock-embedder@1",
+        ChunkConfig::default(),
+    )
+    .unwrap();
 
     assert_eq!(report.added, 1, "the new document counts as added");
     assert_eq!(report.changed, 1, "the edited memory counts as changed");
@@ -52,14 +64,21 @@ fn staleness_agrees_with_reconcile_on_identity_states() {
 
     // A recorded identity differing from the expected model ⇒ mismatch
     // (reconcile would rebuild).
-    let report = staleness_report(&ctx, index.store(), "other-model@2").unwrap();
+    let report =
+        staleness_report(&ctx, index.store(), "other-model@2", ChunkConfig::default()).unwrap();
     assert!(report.model_mismatch);
 
     // Data present with NO recorded identity: reconcile's `None =>
     // !stored.is_empty()` guard rebuilds, so the preview must not claim
     // "up to date".
     index.store_mut().model_id = None;
-    let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+    let report = staleness_report(
+        &ctx,
+        index.store(),
+        "mock-embedder@1",
+        ChunkConfig::default(),
+    )
+    .unwrap();
     assert!(
         report.model_mismatch,
         "data without a recorded identity is a rebuild, never \"up to date\""
@@ -68,7 +87,13 @@ fn staleness_agrees_with_reconcile_on_identity_states() {
     // An empty store with no recorded identity announces nothing; the
     // added counts carry the whole story.
     index.store_mut().clear().unwrap();
-    let report = staleness_report(&ctx, index.store(), "mock-embedder@1").unwrap();
+    let report = staleness_report(
+        &ctx,
+        index.store(),
+        "mock-embedder@1",
+        ChunkConfig::default(),
+    )
+    .unwrap();
     assert!(!report.model_mismatch);
     assert_eq!(report.added, 5);
 }
@@ -374,4 +399,111 @@ fn rebuild_re_records_identity_even_if_clear_keeps_the_old_one() {
     assert!(!report.rebuilt);
     assert_eq!(report.upserted, 0);
     assert_eq!(report.unchanged, 5);
+}
+
+// --- Multi-chunk concepts ---
+
+/// A concept long enough to split under the default budget.
+fn long_concept() -> String {
+    let filler = "word ".repeat(90);
+    format!(
+        "---\ntype: Note\ndescription: A long architecture note.\n---\n\
+         # Architecture\n\nIntro prose.\n\n\
+         ## Ingestion\n\n{filler}\n\n\
+         ### Retries\n\n{filler}\n\n\
+         ## Storage\n\n{filler}\n"
+    )
+}
+
+#[test]
+fn a_long_concept_upserts_one_unit_per_passage_and_counts_them() {
+    let (local, _imported, ctx) = fixture();
+    write_file(local.path(), "document/long.md", &long_concept());
+    let mut index = fresh_index();
+
+    let report = index.reconcile(&ctx).unwrap();
+    assert_eq!(
+        report.upserted, 6,
+        "five fixture concepts plus the long one"
+    );
+    assert!(
+        report.passages > report.upserted,
+        "the long concept expanded into several passages: {report:?}"
+    );
+    // The concept-level diff still sees one entry per concept.
+    assert_eq!(index.store().unit_hashes().unwrap().len(), 6);
+}
+
+#[test]
+fn a_long_concept_is_retrievable_past_its_first_paragraph() {
+    // The old one-vector pipeline truncated at ~150–200 words: a phrase
+    // from the last section could not win its own query. Passage-level
+    // embedding makes the tail searchable.
+    let (local, _imported, ctx) = fixture();
+    write_file(
+        local.path(),
+        "document/long.md",
+        &format!(
+            "---\ntype: Note\n---\n# Architecture\n\nIntro.\n\n## Early\n\n{}\n\n## Late Section\n\n\
+             quasar telemetry handshake protocol\n",
+            "word ".repeat(200)
+        ),
+    );
+    let mut index = fresh_index();
+    index.reconcile(&ctx).unwrap();
+
+    let hits = index
+        .search(&ctx, &Query::unscoped("quasar telemetry handshake", 5))
+        .unwrap();
+    let top = hits.first().expect("the tail passage is retrievable");
+    assert_eq!(top.concept.id.as_str(), "document/long");
+    assert!(
+        top.passage.contains("quasar telemetry"),
+        "the hit is the passage, not the concept head: {}",
+        top.passage
+    );
+    assert_eq!(top.heading_path, "Architecture › Late Section");
+    assert!(top.start_line > 1);
+    assert!(top.end_line >= top.start_line);
+}
+
+#[test]
+fn editing_one_section_reembeds_only_the_concept_holding_it() {
+    let (local, _imported, ctx) = fixture();
+    write_file(local.path(), "document/long.md", &long_concept());
+    let mut index = fresh_index();
+    index.reconcile(&ctx).unwrap();
+    let embedded = index.provider().embed_calls();
+
+    // Same length, different words in the last section: the concept hash
+    // changes once, and no other concept re-embeds.
+    let edited = long_concept().replace("## Storage", "## Persistence");
+    write_file(local.path(), "document/long.md", &edited);
+    let report = index.reconcile(&ctx).unwrap();
+
+    assert_eq!(report.upserted, 1, "IDX-11 holds at concept granularity");
+    assert_eq!(report.unchanged, 5);
+    assert!(
+        index.provider().embed_calls() > embedded,
+        "the changed concept re-embedded its passages"
+    );
+}
+
+#[test]
+fn deleting_a_long_concept_removes_every_passage() {
+    let (local, _imported, ctx) = fixture();
+    write_file(local.path(), "document/long.md", &long_concept());
+    let mut index = fresh_index();
+    index.reconcile(&ctx).unwrap();
+    let qid = QualifiedConceptId {
+        argosy: "local".to_string(),
+        namespace: Namespace::Document,
+        id: concept_id("document/long"),
+    };
+
+    fs::remove_file(local.path().join("document/long.md")).unwrap();
+    let report = index.reconcile(&ctx).unwrap();
+    assert_eq!(report.removed, 1);
+    let hits = index.search(&ctx, &Query::unscoped("quasar", 10)).unwrap();
+    assert!(hits.iter().all(|h| h.concept != qid), "no orphan passage");
 }

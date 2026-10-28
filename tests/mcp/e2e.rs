@@ -72,6 +72,24 @@ async fn end_to_end_over_in_process_duplex() {
             .starts_with("argosy://acme-billing/")),
         "qualified hits, got {search}"
     );
+    // Hits are passage-level: the wire shape names the passage and the body
+    // lines a ranged read can expand.
+    let hit = &search["hits"].as_array().unwrap()[0];
+    assert!(
+        hit["passage"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty() && p.starts_with("Concept: ")),
+        "hit carries its passage: {hit}"
+    );
+    assert!(
+        hit["chunk_ordinal"].is_number(),
+        "hit names its chunk: {hit}"
+    );
+    assert!(
+        hit["start_line"].as_u64().unwrap_or(0) >= 1
+            && hit["end_line"].as_u64().unwrap_or(0) >= hit["start_line"].as_u64().unwrap_or(1),
+        "hit carries an exact line range: {hit}"
+    );
 
     // write_memory → read_memory verifies the write round trips, and the
     // same-session search sees it (the index reconciles on every write).

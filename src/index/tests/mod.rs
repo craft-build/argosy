@@ -2,6 +2,7 @@
 //! prove the provider/store traits with no model and no SQLite. `pub(crate)`
 //! so other modules' tests (sqlite, mcp) reuse the same doubles.
 
+mod chunk;
 mod reconcile;
 mod sanitize;
 mod search;
@@ -118,7 +119,9 @@ impl EmbeddingProvider for MockEmbedder {
 pub(crate) struct MemStore {
     model_id: Option<String>,
     dimensions: Option<usize>,
-    units: HashMap<QualifiedConceptId, EmbeddingUnit>,
+    /// Keyed by concept plus chunk ordinal, so a multi-chunk concept keeps
+    /// every passage.
+    units: HashMap<(QualifiedConceptId, u32), EmbeddingUnit>,
     clears: usize,
     removals: Vec<QualifiedConceptId>,
 }
@@ -145,22 +148,23 @@ impl MemStore {
     pub(crate) fn forget_dimensions_but_keep_units(&mut self) {
         self.dimensions = None;
         if self.units.is_empty() {
+            let qid = QualifiedConceptId {
+                argosy: "local".into(),
+                namespace: Namespace::Document,
+                id: "document/arch.md".parse().unwrap(),
+            };
             self.units.insert(
-                QualifiedConceptId {
-                    argosy: "local".into(),
-                    namespace: Namespace::Document,
-                    id: "document/arch.md".parse().unwrap(),
-                },
+                (qid.clone(), 0),
                 EmbeddingUnit {
-                    concept: QualifiedConceptId {
-                        argosy: "local".into(),
-                        namespace: Namespace::Document,
-                        id: "document/arch.md".parse().unwrap(),
-                    },
+                    concept: qid,
                     vector: vec![0.0; 128],
                     text_hash: String::new(),
                     chunk_ordinal: 0,
                     meta: UnitMeta::default(),
+                    heading_path: String::new(),
+                    start_line: 0,
+                    end_line: 0,
+                    passage: String::new(),
                 },
             );
         }
@@ -186,22 +190,30 @@ impl VectorStore for MemStore {
             if self.dimensions.is_none() && !unit.vector.is_empty() {
                 self.dimensions = Some(unit.vector.len());
             }
-            self.units.insert(unit.concept.clone(), unit.clone());
+        }
+        // Replace the concept's units wholesale, like the sqlite store:
+        // collect the batch's concepts, drop their existing rows, insert.
+        let replaced: std::collections::HashSet<&QualifiedConceptId> =
+            units.iter().map(|u| &u.concept).collect();
+        self.units.retain(|(qid, _), _| !replaced.contains(qid));
+        for unit in units {
+            self.units
+                .insert((unit.concept.clone(), unit.chunk_ordinal), unit.clone());
         }
         Ok(())
     }
 
     fn remove_concept(&mut self, concept: &QualifiedConceptId) -> Result<()> {
         self.removals.push(concept.clone());
-        self.units.remove(concept);
+        self.units.retain(|(qid, _), _| qid != concept);
         Ok(())
     }
 
     fn unit_hashes(&self) -> Result<HashMap<QualifiedConceptId, String>> {
         Ok(self
             .units
-            .iter()
-            .map(|(qid, unit)| (qid.clone(), unit.text_hash.clone()))
+            .values()
+            .map(|unit| (unit.concept.clone(), unit.text_hash.clone()))
             .collect())
     }
 
@@ -235,6 +247,11 @@ impl VectorStore for MemStore {
                 concept: unit.concept.clone(),
                 score: cosine(vector, &unit.vector),
                 meta: unit.meta.clone(),
+                chunk_ordinal: unit.chunk_ordinal,
+                heading_path: unit.heading_path.clone(),
+                start_line: unit.start_line,
+                end_line: unit.end_line,
+                passage: unit.passage.clone(),
             })
             .collect();
         // Descending similarity. Ties keep whatever order the

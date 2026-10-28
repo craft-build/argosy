@@ -36,6 +36,10 @@ fn make_unit(
         text_hash: text.len().to_string(),
         vector: embedder.embed(&[text.to_string()]).unwrap()[0].clone(),
         meta,
+        heading_path: String::new(),
+        start_line: 1,
+        end_line: 1,
+        passage: text.to_string(),
     }
 }
 

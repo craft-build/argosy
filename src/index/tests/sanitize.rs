@@ -4,9 +4,10 @@
 //! embedded, not on every reconcile.
 
 use super::*;
+use crate::index::chunk::chunk_concept;
 
 #[test]
-fn index_text_strips_and_counts_invisible_format_characters() {
+fn chunking_strips_and_counts_invisible_format_characters() {
     // Zero-width space in the description; bidi override + pop, an
     // invisible separator, and tag-spelled ASCII in the body.
     let poisoned: Concept = concat!(
@@ -15,24 +16,28 @@ fn index_text_strips_and_counts_invisible_format_characters() {
     )
     .parse()
     .unwrap();
-    let (text, stripped) = index_text(&poisoned);
+    let chunks = chunk_concept(&poisoned, "poisoned", ChunkConfig::default());
+    let stripped: usize = chunks.iter().map(|c| c.invisible).sum();
     assert_eq!(stripped, 6, "one per invisible character");
     assert!(
-        !text.chars().any(is_invisible_format),
-        "nothing invisible survives: {text:?}"
+        !chunks
+            .iter()
+            .any(|c| c.text.chars().any(is_invisible_format)),
+        "nothing invisible survives: {chunks:?}"
     );
     assert!(
-        text.contains("Deploy steps. Follow"),
-        "the visible text is intact: {text:?}"
+        chunks[0].text.contains("Deploy steps. Follow"),
+        "the visible text is intact: {}",
+        chunks[0].text
     );
 
     // Honest text passes through untouched and uncounted.
     let clean: Concept = "---\ntype: Note\ndescription: Clean.\n---\nPlain.\n"
         .parse()
         .unwrap();
-    let (text, stripped) = index_text(&clean);
-    assert_eq!(stripped, 0);
-    assert!(text.contains("Plain."));
+    let chunks = chunk_concept(&clean, "clean", ChunkConfig::default());
+    assert_eq!(chunks.iter().map(|c| c.invisible).sum::<usize>(), 0);
+    assert!(chunks[0].text.contains("Plain."));
 }
 
 #[test]
