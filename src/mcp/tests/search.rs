@@ -340,3 +340,262 @@ fn search_rules_hits_only_styleguide_and_facets_apply() {
         .unwrap();
     assert!(none.hits.is_empty(), "facet mismatch excludes");
 }
+
+// --- Provenance tagging of hits and reads (SEC-1/SEC-2) ---
+
+#[test]
+fn hits_carry_kind_trust_and_source_commit() {
+    // Without configured trust, an import's `verified: machine-confirmed`
+    // self-claim must not relay: the hit reads kind=imported,
+    // trust=unverified.
+    let mut rig = rig();
+    let report = rig
+        .state
+        .search(SearchParams {
+            cwd: project(),
+            query: "audit the shared provisioner".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    let imported = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-shared")
+        .expect("imported skill is a hit");
+    assert_eq!(imported.kind, "imported");
+    assert_eq!(imported.trust, "unverified", "no configured cap");
+    assert_eq!(
+        imported.source_commit, None,
+        "the plain-dir fixture has no git metadata"
+    );
+
+    let local = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-billing")
+        .expect("local concept is a hit");
+    assert_eq!(local.kind, "local");
+    assert_eq!(local.source_commit, None);
+}
+
+#[test]
+fn imported_hit_trust_is_capped_not_claimed() {
+    // The same fixture under a configured cap of machine-confirmed: the
+    // import's claim (machine-confirmed) stands at the cap, but a
+    // human-reviewed claim would read machine-confirmed — the cap is a
+    // ceiling, not a grant.
+    let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
+        [(
+            "acme-shared".to_string(),
+            crate::trust::TrustTier::MachineConfirmed,
+        )]
+        .into_iter()
+        .collect(),
+    ));
+    let report = rig
+        .state
+        .search(SearchParams {
+            cwd: project(),
+            query: "audit the shared provisioner".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    let imported = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-shared")
+        .expect("imported skill is a hit");
+    assert_eq!(imported.trust, "machine-confirmed");
+}
+
+#[test]
+fn local_hits_relay_their_own_claim_verbatim() {
+    let mut rig = rig();
+    let claimed: Concept = ("---\n\
+         type: Memory\n\
+         description: Pinned facts about the billing ledger.\n\
+         verified: human-reviewed\n\
+         ---\n\
+         # Pinned\n\nLedger facts.\n")
+        .parse()
+        .unwrap();
+    rig.state
+        .session(project())
+        .unwrap()
+        .context
+        .local()
+        .write_concept(
+            Namespace::Memory,
+            &"memory/pinned-facts".parse().unwrap(),
+            &claimed,
+        )
+        .unwrap();
+    // A fresh state over the same (now larger) local root, so its factory
+    // reconciles an index that includes the written concept.
+    let mut state = McpState::new(factory(
+        rig.state
+            .session(project())
+            .unwrap()
+            .context
+            .local()
+            .root()
+            .to_path_buf(),
+        Vec::new(),
+    ));
+    let report = state
+        .search(SearchParams {
+            cwd: project(),
+            query: "pinned facts billing ledger".to_string(),
+            k: None,
+            namespaces: None,
+            argosy: None,
+            tags: None,
+            r#type: None,
+            language: None,
+            category: None,
+        })
+        .unwrap();
+    let hit = report
+        .hits
+        .iter()
+        .find(|h| h.uri.ends_with("memory/pinned-facts"))
+        .expect("written memory is a hit");
+    assert_eq!(hit.kind, "local");
+    assert_eq!(
+        hit.trust, "human-reviewed",
+        "the local book grades its own writing"
+    );
+}
+
+#[test]
+fn imported_reads_arrive_delimiter_wrapped() {
+    let mut rig = rig();
+    let imported = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "skill/shared-audit".to_string(),
+            argosy: Some("acme-shared".to_string()),
+        })
+        .unwrap();
+    assert_eq!(imported.kind, "imported");
+    assert_eq!(imported.trust, "unverified");
+    assert_eq!(imported.source_commit, None);
+    assert!(
+        imported.content.starts_with(
+            "<untrusted-content argosy=\"acme-shared\" \
+             uri=\"argosy://acme-shared/skill/shared-audit\" trust=\"unverified\">"
+        ),
+        "opened by the delimiter: {}",
+        imported.content
+    );
+    assert!(imported.content.ends_with("</untrusted-content>"));
+    assert!(imported.content.contains("# Audit"));
+
+    // The local book is the user's own writing: never wrapped.
+    let local = rig
+        .state
+        .read(ReadParams {
+            cwd: project(),
+            path: "memory/gotchas".to_string(),
+            argosy: None,
+        })
+        .unwrap();
+    assert_eq!(local.kind, "local");
+    assert_eq!(local.trust, "unverified", "absent claim reads as the floor");
+    assert!(
+        !local.content.contains("untrusted-content"),
+        "local reads stay bare: {}",
+        local.content
+    );
+}
+
+#[test]
+fn search_rules_wraps_imported_examples_in_untrusted_delimiters() {
+    // A bespoke import carrying a rule with Good/Bad sections: the review
+    // flow hands those excerpts to the reviewer prompt, so they get the
+    // same delimiters full bodies do.
+    let imported = tempfile::tempdir().unwrap();
+    let book = LocalArgosy::init(imported.path(), Some("acme-shared"), None).unwrap();
+    let rule: Concept = ("---\n\
+         type: Styleguide Rule\n\
+         description: Name retry counters plainly in snake case.\n\
+         language: rust\n\
+         category: naming\n\
+         verified: human-reviewed\n\
+         ---\n\
+         # shared-rule\n\n\
+         Use snake case.\n\n\
+         ## Good\n\n\
+         let retry_count = 0;\n\n\
+         ## Bad\n\n\
+         let retryCount = 0;\n")
+        .parse()
+        .unwrap();
+    book.write_concept(
+        Namespace::Styleguide,
+        &"styleguide/shared-rule".parse().unwrap(),
+        &rule,
+    )
+    .unwrap();
+    let local = fixture_copy("valid-acme-billing");
+    let mut state = McpState::new(factory(
+        local.path().to_path_buf(),
+        vec![imported.path().to_path_buf()],
+    ));
+
+    let report = state
+        .search_rules(RulesParams {
+            cwd: project(),
+            query: "variable naming conventions".to_string(),
+            language: None,
+            category: None,
+            k: None,
+        })
+        .unwrap();
+
+    let hit = report
+        .hits
+        .iter()
+        .find(|h| h.argosy == "acme-shared")
+        .expect("imported rule is a hit");
+    assert_eq!(hit.kind, "imported");
+    assert_eq!(
+        hit.trust, "unverified",
+        "human-reviewed self-claim is floored"
+    );
+    let expected_open = format!(
+        "<untrusted-content argosy=\"acme-shared\" uri=\"{}\" trust=\"unverified\">",
+        hit.uri
+    );
+    let good = hit.good.as_deref().expect("good excerpt present");
+    assert!(good.starts_with(&expected_open), "got {good}");
+    assert!(good.ends_with("</untrusted-content>"));
+    assert!(good.contains("let retry_count = 0;"));
+    let bad = hit.bad.as_deref().expect("bad excerpt present");
+    assert!(bad.starts_with(&expected_open), "got {bad}");
+    assert!(bad.ends_with("</untrusted-content>"));
+    assert!(bad.contains("let retryCount = 0;"));
+
+    // The local rule's excerpts stay bare — same query, same sections.
+    let local_hit = report
+        .hits
+        .iter()
+        .find(|h| h.concept_id.ends_with("snake-case-vars"))
+        .expect("local rule is a hit");
+    assert_eq!(local_hit.kind, "local");
+    assert_eq!(local_hit.good.as_deref(), Some("let retry_count = 0;"));
+    assert_eq!(local_hit.bad.as_deref(), Some("let retryCount = 0;"));
+}

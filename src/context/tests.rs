@@ -300,6 +300,29 @@ fn an_import_with_a_valid_sidecar_opens_normally() {
 }
 
 #[test]
+fn an_import_with_git_metadata_reports_its_head_commit() {
+    let local = make_argosy("local", &[]);
+    let imp = make_argosy("imp", &[]);
+    // Hand-rolled git metadata, exactly what a cloned checkout carries:
+    // HEAD pointing at a loose branch ref.
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    let git = imp.path().join(".git");
+    fs::create_dir_all(git.join("refs/heads")).unwrap();
+    fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(git.join("refs/heads/main"), format!("{COMMIT}\n")).unwrap();
+
+    let ctx = ProjectContext::open(local.path(), [imp.path().to_path_buf()]).unwrap();
+    assert_eq!(ctx.import_commit("imp"), Some(COMMIT));
+    // The local book and unknown names have no commit; a git-less import
+    // (hosts point at plain trees) has none either.
+    assert_eq!(ctx.import_commit("local"), None);
+    assert_eq!(ctx.import_commit("nope"), None);
+    let plain = make_argosy("plain", &[]);
+    let ctx = ProjectContext::open(local.path(), [plain.path().to_path_buf()]).unwrap();
+    assert_eq!(ctx.import_commit("plain"), None);
+}
+
+#[test]
 fn an_import_tampered_after_packaging_is_excluded_not_served() {
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);

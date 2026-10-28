@@ -3,6 +3,7 @@
 //! so other modules' tests (sqlite, mcp) reuse the same doubles.
 
 mod reconcile;
+mod sanitize;
 mod search;
 
 use std::cell::Cell;

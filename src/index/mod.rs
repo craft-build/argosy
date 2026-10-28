@@ -217,6 +217,13 @@ pub struct IndexReport {
     pub unchanged: usize,
     /// The model identity the store now records.
     pub model_id: String,
+    /// One line per concept that was (re)embedded carrying invisible
+    /// format characters (zero-width/bidi/tag Unicode — see
+    /// [`is_invisible_format`]): stripped from the indexed text, bytes on
+    /// disk unchanged. Empty for a clean run; an unchanged book never
+    /// re-warns, because only units being embedded are reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// The default namespace set an [`Index::new`] index walks (and the set
@@ -234,7 +241,9 @@ fn default_namespaces() -> Vec<Namespace> {
 /// Walks `namespaces` of every active argosy in `context` and hashes each
 /// concept's would-be embedded text. Sorted by URI so downstream embedding
 /// batches are deterministic. Shared by [`Index::reconcile`] and
-/// [`staleness_report`], which must never drift apart.
+/// [`staleness_report`], which must never drift apart. Each gathered
+/// concept also carries its invisible-format character count
+/// ([`index_text`]) for reconcile-time warnings.
 fn gather_concepts(
     context: &ProjectContext,
     namespaces: &[Namespace],
@@ -247,7 +256,7 @@ fn gather_concepts(
                 continue;
             }
             for (id, concept) in argosy.concepts(namespace)? {
-                let text = embed_text(&concept);
+                let (text, invisible) = index_text(&concept);
                 out.push(GatheredConcept {
                     qid: QualifiedConceptId {
                         argosy: name.to_string(),
@@ -257,6 +266,7 @@ fn gather_concepts(
                     hash: sha256_hex(text.as_bytes()),
                     text,
                     meta: UnitMeta::from_concept(&concept),
+                    invisible,
                 });
             }
         }
@@ -340,6 +350,11 @@ struct GatheredConcept {
     text: String,
     hash: String,
     meta: UnitMeta,
+    /// How many invisible format characters were stripped from `text`
+    /// (see [`is_invisible_format`]); zero for honest text. Reported as
+    /// a warning when — and only when — the concept is (re)embedded, so
+    /// an unchanged book does not re-warn on every reconcile.
+    invisible: usize,
 }
 
 /// The reconcile/query engine, written against the [`EmbeddingProvider`] and
@@ -449,6 +464,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             removed: 0,
             unchanged: 0,
             model_id: model.clone(),
+            warnings: Vec::new(),
         };
 
         let prior: HashMap<QualifiedConceptId, String> = if identity_mismatch {
@@ -515,6 +531,20 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             self.store.upsert(&units)?;
             report.upserted += units.len();
             progress(report.upserted, total);
+        }
+
+        // Invisible-Unicode flagging (RAG-poisoning defense): warn for the
+        // concepts this run actually embedded, so the report stays quiet
+        // once the stripped text is what the store holds.
+        for gathered in &to_embed {
+            if gathered.invisible > 0 {
+                report.warnings.push(format!(
+                    "{}: stripped {} invisible format character(s) (zero-width/bidi/tag \
+                     Unicode) from the indexed text; the on-disk file is unchanged",
+                    gathered.qid.to_uri(),
+                    gathered.invisible
+                ));
+            }
         }
 
         // First reconcile (no identity yet) and every rebuild record the
@@ -606,16 +636,54 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     }
 }
 
+/// Unicode that renders as nothing (or as pure direction/formatting):
+/// zero-width spaces and joiners, bidi marks and overrides, word joiners,
+/// the BOM, interlinear annotations, and tag characters. Hidden payload
+/// in these is the classic text-steganography channel for RAG poisoning —
+/// invisible to a reader, fully visible to an embedder.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'                // soft hyphen
+            | '\u{180E}'          // mongolian vowel separator
+            | '\u{200B}'..='\u{200F}' // zero-width space/non-joiner/joiner + LRM/RLM
+            | '\u{202A}'..='\u{202E}' // bidi embedding/override controls
+            | '\u{2060}'..='\u{2064}' // word joiner + invisible operators
+            | '\u{2066}'..='\u{206F}' // bidi isolates
+            | '\u{FEFF}'          // zero-width no-break space (BOM)
+            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation
+            | '\u{E0001}'          // language tag character
+            | '\u{E0020}'..='\u{E007F}' // tag characters (ASCII hidden in them)
+    )
+}
+
 /// The exact text that gets embedded for a concept (module docs, chunking
-/// decision): `description` plus body when a description exists, body alone
-/// otherwise.
-fn embed_text(concept: &Concept) -> String {
-    match concept.description() {
+/// decision): `description` plus body when a description exists, body
+/// alone otherwise — with invisible format characters stripped
+/// ([`is_invisible_format`]) and the strip count returned so the caller
+/// can warn. Stripping touches the indexed text only: bytes on disk stay
+/// exactly as written, so the integrity sidecar still verifies and the
+/// payload a poisoned book planted remains inspectable by `read`.
+fn index_text(concept: &Concept) -> (String, usize) {
+    let raw = match concept.description() {
         Some(description) if !description.trim().is_empty() => {
             format!("{}\n\n{}", description, concept.body())
         }
         _ => concept.body().to_string(),
+    };
+    if !raw.contains(is_invisible_format) {
+        return (raw, 0);
     }
+    let mut stripped = 0usize;
+    let mut text = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if is_invisible_format(c) {
+            stripped += 1;
+        } else {
+            text.push(c);
+        }
+    }
+    (text, stripped)
 }
 
 /// Builds the id callers use for [`ConceptId`] plumbing in tests.

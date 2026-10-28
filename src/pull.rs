@@ -384,6 +384,54 @@ pub fn verify_import_integrity(checkout: &Path) -> std::result::Result<(), Strin
     }
 }
 
+/// The commit a checkout's git metadata resolves to, when it has any:
+/// the provenance hits and reads report for imported content. Pure file
+/// reads — a loose `HEAD` ref first, then `packed-refs`, following one
+/// `gitdir:` indirection (worktrees/submodules) — because every import
+/// open would otherwise pay a git subprocess. `None` is not an error:
+/// checkouts without git metadata (hosts pointing at plain trees) simply
+/// have no commit to report.
+pub fn checkout_head_commit(checkout: &Path) -> Option<String> {
+    fn is_commit_id(text: &str) -> bool {
+        let text = text.trim();
+        (text.len() == 40 || text.len() == 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    let git = checkout.join(".git");
+    let metadata = fs::symlink_metadata(&git).ok()?;
+    // A `.git` file points at the real git dir (worktrees, submodules);
+    // `Path::join` keeps an absolute target as-is.
+    let git_dir = if metadata.file_type().is_dir() {
+        git
+    } else {
+        let pointer = fs::read_to_string(&git).ok()?;
+        let target = pointer.strip_prefix("gitdir:")?.trim();
+        checkout.join(target)
+    };
+    let head = fs::read_to_string(git_dir.join("HEAD"))
+        .ok()?
+        .trim()
+        .to_string();
+    // Detached HEAD names the commit directly.
+    if is_commit_id(&head) {
+        return Some(head);
+    }
+    let ref_name = head.strip_prefix("ref: ")?.trim();
+    // Loose ref first (a fresh clone always has one)…
+    if let Ok(loose) = fs::read_to_string(git_dir.join(ref_name))
+        && is_commit_id(&loose)
+    {
+        return Some(loose.trim().to_string());
+    }
+    // …then packed-refs (`<sha> <refname>` lines; `^`-prefixed peel lines
+    // fail the shape test and drop out).
+    let packed = fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let (hash, name) = line.split_once(' ')?;
+        (name.trim() == ref_name && is_commit_id(hash)).then(|| hash.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -748,5 +796,92 @@ mod tests {
 
         assert_eq!(argosy.manifest().name(), "remote-rules");
         assert_eq!(integrity_status(&root.join("shared")), "no sidecar");
+    }
+
+    // --- source-commit provenance ---
+
+    #[test]
+    fn a_clone_reports_its_head_commit() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        git_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        let commit = checkout_head_commit(&root.join("shared")).unwrap();
+        assert_eq!(commit.len(), 40, "a sha1 object id: {commit}");
+        assert!(
+            commit.bytes().all(|b| b.is_ascii_hexdigit()),
+            "lowercase hex: {commit}"
+        );
+        // It is genuinely the remote's HEAD, not a ref spelling.
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_eq!(commit, String::from_utf8_lossy(&out.stdout).trim());
+    }
+
+    #[test]
+    fn head_commit_resolves_a_packed_ref() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        git_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        // A clone whose branch lives only in packed-refs (e.g. after a
+        // server-side repack): the loose ref is gone, HEAD still names it.
+        let git_dir = root.join("shared/.git");
+        let head = fs::read_to_string(git_dir.join("HEAD")).unwrap();
+        let ref_name = head.trim().strip_prefix("ref: ").unwrap().to_string();
+        let loose = fs::read_to_string(git_dir.join(&ref_name))
+            .unwrap()
+            .trim()
+            .to_string();
+        fs::remove_file(git_dir.join(&ref_name)).unwrap();
+        fs::write(
+            git_dir.join("packed-refs"),
+            format!("# pack-refs-with: peeled fully-peeled sorted\n{loose} {ref_name}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            checkout_head_commit(&root.join("shared")).unwrap(),
+            loose,
+            "packed-refs answers when the loose ref is gone"
+        );
+    }
+
+    #[test]
+    fn a_detached_head_reports_the_commit_directly() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        git_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root.join("shared"))
+            .output()
+            .unwrap();
+        let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        fs::write(root.join("shared/.git/HEAD"), &commit).unwrap();
+
+        assert_eq!(checkout_head_commit(&root.join("shared")).unwrap(), commit);
+    }
+
+    #[test]
+    fn a_checkout_without_git_metadata_reports_no_commit() {
+        let tmp = TempDir::new().unwrap();
+        // A plain tree (hosts point imports at these) and garbage HEADs.
+        fs::create_dir_all(tmp.path().join("plain/argosy.md").parent().unwrap()).unwrap();
+        assert_eq!(checkout_head_commit(&tmp.path().join("plain")), None);
+
+        let junk = tmp.path().join("junk");
+        fs::create_dir_all(junk.join(".git")).unwrap();
+        fs::write(junk.join(".git/HEAD"), "not a ref\n").unwrap();
+        assert_eq!(checkout_head_commit(&junk), None);
     }
 }

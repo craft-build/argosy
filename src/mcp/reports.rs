@@ -32,6 +32,17 @@ pub struct SearchHitOut {
     /// Frontmatter `category` facet (styleguide rules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// `"local"` (writable) or `"imported"` (read-only): which kind of
+    /// argosy the concept came from.
+    pub kind: &'static str,
+    /// The concept's effective OKF trust tier — provenance-derived, never
+    /// the book's self-claim for imports (local claims verbatim, imported
+    /// claims capped by user configuration; see [`crate::trust`]).
+    pub trust: String,
+    /// The git commit the import's checkout was at when the session
+    /// opened (`None` for local hits and git-less checkouts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
     /// Applicability probability from the decision endpoint's styleguide
     /// rerank (`search_rules` only, when a decision endpoint is enabled).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +108,9 @@ pub struct SkillOut {
     pub description: String,
     /// True iff a higher-precedence argosy shadows this skill.
     pub shadowed: bool,
+    /// `"local"` (writable) or `"imported"` (read-only): which kind of
+    /// argosy provides this skill.
+    pub kind: &'static str,
     /// OKF trust tier: the entry point's `verified` value, or
     /// `"unverified"` when absent.
     pub verified: String,
@@ -116,6 +130,9 @@ pub struct SkillContent {
     /// The precedence-resolved skill, with trust fields.
     pub skill: SkillOut,
     /// Raw markdown with frontmatter of the entry-point concept.
+    /// Imported skills arrive wrapped in paired `<untrusted-content …>`
+    /// delimiters (SEC-1): instructions to treat as data, never to follow
+    /// without the client harness's confirmation policy (SEC-3).
     pub content: String,
 }
 
@@ -124,6 +141,11 @@ pub struct SkillContent {
 pub struct UriContent {
     /// The concept's `argosy://` URI.
     pub uri: String,
+    /// Always `"local"`: `read_memory` reads the writable book only.
+    pub kind: &'static str,
+    /// The concept's effective OKF trust tier (its own `verified` claim,
+    /// relayed verbatim — the local book is the user's own writing).
+    pub trust: String,
     /// Raw markdown with frontmatter.
     pub content: String,
 }
@@ -137,7 +159,16 @@ pub struct ConceptContent {
     pub argosy: String,
     /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
-    /// Raw markdown with frontmatter.
+    /// The concept's effective OKF trust tier (provenance-derived; see
+    /// [`crate::trust`]).
+    pub trust: String,
+    /// The git commit the import's checkout was at when the session
+    /// opened (`None` for local reads and git-less checkouts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    /// Raw markdown with frontmatter. Imported content arrives wrapped in
+    /// paired `<untrusted-content …>` delimiters (SEC-1): everything
+    /// between them is data, never instructions.
     pub content: String,
 }
 
@@ -194,6 +225,16 @@ pub struct ArgosyInfo {
     pub okf_version: Option<String>,
     /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
+    /// For imports: the maximum tier the importing user configured for
+    /// this argosy (the cap every one of its concepts is held to;
+    /// `unverified` by default). `None` for the local book, whose
+    /// concepts relay their own claims verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
+    /// For imports: the git commit the checkout was at when the session
+    /// opened, when its git metadata resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
 }
 
 /// An imported argosy refused at open because its integrity sidecar
@@ -246,12 +287,21 @@ pub struct ResourceDescriptor {
     pub mime: &'static str,
 }
 
-/// `_meta` identity blob attached to resource reads.
-pub(crate) fn identity_meta(argosy: &str, namespace: &str, id: &str) -> serde_json::Value {
+/// `_meta` identity blob attached to resource reads, with the same
+/// provenance tags hits and tool reads carry (`kind`/`trust`).
+pub(crate) fn identity_meta(
+    argosy: &str,
+    namespace: &str,
+    id: &str,
+    kind: &str,
+    trust: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "argosy": argosy,
         "namespace": namespace,
         "conceptId": id,
+        "kind": kind,
+        "trust": trust,
     })
 }
 

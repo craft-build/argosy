@@ -4,6 +4,7 @@
 //! are read-only by construction; duplicate names are rejected; v1 URIs
 //! have no percent-encoding — ids outside `[A-Za-z0-9._-/]` error.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use snafu::ensure;
@@ -173,6 +174,11 @@ pub struct ProjectContext {
     local: LocalArgosy,
     imported: Vec<Argosy>,
     excluded: Vec<ExcludedImport>,
+    /// The git commit each import's checkout resolved to at open (by
+    /// manifest name — [`ProjectContext::import_commit`]): the provenance
+    /// hits and reads report for imported content. Checkouts without git
+    /// metadata have no entry.
+    import_commits: HashMap<String, String>,
 }
 
 impl ProjectContext {
@@ -191,6 +197,7 @@ impl ProjectContext {
         let local = LocalArgosy::open(local_path)?;
         let mut imported = Vec::new();
         let mut excluded = Vec::new();
+        let mut import_commits = HashMap::new();
         for path in imported_paths {
             // Integrity first: a pulled checkout is verified against its
             // pull-time stamp (sidecar present, unchanged, and still
@@ -207,7 +214,13 @@ impl ProjectContext {
                 });
                 continue;
             }
-            imported.push(Argosy::open(path)?);
+            let argosy = Argosy::open(&path)?;
+            // File-read git provenance (no subprocess per open): what a
+            // hit or read reports as this import's source commit.
+            if let Some(commit) = crate::pull::checkout_head_commit(&path) {
+                import_commits.insert(argosy.manifest().name().to_string(), commit);
+            }
+            imported.push(argosy);
         }
 
         let local_name = local.manifest().name();
@@ -230,6 +243,7 @@ impl ProjectContext {
             local,
             imported,
             excluded,
+            import_commits,
         })
     }
 
@@ -289,6 +303,14 @@ impl ProjectContext {
     /// The imported argosys, read-only, in registration (precedence) order.
     pub fn imported(&self) -> impl Iterator<Item = &Argosy> {
         self.imported.iter()
+    }
+
+    /// The git commit an imported argosy's checkout resolved to at open —
+    /// the provenance surfaced on hits and reads of its content. `None`
+    /// for the local book, unknown names, and checkouts without git
+    /// metadata (hosts pointing at plain trees).
+    pub fn import_commit(&self, name: &str) -> Option<&str> {
+        self.import_commits.get(name).map(String::as_str)
     }
 
     /// Imports refused at open because their integrity sidecar disagreed

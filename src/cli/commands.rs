@@ -526,6 +526,11 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                     report.upserted, report.removed, report.unchanged, report.model_id
                 ));
             }
+            // Invisible-Unicode flags: poisoning payloads stripped from the
+            // indexed text, concept by concept. Loud by design.
+            for warning in &report.warnings {
+                out.warn(warning);
+            }
             Ok(ExitCode::SUCCESS)
         }
         IndexVerb::Query(q) => {

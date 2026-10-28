@@ -15,6 +15,30 @@ fn read_concept_resource_returns_markdown_with_identity_meta() {
     let meta = body.meta.unwrap();
     assert_eq!(meta["argosy"], "acme-billing");
     assert_eq!(meta["namespace"], "memory");
+    assert_eq!(meta["kind"], "local");
+    assert_eq!(meta["trust"], "unverified");
+}
+
+#[test]
+fn imported_concept_resources_arrive_delimiter_wrapped() {
+    let mut rig = rig();
+    let body = rig
+        .state
+        .read_resource("argosy://acme-shared/skill/shared-audit")
+        .unwrap();
+    assert_eq!(body.mime, "text/markdown");
+    assert!(
+        body.text.starts_with(
+            "<untrusted-content argosy=\"acme-shared\" \
+             uri=\"argosy://acme-shared/skill/shared-audit\" trust=\"unverified\">"
+        ),
+        "got {}",
+        body.text
+    );
+    assert!(body.text.ends_with("</untrusted-content>"));
+    let meta = body.meta.unwrap();
+    assert_eq!(meta["kind"], "imported");
+    assert_eq!(meta["trust"], "unverified");
 }
 
 #[test]
@@ -27,8 +51,12 @@ fn read_argosys_resource_lists_local_and_imported() {
     assert_eq!(argosys.len(), 2);
     assert_eq!(argosys[0]["name"], "acme-billing");
     assert_eq!(argosys[0]["kind"], "local");
+    // Local concepts relay their own claims, so the listing carries no
+    // argosy-level tier for the local book.
+    assert!(argosys[0].get("trust").is_none(), "got {parsed}");
     assert_eq!(argosys[1]["name"], "acme-shared");
     assert_eq!(argosys[1]["kind"], "imported");
+    assert_eq!(argosys[1]["trust"], "unverified", "the configured cap");
 }
 
 #[test]

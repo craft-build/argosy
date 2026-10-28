@@ -97,11 +97,25 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// claims for the local book, configuration-capped for imports
     /// ([`TrustPolicy::effective`]).
     fn verified_tier(&self, name: &str, concept: &Concept) -> String {
-        let origin = match self.context.argosy_named(name) {
-            Some(crate::context::ArgosyRef::Local(_)) => Origin::Local,
-            Some(crate::context::ArgosyRef::Imported(_)) | None => Origin::Imported,
-        };
+        let (_, origin) = self.origin_of(name);
         self.trust.effective_for(origin, name, concept)
+    }
+
+    /// Which kind of argosy `name` is, as both the wire spelling
+    /// (`"local"`/`"imported"`) and the [`Origin`] the trust policy
+    /// wants. An unknown name reads as imported: like
+    /// [`ProjectContext::argosy_named`], the conservative answer.
+    fn origin_of(&self, name: &str) -> (&'static str, Origin) {
+        match self.context.argosy_named(name) {
+            Some(crate::context::ArgosyRef::Local(_)) => ("local", Origin::Local),
+            Some(crate::context::ArgosyRef::Imported(_)) | None => ("imported", Origin::Imported),
+        }
+    }
+
+    /// The source commit hits and reads report for argosy `name`:
+    /// the import's checkout commit, `None` for the local book.
+    fn source_commit(&self, name: &str) -> Option<String> {
+        self.context.import_commit(name).map(str::to_string)
     }
 
     /// Brings the index back in line with disk after a mutation. The write
@@ -119,10 +133,26 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             })
     }
 
-    fn hit_out(hit: crate::index::SearchHit) -> SearchHitOut {
+    /// One index hit as the wire shape, tagged with its provenance
+    /// (`kind`, `trust`, `source_commit`). The tier needs the concept's
+    /// own `verified` claim, so this reads the concept — tolerantly, like
+    /// the `search_rules` enrichment: a hit whose concept can no longer
+    /// be read (deleted mid-flight) keeps its index facets with the floor
+    /// trust tier rather than failing the whole search.
+    fn hit_out(&self, hit: crate::index::SearchHit) -> SearchHitOut {
+        let uri = hit.concept.to_uri();
+        let argosy = hit.concept.argosy;
+        let (kind, _) = self.origin_of(&argosy);
+        let trust = self
+            .context
+            .read_uri(&uri)
+            .ok()
+            .map(|c| self.verified_tier(&argosy, &c))
+            .unwrap_or_else(|| UNVERIFIED.to_string());
+        let source_commit = self.source_commit(&argosy);
         SearchHitOut {
-            uri: hit.concept.to_uri(),
-            argosy: hit.concept.argosy,
+            uri,
+            argosy,
             namespace: hit.concept.namespace.as_dir_name().to_string(),
             concept_id: hit.concept.id.to_string(),
             score: hit.score,
@@ -131,6 +161,9 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             tags: hit.meta.tags,
             language: hit.meta.language,
             category: hit.meta.category,
+            kind,
+            trust,
+            source_commit,
             applicability: None,
             good: None,
             bad: None,
@@ -178,7 +211,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         };
         let hits = self.index.search(&self.context, &query)?;
         Ok(SearchReport {
-            hits: hits.into_iter().map(Self::hit_out).collect(),
+            hits: hits.into_iter().map(|h| self.hit_out(h)).collect(),
         })
     }
 
@@ -208,8 +241,20 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                 continue;
             };
             let rule = crate::styleguide::StyleguideRule::from_parts(id, concept);
-            hit.good = rule.good_examples().map(str::to_string);
-            hit.bad = rule.bad_examples().map(str::to_string);
+            // Imported Good/Bad excerpts are free text from a shared book —
+            // the same untrusted-content delimiters full bodies get, so a
+            // crafted example cannot pose as reviewer instructions.
+            let wrap = |section: Option<&str>| {
+                section.map(|text| {
+                    if hit.kind == "imported" {
+                        untrusted_wrap(&hit.uri, &hit.argosy, &hit.trust, text)
+                    } else {
+                        text.to_string()
+                    }
+                })
+            };
+            hit.good = wrap(rule.good_examples());
+            hit.bad = wrap(rule.bad_examples());
         }
         Ok(report)
     }
@@ -239,7 +284,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             filter: Filter::default(),
         };
         let hits = self.index.search(&self.context, &query)?;
-        let candidates: Vec<SearchHitOut> = hits.into_iter().map(Self::hit_out).collect();
+        let candidates: Vec<SearchHitOut> = hits.into_iter().map(|h| self.hit_out(h)).collect();
 
         if !decision.is_enabled() {
             return Ok(AskReport {
@@ -352,12 +397,14 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                     .resolve(&qid)
                     .map(|c| self.verified_tier(&listing.argosy, &c))
                     .unwrap_or_else(|_| UNVERIFIED.to_string());
+                let (kind, _) = self.origin_of(&listing.argosy);
                 SkillOut {
                     name: listing.skill.name,
                     argosy: listing.argosy,
                     uri: qid.to_uri(),
                     description: listing.skill.description,
                     shadowed: listing.shadowed,
+                    kind,
                     verified,
                 }
             })
@@ -380,6 +427,21 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         };
         let concept = self.context.resolve(&qid)?;
         let verified = self.verified_tier(&listing.argosy, &concept);
+        let (kind, _) = self.origin_of(&listing.argosy);
+        // An imported skill's body is instructions from a shared book:
+        // delivered inside the untrusted-content delimiters so the client
+        // harness brackets it as data (SEC-1) behind its own confirmation
+        // policy (SEC-3).
+        let content = if kind == "imported" {
+            untrusted_wrap(
+                &qid.to_uri(),
+                &listing.argosy,
+                &verified,
+                &concept.to_string(),
+            )
+        } else {
+            concept.to_string()
+        };
         Ok(SkillContent {
             skill: SkillOut {
                 name: listing.skill.name,
@@ -387,9 +449,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                 uri: qid.to_uri(),
                 description: listing.skill.description,
                 shadowed: listing.shadowed,
+                kind,
                 verified,
             },
-            content: concept.to_string(),
+            content,
         })
     }
 
@@ -401,6 +464,9 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         let concept = self.context.read_uri(&uri)?;
         Ok(UriContent {
             uri,
+            // Local by construction: `read_memory` reads the writable book.
+            kind: "local",
+            trust: self.verified_tier(&name, &concept),
             content: concept.to_string(),
         })
     }
@@ -425,11 +491,23 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         };
         let uri = format!("argosy://{name}/{}", params.path);
         let concept = self.context.read_uri(&uri)?;
+        let trust = self.verified_tier(&name, &concept);
+        let source_commit = self.source_commit(&name);
+        // Imported bodies are wrapped in the untrusted-content delimiters
+        // (SEC-1); the local book is the user's own writing and is served
+        // as-is.
+        let content = if kind == "imported" {
+            untrusted_wrap(&uri, &name, &trust, &concept.to_string())
+        } else {
+            concept.to_string()
+        };
         Ok(ConceptContent {
             uri,
             argosy: name,
             kind,
-            content: concept.to_string(),
+            trust,
+            source_commit,
+            content,
         })
     }
 
@@ -620,12 +698,34 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
         let concept = self.context.read_uri(uri)?;
         let qid = QualifiedConceptId::from_uri(uri).ok();
-        let meta = qid
-            .as_ref()
-            .map(|q| identity_meta(&q.argosy, q.namespace.as_dir_name(), &q.id.to_string()));
+        // Same provenance tagging and delimiters as the tool reads: the
+        // resource surface serves imported books too, and its text is the
+        // rawest channel an imported book has.
+        let (text, meta) = match &qid {
+            Some(q) => {
+                let (kind, _) = self.origin_of(&q.argosy);
+                let trust = self.verified_tier(&q.argosy, &concept);
+                let text = if kind == "imported" {
+                    untrusted_wrap(uri, &q.argosy, &trust, &concept.to_string())
+                } else {
+                    concept.to_string()
+                };
+                (
+                    text,
+                    Some(identity_meta(
+                        &q.argosy,
+                        q.namespace.as_dir_name(),
+                        &q.id.to_string(),
+                        kind,
+                        &trust,
+                    )),
+                )
+            }
+            None => (concept.to_string(), None),
+        };
         Ok(ResourceBody {
             uri: uri.to_string(),
-            text: concept.to_string(),
+            text,
             mime: "text/markdown",
             meta,
         })
@@ -717,13 +817,22 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             argosy_version: local.manifest().argosy_version().to_string(),
             okf_version: local.manifest().okf_version().map(str::to_string),
             kind: "local",
+            // The local book has no cap: each of its concepts relays its
+            // own `verified` claim verbatim.
+            trust: None,
+            source_commit: None,
         }];
         for imported in self.context.imported() {
+            let name = imported.manifest().name();
             infos.push(ArgosyInfo {
-                name: imported.manifest().name().to_string(),
+                name: name.to_string(),
                 argosy_version: imported.manifest().argosy_version().to_string(),
                 okf_version: imported.manifest().okf_version().map(str::to_string),
                 kind: "imported",
+                // The argosy-level statement of provenance trust: every
+                // concept in this book is held at or below this tier.
+                trust: Some(self.trust.cap(name).as_str().to_string()),
+                source_commit: self.source_commit(name),
             });
         }
         infos
@@ -945,6 +1054,18 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 }
 
+/// Wraps imported free text in the paired untrusted-content delimiters
+/// every imported surface uses (SEC-1). The attributes name the source —
+/// which book the bytes came from, at what effective trust tier — so an
+/// agent (or a person auditing a transcript) can weigh them, and the
+/// explicit open/close tags give the consuming model a bracket for
+/// content it must treat as data, never as instructions.
+pub(crate) fn untrusted_wrap(uri: &str, argosy: &str, trust: &str, body: &str) -> String {
+    format!(
+        "<untrusted-content argosy=\"{argosy}\" uri=\"{uri}\" trust=\"{trust}\">\n{body}\n</untrusted-content>"
+    )
+}
+
 /// Reorders styleguide hits by a decision endpoint's applicability score
 /// (advisory): one `noul` question per candidate over a shared state, so all
 /// candidates are scored in one forward pass. On any failure the embedding
@@ -1037,6 +1158,9 @@ mod tests {
             tags: Vec::new(),
             language: None,
             category: None,
+            kind: "local",
+            trust: UNVERIFIED.to_string(),
+            source_commit: None,
             applicability: None,
             good: None,
             bad: None,

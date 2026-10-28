@@ -50,9 +50,11 @@ fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
     assert_eq!(shared.len(), 2, "both listings appear, shadowed flagged");
     let local = shared.iter().find(|s| s.argosy == "acme-billing").unwrap();
     assert!(!local.shadowed);
+    assert_eq!(local.kind, "local");
     assert_eq!(local.verified, "unverified", "no verified entry");
     let imported = shared.iter().find(|s| s.argosy == "acme-shared").unwrap();
     assert!(imported.shadowed, "local shadows the import");
+    assert_eq!(imported.kind, "imported");
     assert_eq!(imported.verified, "machine-confirmed");
     assert!(shared.iter().all(|s| !s.description.is_empty()));
 }
@@ -70,7 +72,20 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
         Err(e) => panic!("unexpected: {e}"),
     };
     assert_eq!(out.skill.argosy, "acme-shared");
+    assert_eq!(out.skill.kind, "imported");
     assert_eq!(out.skill.verified, "machine-confirmed");
+    // An imported skill's body arrives inside the untrusted-content
+    // delimiters — instructions to bracket as data, not to follow.
+    assert!(
+        out.content.starts_with(
+            "<untrusted-content argosy=\"acme-shared\" \
+             uri=\"argosy://acme-shared/skill/shared-audit\" \
+             trust=\"machine-confirmed\">"
+        ),
+        "got {}",
+        out.content
+    );
+    assert!(out.content.ends_with("</untrusted-content>"));
     assert!(out.content.contains("verified: machine-confirmed"));
 
     rig.state
