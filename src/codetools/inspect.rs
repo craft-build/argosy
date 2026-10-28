@@ -6,7 +6,7 @@ use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
 
-use super::{CodeTools, relative_path, resolve_path, tool_error};
+use super::{CodeTools, relative_path, tool_error};
 use crate::error::Result;
 
 /// `inspect` parameters.
@@ -27,17 +27,17 @@ pub struct InspectReport {
 }
 
 /// Runs the `inspect` tool.
-pub fn run(_code: &CodeTools, params: InspectParams) -> Result<InspectReport> {
+pub fn run(code: &CodeTools, params: InspectParams) -> Result<InspectReport> {
     let sections = params.sections.as_deref().unwrap_or("all").to_string();
-    let scope = params.scope.as_deref().unwrap_or(".").to_string();
+    let scope_path = code.resolve_path(params.scope.as_deref().unwrap_or("."))?;
 
     let todos = if sections == "all" || sections == "todos" {
-        Some(inspect_todos(&scope)?)
+        Some(inspect_todos(&scope_path)?)
     } else {
         None
     };
     let git = if sections == "all" || sections == "git_status" {
-        Some(inspect_git_status(&scope)?)
+        Some(inspect_git_status(&scope_path)?)
     } else {
         None
     };
@@ -60,9 +60,8 @@ pub fn run(_code: &CodeTools, params: InspectParams) -> Result<InspectReport> {
     Ok(InspectReport { text: out })
 }
 
-fn inspect_todos(scope: &str) -> Result<String> {
-    let scope_path = resolve_path(scope)?;
-    let path = std::path::Path::new(&scope_path);
+fn inspect_todos(scope_path: &str) -> Result<String> {
+    let path = std::path::Path::new(scope_path);
 
     let mut todos = Vec::new();
 
@@ -142,9 +141,8 @@ fn truncate_todo(text: &str, max: usize) -> String {
     }
 }
 
-fn inspect_git_status(scope: &str) -> Result<String> {
-    let scope_path = resolve_path(scope)?;
-    let path = std::path::Path::new(&scope_path);
+fn inspect_git_status(scope_path: &str) -> Result<String> {
+    let path = std::path::Path::new(scope_path);
 
     let repo_dir = if path.is_file() {
         path.parent().unwrap_or(path)
@@ -251,7 +249,7 @@ mod tests {
         std::fs::write(&path, "// TODO: one\n").unwrap();
         std::fs::write(dir.path().join("b.rs"), "// TODO: two\n").unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             InspectParams {
@@ -268,7 +266,7 @@ mod tests {
     #[test]
     fn run_git_status_degrades_outside_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             InspectParams {

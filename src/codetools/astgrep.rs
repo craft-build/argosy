@@ -19,7 +19,7 @@ use similar::ChangeTag;
 #[cfg(feature = "mcp")]
 use rmcp::schemars;
 
-use super::{CodeTools, relative_path, resolve_path, tool_error, walk_builder_opts};
+use super::{CodeTools, relative_path, tool_error, walk_builder_opts};
 use crate::error::Result;
 
 /// `astgrep` parameters.
@@ -79,7 +79,7 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
         None
     };
 
-    let search_path = resolve_path(params.path.as_deref().unwrap_or("."))?;
+    let search_path = code.resolve_path(params.path.as_deref().unwrap_or("."))?;
     let globs = params.globs.clone().unwrap_or_default();
     let lang_types = lang.file_types();
 
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn run_search_finds_matches() {
         let dir = write_fixture();
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(&tools, params(&dir, None, false)).unwrap();
         assert_eq!(report.mode, "search");
         assert_eq!(report.matches, Some(1));
@@ -428,7 +428,7 @@ mod tests {
         let file = dir.path().join("src/main.rs");
         let before = std::fs::read_to_string(&file).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
         assert_eq!(report.mode, "diff");
         assert!(
@@ -454,7 +454,9 @@ mod tests {
         let dir = write_fixture();
         let file = dir.path().join("src/main.rs");
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
+        // The dry-run records the reads the apply's guard requires.
+        run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
         let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
         assert_eq!(report.mode, "apply");
         assert_eq!(report.files_changed, Some(1));
@@ -469,7 +471,8 @@ mod tests {
         let file = dir.path().join("src/main.rs");
         let before = std::fs::read_to_string(&file).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
+        run(&tools, params(&dir, Some(")))) not rust"), false)).unwrap();
         let report = run(&tools, params(&dir, Some(")))) not rust"), true)).unwrap();
         assert_eq!(report.rolled_back, Some(true));
         // The file must be untouched.
@@ -488,7 +491,8 @@ mod tests {
         )
         .unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
+        run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
         let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
         assert_eq!(report.files_changed, Some(1));
         assert_eq!(report.rolled_back, Some(false));
@@ -504,7 +508,7 @@ mod tests {
         let dir = write_fixture();
         let file = dir.path().join("src/main.rs");
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         // First call records the read (dry-run), then the file changes
         // externally before the apply.
         run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
@@ -531,7 +535,7 @@ mod tests {
         std::fs::write(dir.path().join("src/a.rs"), "fn a() { println!(\"a\"); }\n").unwrap();
         std::fs::write(dir.path().join("src/b.rs"), "fn b() { println!(\"b\"); }\n").unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
         let changed = "fn b() { println!(\"changed\"); }\n";
         std::fs::write(dir.path().join("src/b.rs"), changed).unwrap();
@@ -557,7 +561,7 @@ mod tests {
     #[test]
     fn run_no_matches() {
         let dir = write_fixture();
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let mut p = params(&dir, None, false);
         p.pattern = "nonexistent_function($$$A)".into();
         let report = run(&tools, p).unwrap();
@@ -567,10 +571,31 @@ mod tests {
 
     #[test]
     fn run_rejects_unknown_lang() {
-        let tools = CodeTools::default();
-        let mut p = params(&write_fixture(), None, false);
+        let dir = write_fixture();
+        let tools = CodeTools::default().with_root(dir.path());
+        let mut p = params(&dir, None, false);
         p.lang = "starlark".into();
         let err = run(&tools, p).unwrap_err();
         assert!(err.to_string().contains("unsupported language"), "{err}");
+    }
+
+    /// Fail-closed stale-write guard: apply on files never read through
+    /// the tools is skipped with an actionable message, never a blind
+    /// overwrite (docs/next.md item 2).
+    #[test]
+    fn run_apply_without_prior_read_skips() {
+        let dir = write_fixture();
+        let file = dir.path().join("src/main.rs");
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        let tools = CodeTools::default().with_root(dir.path());
+        let report = run(&tools, params(&dir, Some("eprintln!($MSG)"), true)).unwrap();
+        assert_eq!(report.files_changed, Some(0));
+        assert!(
+            report.text.contains("no read on record"),
+            "got {}",
+            report.text
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 }

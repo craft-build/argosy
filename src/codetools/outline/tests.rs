@@ -554,7 +554,7 @@ fn run_reports_unsupported_language_without_error() {
     let file = dir.path().join("data.txt");
     std::fs::write(&file, "plain text").unwrap();
 
-    let tools = super::CodeTools::default();
+    let tools = super::CodeTools::default().with_root(dir.path());
     let report = run(
         &tools,
         OutlineParams {
@@ -573,7 +573,7 @@ fn run_outlines_directory_with_skips() {
     std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(dir.path().join("notes.txt"), "not code\n").unwrap();
 
-    let tools = super::CodeTools::default();
+    let tools = super::CodeTools::default().with_root(dir.path());
     let report = run(
         &tools,
         OutlineParams {
@@ -590,11 +590,18 @@ fn run_outlines_directory_with_skips() {
 
 #[test]
 fn run_missing_path_errors() {
-    let tools = super::CodeTools::default();
+    let dir = tempfile::tempdir().unwrap();
+    let tools = super::CodeTools::default().with_root(dir.path());
+    // A missing path inside the workspace is the caller's own not-found
+    // error — containment must not shadow it with an escape error.
     let err = run(
         &tools,
         OutlineParams {
-            path: "/definitely/not/here.rs".into(),
+            path: dir
+                .path()
+                .join("not/here.rs")
+                .to_string_lossy()
+                .into_owned(),
             files: None,
         },
     )
@@ -609,7 +616,7 @@ fn run_dir_mode_records_reads_for_the_stale_guard() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
 
-    let tools = super::CodeTools::default();
+    let tools = super::CodeTools::default().with_root(dir.path());
     let report = run(
         &tools,
         OutlineParams {
@@ -636,7 +643,7 @@ fn run_dir_mode_labels_oversize_files_skipped() {
     std::fs::write(dir.path().join("big.rs"), "x".repeat(MAX_FILE_BYTES + 10)).unwrap();
     std::fs::write(dir.path().join("ok.rs"), "fn ok() {}\n").unwrap();
 
-    let tools = super::CodeTools::default();
+    let tools = super::CodeTools::default().with_root(dir.path());
     let report = run(
         &tools,
         OutlineParams {
@@ -659,7 +666,7 @@ fn run_single_oversize_file_is_refused() {
     let big = dir.path().join("big.rs");
     std::fs::write(&big, "x".repeat(MAX_FILE_BYTES + 1)).unwrap();
 
-    let tools = super::CodeTools::default();
+    let tools = super::CodeTools::default().with_root(dir.path());
     let err = run(
         &tools,
         OutlineParams {

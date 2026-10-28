@@ -81,7 +81,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
         }
     }
 
-    /// Overrides the code-tool state (tests inject a known cwd/tracker).
+    /// Overrides the code-tool state (tests inject a known cwd/tracker;
+    /// `argosy mcp` applies the user's `code_tools` configuration here).
     #[cfg(feature = "code-tools")]
     pub fn with_code_tools(mut self, code: Arc<CodeTools>) -> Self {
         self.code = code;
@@ -126,8 +127,10 @@ fn server_instructions() -> String {
             " The server also offers code-intelligence tools \
              (outline, zoom, astgrep, conflicts, inspect, callgraph, repomap, start_review, \
              review_diff, report_finding, review_findings) over the \
-             workspace directory it was spawned in; astgrep (apply) and conflicts \
-             (resolve) write files only when explicitly requested.",
+             workspace directory it was spawned in; their path arguments are \
+             confined to that workspace, and astgrep (apply) and conflicts \
+             (resolve) write files only when explicitly requested and only \
+             after the file was read through these tools in this session.",
         );
     }
     text

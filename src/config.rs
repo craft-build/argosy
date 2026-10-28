@@ -32,6 +32,9 @@
 //! catalog {
 //!     redact_home = false
 //! }
+//! code_tools {
+//!     allow_external_paths = false
+//! }
 //! decision {
 //!     enabled = false                    // Jev-compatible endpoint, off by default
 //!     provider = "laya-serve"            // or "jev" for a hosted/other endpoint
@@ -94,6 +97,8 @@ pub struct Config {
     pub package: PackageConfig,
     /// Defaults for `argosy catalog`.
     pub catalog: CatalogConfig,
+    /// Defaults for the code-intelligence tools.
+    pub code_tools: CodeToolsConfig,
     /// Defaults for the optional Jev-compatible decision endpoint.
     pub decision: DecisionConfig,
 }
@@ -180,6 +185,19 @@ impl Default for PackageConfig {
 pub struct CatalogConfig {
     /// Rewrite home-directory path prefixes as `~` in generated catalogs.
     pub redact_home: bool,
+}
+
+/// Defaults for the code-intelligence tools (`outline`, `zoom`, `astgrep`,
+/// `conflicts`, `inspect`, `callgraph`, `repomap`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CodeToolsConfig {
+    /// Let the code tools resolve absolute paths outside the workspace
+    /// directory the server was spawned in. Off by default: every path
+    /// parameter must stay inside the workspace, so a confused or
+    /// injected caller cannot read — or, through `astgrep apply` /
+    /// `conflicts resolve`, write — files outside it.
+    pub allow_external_paths: bool,
 }
 
 /// Defaults for the optional Jev-compatible decision endpoint (Laya's
@@ -636,6 +654,18 @@ mod tests {
         assert_eq!(config.decision.api_key_env(), "LAYA_API_KEY");
         assert_eq!(config.decision.timeout_ms, 3000);
         assert_eq!(config.decision.max_input_tokens, 512);
+    }
+
+    #[test]
+    fn code_tools_section_parses_and_defaults_to_confined() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            "code_tools { allow_external_paths = true }",
+        );
+        let config = load(&tmp.path().join("argosy"));
+        assert!(config.code_tools.allow_external_paths);
+        assert!(!Config::default().code_tools.allow_external_paths);
     }
 
     #[test]

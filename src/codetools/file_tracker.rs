@@ -1,7 +1,10 @@
-//! The stale-read guard for the code tools' write paths, ported verbatim
-//! from Craft's `tools/file_tracker.rs`: files read through these tools are
+//! The stale-read guard for the code tools' write paths, ported from
+//! Craft's `tools/file_tracker.rs`: files read through these tools are
 //! tracked by (canonical path, mtime), and `astgrep` apply / `conflicts`
-//! resolve refuse to write when the file changed since the last read.
+//! resolve refuse to write a file that changed since the last read — or
+//! that was never read at all (fail closed). Only a file that does not
+//! exist is allowed unread: the write creates it, so there is nothing to
+//! clobber.
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,6 +15,7 @@ use std::time::SystemTime;
 use tracing::warn;
 
 const STALE_READ_MSG: &str = "file changed since last read";
+const NO_READ_MSG: &str = "no read on record";
 
 pub struct FileReadTracker(Mutex<HashMap<PathBuf, SystemTime>>);
 
@@ -51,6 +55,17 @@ impl FileReadTracker {
         let normalized = normalize_path(path);
         let mut guard = self.lock();
         let Some(&recorded) = guard.get(&normalized) else {
+            // Fail closed: a file on disk that was never read through
+            // these tools is refused — the writer has not seen what it is
+            // about to overwrite. A file that does not exist is fine: the
+            // write creates it, so nothing is clobbered.
+            if get_mtime(&normalized).is_some() {
+                return Err(format!(
+                    "{NO_READ_MSG}: {} - read it through these tools first (zoom or outline it, \
+                     or run astgrep/conflicts without apply/resolve), then retry",
+                    path.display(),
+                ));
+            }
             return Ok(());
         };
         let Some(current) = get_mtime(&normalized) else {
@@ -97,10 +112,22 @@ mod tests {
     }
 
     #[test]
-    fn untracked_file_allows_edit() {
+    fn untracked_file_on_disk_rejects_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.rs");
         fs::write(&path, "content").unwrap();
+
+        let tracker = FileReadTracker::new();
+        let err = tracker.check_before_edit(&path).unwrap_err();
+        assert!(err.contains(NO_READ_MSG), "{err}");
+    }
+
+    /// A file that does not exist may be written unread: the write creates
+    /// it, so there is nothing to clobber.
+    #[test]
+    fn untracked_missing_file_allows_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.rs");
 
         let tracker = FileReadTracker::new();
         tracker.check_before_edit(&path).unwrap();

@@ -169,9 +169,12 @@ the workspace directory it was spawned in, ported from Craft:
 | `report_finding` | Attach one validated, P0–P3 automated finding—with confidence, line range, suggestion, and qualified rule URIs—to a review session; identical retries deduplicate. |
 | `review_findings` | Read or filter the structured automated finding set for a review session. |
 
-`astgrep` (with `rewrite` + `apply`) and `conflicts` (with `resolve`) are
-the only ones that write files, and both refuse to write a file that
-changed since you last read it through these tools. The tools pull in
+Every path argument resolves inside that workspace (set
+`code_tools { allow_external_paths = true }` in the user config to opt
+out). `astgrep` (with `rewrite` + `apply`) and `conflicts` (with
+`resolve`) are the only ones that write files, and both refuse to write a
+file that was never read through these tools — or that changed since the
+last read. The tools pull in
 ~35 tree-sitter grammars; builds that don't need them can drop the
 default `code-tools` feature (`--no-default-features` plus the features
 you want) for a much faster, smaller compile.

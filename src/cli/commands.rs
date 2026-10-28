@@ -638,7 +638,22 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
             );
         }
     }
+    // Code tools are confined to the workspace the server was spawned in
+    // unless the user config opts out (code_tools.allow_external_paths).
+    #[cfg(feature = "code-tools")]
+    let code = {
+        #[allow(unused_mut)]
+        let mut tools = argosy::codetools::CodeTools::default()
+            .with_external_paths(config.code_tools.allow_external_paths);
+        #[cfg(feature = "decision")]
+        {
+            tools = tools.with_decision(Arc::clone(state.decision()));
+        }
+        tools
+    };
     let server = ArgosyMcpServer::new(state);
+    #[cfg(feature = "code-tools")]
+    let server = server.with_code_tools(Arc::new(code));
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -758,6 +773,10 @@ pub(super) fn cmd_config(out: &Output, _args: &ConfigArgs, config: &Config) -> R
         out.note(&format!(
             "catalog: redact_home={}",
             config.catalog.redact_home
+        ));
+        out.note(&format!(
+            "code_tools: allow_external_paths={}",
+            config.code_tools.allow_external_paths
         ));
     }
     Ok(ExitCode::SUCCESS)

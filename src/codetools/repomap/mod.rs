@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use tags::{FileTags, collect_all_tags, extract_mentioned_idents, file_path_to_idents};
 
-use super::{CodeTools, relative_path, resolve_path};
+use super::{CodeTools, relative_path};
 use crate::error::Result;
 
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -62,11 +62,8 @@ pub struct RepoMapReport {
 /// Runs the `repomap` tool over a root.
 pub fn run(code: &CodeTools, params: RepomapParams) -> Result<RepoMapReport> {
     let root = match params.path.as_deref() {
-        Some(p) => resolve_path(p)?,
-        None => std::env::current_dir()
-            .map_err(|e| super::tool_error(format!("cwd error: {e}")))?
-            .to_string_lossy()
-            .into_owned(),
+        Some(p) => code.resolve_path(p)?,
+        None => code.workspace_root().to_string_lossy().into_owned(),
     };
 
     let map = code.repomap_for_root(
@@ -362,7 +359,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
 
-        let tools = super::super::CodeTools::default();
+        let tools = super::super::CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             RepomapParams {
@@ -392,7 +389,7 @@ mod tests {
         )
         .unwrap();
 
-        let tools = super::super::CodeTools::default();
+        let tools = super::super::CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             RepomapParams {

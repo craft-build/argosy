@@ -10,7 +10,7 @@ use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 use super::outline::{LangId, Range, Symbol, extract_symbols};
-use super::{CodeTools, relative_path, resolve_path, tool_error};
+use super::{CodeTools, relative_path, tool_error};
 use crate::error::Result;
 
 /// `callgraph` parameters.
@@ -41,7 +41,7 @@ pub struct CallgraphReport {
 }
 
 /// Runs the `callgraph` tool over a single file.
-pub fn run(_code: &CodeTools, params: CallgraphParams) -> Result<CallgraphReport> {
+pub fn run(code: &CodeTools, params: CallgraphParams) -> Result<CallgraphReport> {
     // Language detection runs on the raw input path (as in Craft), so plain
     // relative paths like `src/main.rs` work without resolution first.
     let lang = LangId::from_path(params.path.as_ref()).ok_or_else(|| {
@@ -51,10 +51,10 @@ pub fn run(_code: &CodeTools, params: CallgraphParams) -> Result<CallgraphReport
         ))
     })?;
 
-    let resolved = resolve_path(&params.path)?;
+    let resolved = code.resolve_path(&params.path)?;
     let p = std::path::Path::new(&resolved);
     let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
-    _code.record_read(p);
+    code.record_read(p);
 
     let symbols = extract_symbols(&content, lang);
     let calls = extract_calls(&content, lang);
@@ -523,7 +523,7 @@ fn baz() {
         let file = dir.path().join("graph.rs");
         std::fs::write(&file, RUST_CODE).unwrap();
 
-        let tools = super::CodeTools::default();
+        let tools = super::CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             CallgraphParams {

@@ -11,7 +11,7 @@ use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
 
-use super::{CodeTools, relative_path, resolve_path, tool_error};
+use super::{CodeTools, relative_path, tool_error};
 use crate::error::Result;
 
 const CONFLICT_START: &str = "<<<<<<< ";
@@ -53,7 +53,7 @@ pub struct ConflictsReport {
 /// Runs the `conflicts` tool: list markers, or resolve them per `resolve`.
 pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport> {
     let scope = params.path.as_deref().unwrap_or(".").to_string();
-    let scope_path = resolve_path(&scope)?;
+    let scope_path = code.resolve_path(&scope)?;
 
     if let Some(choice) = params.resolve.as_deref() {
         if params.index == Some(0) {
@@ -339,13 +339,12 @@ fn resolve_in_scope(
         if file.resolved > 0 {
             // The stale-read guard compares against the last read from an
             // earlier tool call (zoom, ...); this scan deliberately does not
-            // record its reads first, so the guard stays meaningful.
+            // record its reads first, so the guard stays meaningful. The
+            // refusal goes into the report (not just logs) so an MCP
+            // caller can self-correct: read the file, then retry.
             if let Err(message) = code.check_before_edit(std::path::Path::new(&path)) {
-                tracing::warn!(
-                    path = %path,
-                    %message,
-                    "conflicts resolve: skipping file"
-                );
+                out.skipped
+                    .push(format!("{}: {message}", relative_path(&path)));
                 out.remaining += file.resolved;
                 continue;
             }
@@ -631,7 +630,7 @@ stray-ours
 ";
         std::fs::write(&file, content).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             ConflictsParams {
@@ -659,7 +658,7 @@ stray-ours
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), CONFLICT_TEXT).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let report = run(
             &tools,
             ConflictsParams {
@@ -680,7 +679,17 @@ stray-ours
         let file = dir.path().join("f.txt");
         std::fs::write(&file, CONFLICT_TEXT).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
+        // The listing records the reads the resolve's guard requires.
+        run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: None,
+                index: None,
+            },
+        )
+        .unwrap();
         let report = run(
             &tools,
             ConflictsParams {
@@ -701,7 +710,16 @@ stray-ours
         let file = dir.path().join("f.txt");
         std::fs::write(&file, CONFLICT_TEXT).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
+        run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: None,
+                index: None,
+            },
+        )
+        .unwrap();
         let report = run(
             &tools,
             ConflictsParams {
@@ -776,7 +794,7 @@ stray-ours
         bytes.extend_from_slice(b"\n=======\ntheirs\n>>>>>>> feature\n");
         std::fs::write(dir.path().join("blob.txt"), bytes).unwrap();
 
-        let tools = CodeTools::default();
+        let tools = CodeTools::default().with_root(dir.path());
         let listed = run(
             &tools,
             ConflictsParams {
@@ -812,5 +830,34 @@ stray-ours
             "the unresolvable conflict must count as remaining: {}",
             resolved.text
         );
+    }
+
+    /// Fail-closed stale-write guard: resolving files never read through
+    /// the tools is refused with an actionable message in the report —
+    /// never a blind overwrite (docs/next.md item 2).
+    #[test]
+    fn run_resolve_without_prior_read_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, CONFLICT_TEXT).unwrap();
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        let tools = CodeTools::default().with_root(dir.path());
+        let report = run(
+            &tools,
+            ConflictsParams {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                resolve: Some("@theirs".into()),
+                index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.resolved, Some(0));
+        assert!(
+            report.text.contains("no read on record"),
+            "the refusal must be in the report so the caller can self-correct: {}",
+            report.text
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 }

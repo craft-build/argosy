@@ -27,7 +27,7 @@ use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
 
-use super::{CodeTools, relative_path, resolve_path, tool_error};
+use super::{CodeTools, relative_path, tool_error};
 use crate::error::Result;
 
 use render::{
@@ -63,7 +63,7 @@ pub struct OutlineReport {
 /// Runs the `outline` tool: one file renders its symbol tree; a directory
 /// renders per-file trees (or a flat file table with `files`).
 pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
-    let path = resolve_path(&params.path)?;
+    let path = code.resolve_path(&params.path)?;
     let p = Path::new(&path);
 
     if p.is_dir() {

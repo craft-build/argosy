@@ -9,7 +9,7 @@ use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 use super::outline::{self, LangId};
-use super::{CodeTools, relative_path, resolve_path, tool_error};
+use super::{CodeTools, relative_path, tool_error};
 use crate::error::Result;
 
 /// `zoom` parameters.
@@ -41,8 +41,8 @@ pub struct ZoomReport {
 
 /// Runs the `zoom` tool: by symbol, by line range, or (fallback) by textual
 /// definition-prefix match.
-pub fn run(_code: &CodeTools, params: ZoomParams) -> Result<ZoomReport> {
-    let path = resolve_path(&params.path)?;
+pub fn run(code: &CodeTools, params: ZoomParams) -> Result<ZoomReport> {
+    let path = code.resolve_path(&params.path)?;
     let p = Path::new(&path);
 
     if !p.is_file() {
@@ -53,7 +53,7 @@ pub fn run(_code: &CodeTools, params: ZoomParams) -> Result<ZoomReport> {
     }
 
     let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
-    _code.record_read(p);
+    code.record_read(p);
 
     let context = params.context_lines.unwrap_or(DEFAULT_CONTEXT_LINES);
 

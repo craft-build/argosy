@@ -2,8 +2,11 @@
 //! Craft, driven like any MCP client would.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
+use argosy::codetools::CodeTools;
 use argosy::mcp::ArgosyMcpServer;
 use tempfile::TempDir;
 
@@ -29,10 +32,13 @@ fn workspace() -> TempDir {
 
 type TestClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-async fn client() -> (TestClient, tokio::task::JoinHandle<()>) {
+/// Serves the rig with the code tools anchored at `root` — the stand-in
+/// for the workspace the real server is spawned in.
+async fn client(root: &Path) -> (TestClient, tokio::task::JoinHandle<()>) {
     let rig = rig();
     let (server_io, client_io) = tokio::io::duplex(8192);
-    let server = ArgosyMcpServer::new(rig.state);
+    let server = ArgosyMcpServer::new(rig.state)
+        .with_code_tools(Arc::new(CodeTools::default().with_root(root)));
     let server_task = tokio::spawn(async move {
         use rmcp::ServiceExt;
         let running = server.serve(server_io).await.expect("server initializes");
@@ -65,7 +71,7 @@ fn abs(dir: &TempDir, rel: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn outline_file_and_directory() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     // File mode: symbol tree with kinds and line numbers.
     let out = call_ok(
@@ -128,7 +134,7 @@ async fn outline_file_and_directory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn zoom_symbol_range_and_ambiguity() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let out = call_ok(
         &client,
@@ -182,7 +188,7 @@ async fn zoom_symbol_range_and_ambiguity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn astgrep_search_diff_apply_and_guards() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     // Search mode.
     let out = call_ok(
@@ -248,13 +254,26 @@ async fn astgrep_search_diff_apply_and_guards() {
         "the file was rewritten"
     );
 
-    // Syntax-breaking rewrite is rolled back, file untouched.
+    // Syntax-breaking rewrite is rolled back, file untouched. The dry-run
+    // first records the read the apply's fail-closed guard requires.
     fs::write(
         ws.path().join("src/broken.rs"),
         "fn broken() {\n    println!(\"x\");\n}\n",
     )
     .unwrap();
     let before = fs::read_to_string(ws.path().join("src/broken.rs")).unwrap();
+    let out = call_ok(
+        &client,
+        "astgrep",
+        serde_json::json!({
+            "pattern": "println!($MSG)",
+            "rewrite": ")))) not rust",
+            "lang": "rust",
+            "path": abs(&ws, "src/broken.rs"),
+        }),
+    )
+    .await;
+    assert_eq!(out["mode"], "diff");
     let out = call_ok(
         &client,
         "astgrep",
@@ -344,7 +363,7 @@ async fn conflicts_list_and_resolve() {
         "top\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\nbottom\n",
     )
     .unwrap();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let out = call_ok(
         &client,
@@ -387,7 +406,7 @@ async fn conflicts_list_and_resolve() {
 #[tokio::test(flavor = "multi_thread")]
 async fn inspect_finds_todos() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let out = call_ok(
         &client,
@@ -409,7 +428,7 @@ async fn inspect_finds_todos() {
 #[tokio::test(flavor = "multi_thread")]
 async fn callgraph_over_the_wire() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let out = call_ok(
         &client,
@@ -474,7 +493,7 @@ async fn callgraph_over_the_wire() {
 #[tokio::test(flavor = "multi_thread")]
 async fn repomap_renders_and_caches() {
     let ws = workspace();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let out = call_ok(
         &client,
@@ -531,7 +550,7 @@ async fn structured_review_findings_round_trip_over_mcp() {
         "fn main() {\n    changed();\n}\n\nfn changed() {}\n",
     )
     .unwrap();
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let opened = call_ok(
         &client,
@@ -633,7 +652,7 @@ async fn start_review_rejects_option_shaped_revisions_over_mcp() {
     )
     .unwrap();
     let target = ws.path().join("pwned.txt");
-    let (client, server) = client().await;
+    let (client, server) = client(ws.path()).await;
 
     let message = call_err(
         &client,
@@ -676,6 +695,78 @@ async fn start_review_rejects_option_shaped_revisions_over_mcp() {
     )
     .await;
     assert_eq!(opened["changed_files"], serde_json::json!(["src/main.rs"]));
+
+    drop(client);
+    server.abort();
+}
+
+/// Item 2 of docs/next.md: code-tool paths are confined to the workspace
+/// root, and the two writing tools fail closed on files that were never
+/// read through these tools in the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn code_tool_paths_are_confined_and_writes_require_a_prior_read() {
+    let ws = workspace();
+    let (client, server) = client(ws.path()).await;
+
+    // An absolute path outside the workspace is refused, even though it
+    // exists on disk.
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.rs"), "fn main() {}\n").unwrap();
+    let err = call_err(
+        &client,
+        "outline",
+        serde_json::json!({"path": outside.path().join("secret.rs")}),
+    )
+    .await;
+    assert!(err.contains("escapes the workspace root"), "{err}");
+
+    // A `..` escape is refused too.
+    let err = call_err(
+        &client,
+        "zoom",
+        serde_json::json!({"path": "../escape.rs", "symbol": "x"}),
+    )
+    .await;
+    assert!(err.contains("escapes the workspace root"), "{err}");
+
+    // Relative paths resolve against the workspace root.
+    let out = call_ok(
+        &client,
+        "outline",
+        serde_json::json!({"path": "src/main.rs"}),
+    )
+    .await;
+    assert!(
+        out["text"].as_str().unwrap().contains("fn main"),
+        "got {out}"
+    );
+
+    // Fail-closed write guard: apply on a never-read file is skipped with
+    // an actionable message, and the file is untouched.
+    fs::write(ws.path().join("fresh.rs"), "fn f() { println!(\"x\"); }\n").unwrap();
+    let out = call_ok(
+        &client,
+        "astgrep",
+        serde_json::json!({
+            "pattern": "println!($MSG)",
+            "rewrite": "eprintln!($MSG)",
+            "lang": "rust",
+            "path": "fresh.rs",
+            "apply": true,
+        }),
+    )
+    .await;
+    assert_eq!(out["files_changed"], 0, "got {out}");
+    assert!(
+        out["text"].as_str().unwrap().contains("no read on record"),
+        "got {out}"
+    );
+    assert!(
+        fs::read_to_string(ws.path().join("fresh.rs"))
+            .unwrap()
+            .contains("println!"),
+        "the never-read file must stay untouched"
+    );
 
     drop(client);
     server.abort();

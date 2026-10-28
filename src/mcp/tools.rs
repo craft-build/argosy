@@ -109,8 +109,10 @@ pub fn tool_definitions() -> Vec<Tool> {
 
 /// The code-intelligence tool set (ported from Craft): filesystem-oriented
 /// companions to the knowledge tools, operating on the workspace directory
-/// the server was spawned in. `astgrep` (with `apply`) and `conflicts`
-/// (with `resolve`) are the only ones that ever write.
+/// the server was spawned in — every path parameter is confined to it.
+/// `astgrep` (with `apply`) and `conflicts` (with `resolve`) are the only
+/// ones that ever write, and both refuse to write a file that was not
+/// first read through these tools in the same session.
 #[cfg(feature = "code-tools")]
 fn code_tool_definitions() -> Vec<Tool> {
     vec![
@@ -128,13 +130,13 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::astgrep::AstgrepParams>(
             "astgrep",
-            "Search and replace code using AST patterns — more precise than regex for code. Patterns use metavariables: $NAME matches a single AST node (identifier, expression, statement, ...); $$$BODY matches zero or more AST nodes (function body, argument list, ...). Search mode (no rewrite): finds all matches, showing file:line with a match preview. Replace mode (with rewrite): shows unified diffs by default; set apply=true to write — writes are refused when a file changed since you last read it through these tools, and replacements that introduce syntax errors are rolled back. Languages (case-insensitive, aliases accepted): bash, c, cpp, csharp, css, dart, elixir, go, haskell, hcl, html, java, javascript, json, kotlin, lua, markdown, nix, php, python, ruby, rust, scala, solidity, swift, tsx, typescript, yaml. Examples: pattern=\"fn $NAME($$$ARGS)\" finds all Rust function declarations; pattern=\"console.log($MSG)\" rewrite=\"tracing::info!($MSG)\" is a dry-run replace.",
+            "Search and replace code using AST patterns — more precise than regex for code. Patterns use metavariables: $NAME matches a single AST node (identifier, expression, statement, ...); $$$BODY matches zero or more AST nodes (function body, argument list, ...). Search mode (no rewrite): finds all matches, showing file:line with a match preview. Replace mode (with rewrite): shows unified diffs by default; set apply=true to write — a write is refused unless the file was read through these tools earlier in this session (a search or dry-run over it counts) and has not changed since, and replacements that introduce syntax errors are rolled back. Paths resolve inside the server's workspace. Languages (case-insensitive, aliases accepted): bash, c, cpp, csharp, css, dart, elixir, go, haskell, hcl, html, java, javascript, json, kotlin, lua, markdown, nix, php, python, ruby, rust, scala, solidity, swift, tsx, typescript, yaml. Examples: pattern=\"fn $NAME($$$ARGS)\" finds all Rust function declarations; pattern=\"console.log($MSG)\" rewrite=\"tracing::info!($MSG)\" is a dry-run replace.",
             false,
             false,
         ),
         tool::<codetools::conflicts::ConflictsParams>(
             "conflicts",
-            "Find and resolve git merge conflicts. Scans files under the path (respecting gitignore, tracked or not) for conflict markers (<<<<<<<, =======, >>>>>>>) and returns each conflicting file with marker locations and branch names. Resolve by passing resolve: \"@theirs\" keeps the incoming (their branch) side, \"@ours\" keeps the current (our branch) side, \"@base\" drops both sides; omit resolve to list only. index (1-indexed) resolves a single conflict within each file; omit it to resolve all conflicts in scope. Resolution writes are refused when a file changed since you last read it through these tools.",
+            "Find and resolve git merge conflicts. Scans files under the path (respecting gitignore, tracked or not) for conflict markers (<<<<<<<, =======, >>>>>>>) and returns each conflicting file with marker locations and branch names. Resolve by passing resolve: \"@theirs\" keeps the incoming (their branch) side, \"@ours\" keeps the current (our branch) side, \"@base\" drops both sides; omit resolve to list only. index (1-indexed) resolves a single conflict within each file; omit it to resolve all conflicts in scope. Resolution writes are refused unless the file was first read through these tools in this session (a listing run counts) and has not changed since. Paths resolve inside the server's workspace.",
             false,
             false,
         ),
