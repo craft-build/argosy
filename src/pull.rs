@@ -811,7 +811,7 @@ pub fn resolve_remote_commit(url: &str, reference: &str) -> Result<String> {
         }
     );
     let output = Command::new("git")
-        .args(["ls-remote", url, reference])
+        .args(["ls-remote", url, &format!("{reference}*")])
         .output()
         .map_err(|err| git_spawn_error(root_cwd(), err))?;
     if !output.status.success() {
@@ -825,10 +825,11 @@ pub fn resolve_remote_commit(url: &str, reference: &str) -> Result<String> {
         }
         .fail();
     }
-    // Lines are `<sha>\t<refname>`; `ls-remote` patterns match the ref tail,
-    // so both refs/heads/x and refs/tags/x come back for `x`. An annotated
-    // tag also emits a peeled `refs/tags/x^{}` line naming the commit —
-    // pins must record that, or HEAD (a commit) never equals the tag pin.
+    // Lines are `<sha>\t<refname>`; the trailing `*` in the pattern widens
+    // the tail match so annotated tags also emit their peeled
+    // `refs/tags/x^{}` line naming the commit — pins must record that, or
+    // HEAD (a commit) never equals the tag pin. Resolution picks by exact
+    // refname, so the glob's extra lines are filtered out.
     let lines = String::from_utf8_lossy(&output.stdout);
     let mut heads: Option<String> = None;
     let mut tags: Option<String> = None;

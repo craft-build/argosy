@@ -407,9 +407,8 @@ fn update_reconciles_a_stale_pin() {
 }
 
 /// A packaged remote whose clones carry an integrity sidecar, committed as
-/// a git repo.
-fn packaged_setup(scratch: &TempDir) -> Setup {
-    let setup = Setup::new();
+/// a git repo, plus the standard project/store layout.
+fn packaged_setup(scratch: TempDir) -> Setup {
     let source = scratch.path().join("packaged-source");
     fs::create_dir_all(source.join("skill")).unwrap();
     fs::write(
@@ -418,21 +417,32 @@ fn packaged_setup(scratch: &TempDir) -> Setup {
     )
     .unwrap();
     fs::write(source.join("skill/one.md"), "old line\n").unwrap();
+    let repo = scratch.path().join("sealed-repo");
     argosy::package::package(
         &argosy::Argosy::open(&source).unwrap(),
-        &setup.repo,
+        &repo,
         &argosy::package::PackageOptions::default(),
     )
     .unwrap();
-    git(&setup.repo, &["init", "--quiet", "-b", "main"]);
-    commit(&setup.repo, "one");
-    setup
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    commit(&repo, "one");
+
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let xdg = xdg_state_home(&scratch);
+    let store = pull::project_argosy_dir_at(&xdg.join("argosy"), &project);
+    Setup {
+        scratch,
+        project,
+        xdg,
+        repo,
+        store,
+    }
 }
 
 #[test]
 fn sync_reports_integrity_failure_for_a_tampered_worktree() {
-    let scratch = TempDir::new().unwrap();
-    let setup = packaged_setup(&scratch);
+    let setup = packaged_setup(TempDir::new().unwrap());
     setup
         .argosy()
         .args(["pull", setup.url(), "company-rules"])
