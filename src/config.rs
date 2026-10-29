@@ -22,6 +22,7 @@
 //! }
 //! index {
 //!     model = "all-minilm-l6-v2"
+//!     search_mode = "hybrid"  // or "lexical": BM25-only, zero model download
 //!     default_k = 5
 //!     mcp_default_k = 8
 //!     chunk_max_tokens = 220
@@ -161,6 +162,9 @@ pub struct IndexConfig {
     /// Changing it invalidates existing indexes — the next `index build`
     /// performs a full rebuild.
     pub model: Option<String>,
+    /// How `search` ranks: BM25 fused with vector similarity (the
+    /// default) or BM25 alone. See [`SearchModeConfig`].
+    pub search_mode: SearchModeConfig,
     /// Default hit count for `argosy index query`.
     #[serde(deserialize_with = "flex_uint")]
     pub default_k: usize,
@@ -179,11 +183,30 @@ impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             model: None,
+            search_mode: SearchModeConfig::Hybrid,
             default_k: 5,
             mcp_default_k: 8,
             chunk_max_tokens: crate::index::chunk::DEFAULT_MAX_TOKENS,
         }
     }
+}
+
+/// The `index.search_mode` selector: how search ranks, and whether an
+/// embedding model is involved at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchModeConfig {
+    /// Hybrid retrieval: an FTS5 BM25 leg and a vector leg, fused by
+    /// reciprocal rank fusion — exact identifiers rank next to semantic
+    /// matches. The default.
+    #[default]
+    Hybrid,
+    /// Lexical-only retrieval: BM25 over the same chunked passages, no
+    /// embedding model is ever downloaded (the zero-model mode). Exact
+    /// terms rank strongly; paraphrases do not. Switching between modes
+    /// invalidates existing indexes — the next `index build` performs a
+    /// full rebuild.
+    #[serde(rename = "lexical")]
+    Lexical,
 }
 
 /// Defaults for `argosy package`.
@@ -785,6 +808,30 @@ mod tests {
         let mut config = Config::default();
         config.index.default_k = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn search_mode_parses_from_config_and_names_its_invariants() {
+        // Default is hybrid; both names load; anything else is a config
+        // error, never a silent default.
+        assert_eq!(
+            Config::default().index.search_mode,
+            SearchModeConfig::Hybrid
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("argosy");
+        write(&root.join("a.bml"), "index { search_mode = \"lexical\" }");
+        let config = load(&root);
+        assert_eq!(config.index.search_mode, SearchModeConfig::Lexical);
+        write(
+            &tmp.path().join("argosy.bml"),
+            "index { search_mode = \"vector\" }",
+        );
+        let err = Config::load_from(Some(&tmp.path().join("argosy"))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("search_mode"),
+            "the error names the unknown value: {err:#}"
+        );
     }
 
     #[test]

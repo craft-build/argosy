@@ -309,7 +309,6 @@ fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index:
     use argosy::context::ProjectContext;
     use argosy::index::Index;
     use argosy::index::sqlite::SqliteVecStore;
-    use argosy::index::tract::TractProvider;
 
     let root = current_dir()?;
     let db = argosy::pull::project_argosy_dir(&root)?.join(config.index_db_name());
@@ -317,12 +316,14 @@ fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index:
         return Ok(None);
     }
     // Same UX as `index build`: say so on stderr so the pause while the
-    // embedding model loads never reads as a hang.
-    eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+    // embedding model loads never reads as a hang. The lexical mode
+    // loads nothing and says nothing.
+    let provider = runtime_provider(config)?;
+    if provider.loads_model() {
+        eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+    }
     let context = ProjectContext::open_project(&root)?;
     let store = SqliteVecStore::open(&db)?;
-    let provider =
-        TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
     let mut index = Index::new(provider, store).with_chunk_config(config.chunk_config());
     Ok(Some(index.reconcile(&context)?))
 }
@@ -408,7 +409,6 @@ impl Drop for IndexProgress {
 pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Result<ExitCode> {
     use argosy::context::ProjectContext;
     use argosy::index::sqlite::SqliteVecStore;
-    use argosy::index::tract::TractProvider;
     use argosy::index::{Index, VectorStore, staleness_report};
 
     // The project root is the working directory: discovery walks the
@@ -436,7 +436,16 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             // index and must never write (no directory creation, no pragma,
             // no DDL).
             let store = SqliteVecStore::open_read_only(&db)?;
-            let expected_model = model_spec(config)?.model_id();
+            // The identity the CURRENT mode's next build would record:
+            // hybrid names the resolved model, lexical names the
+            // zero-model embedder — either way a mismatch is the usual
+            // full-rebuild signal, not a silent half-mode index.
+            let expected_model = match config.index.search_mode {
+                argosy::config::SearchModeConfig::Hybrid => model_spec(config)?.model_id(),
+                argosy::config::SearchModeConfig::Lexical => {
+                    argosy::index::LEXICAL_ONLY_MODEL_ID.to_string()
+                }
+            };
             let stale = staleness_report(&context, &store, &expected_model, config.chunk_config())?;
 
             // Concept counts per argosy/namespace, derived from
@@ -505,13 +514,11 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             let context = ProjectContext::open_project(&root)?;
             let store = SqliteVecStore::open(&db)?;
             // Loading the model takes a moment (and a ~90 MB download on a
-            // cold cache): say so on stderr so the pause never reads as a
-            // hang. stdout stays the machine-readable channel.
-            if !out.quiet {
-                eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
-            }
-            let provider =
-                TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
+            // cold cache), so the pause is announced on stderr before it
+            // happens — never on stdout, the machine-readable channel,
+            // and not at all in lexical mode, which loads nothing.
+            let provider = runtime_provider(config)?;
+            note_model_load(out, &provider);
             let mut index = Index::new(provider, store).with_chunk_config(config.chunk_config());
             let mut progress = IndexProgress::new(out);
             let report = index
@@ -550,12 +557,12 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                 return Ok(ExitCode::SUCCESS);
             }
             // `query` is a read-only verb like `status`: it searches the
-            // index as built (the query text is embedded in-process, never
-            // in the store) and must work on a read-only index.
+            // index as built (the query text is embedded in-process — or
+            // not at all in lexical mode — never in the store) and must
+            // work on a read-only index.
             let store = SqliteVecStore::open_read_only(&db)?;
-            eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
-            let provider =
-                TractProvider::new(model_spec(config)?, embed_cache_override(config).as_deref())?;
+            let provider = runtime_provider(config)?;
+            note_model_load(out, &provider);
             let index = Index::new(provider, store);
             let query = Query {
                 text: q.text.clone(),
@@ -606,7 +613,6 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     use argosy::error::Error;
     use argosy::index::Index;
     use argosy::index::sqlite::SqliteVecStore;
-    use argosy::index::tract::LazyTractProvider;
     use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
     use rmcp::ServiceExt;
 
@@ -615,6 +621,9 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let embed_cache = embed_cache_override(config);
     let spec = model_spec(config)?;
     let chunk_config = config.chunk_config();
+    // The search mode is fixed for the serving process: hybrid sessions
+    // lazily load the configured model, lexical sessions never load one.
+    let search_mode = config.index.search_mode;
     // Trust tiers come from local configuration, never a book's
     // self-claim: imports are capped per the `trust` section (SEC-2).
     let trust = config.trust_policy();
@@ -622,14 +631,21 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     // and every tool call names its project (`cwd`). Projects open lazily
     // through this factory and are cached under a TTL/LRU bound.
     // stdout is the stdio protocol channel: every diagnostic is stderr.
-    let factory: SessionFactory<LazyTractProvider, SqliteVecStore> = Arc::new(move |root| {
+    let factory: SessionFactory<RuntimeProvider, SqliteVecStore> = Arc::new(move |root| {
         let context = ProjectContext::open_project(root)?;
         let store = SqliteVecStore::open(argosy::pull::project_argosy_dir(root)?.join(&db_name))?;
-        // The lazy provider makes the open instant and offline-tolerant:
+        // The lazy provider keeps the open instant and offline-tolerant:
         // the model (and its ~90 MB first-run download) loads only when
-        // something actually needs embedding.
-        let mut index = Index::new(LazyTractProvider::new(spec, embed_cache.clone())?, store)
-            .with_chunk_config(chunk_config);
+        // something actually needs embedding — and never in lexical mode.
+        let provider = match search_mode {
+            argosy::config::SearchModeConfig::Hybrid => RuntimeProvider::Hybrid(Box::new(
+                argosy::index::tract::LazyTractProvider::new(spec, embed_cache.clone())?,
+            )),
+            argosy::config::SearchModeConfig::Lexical => {
+                RuntimeProvider::Lexical(argosy::index::LexicalOnlyProvider)
+            }
+        };
+        let mut index = Index::new(provider, store).with_chunk_config(chunk_config);
         // A failed reconcile degrades retrieval, it must not fail the open
         // (spec §11: an out-of-date index degrades search quality, never
         // correctness) — warn on stderr and serve the session anyway;
@@ -752,6 +768,89 @@ fn model_spec(config: &Config) -> Result<argosy::index::tract::ModelSpec> {
             ),
         }
     })
+}
+
+/// The user-configured search mode as ONE concrete provider type, so every
+/// index construction site (build, query, mcp session factory, the
+/// post-convert reconcile) names a single `Index<RuntimeProvider, _>`:
+/// hybrid resolves the real (lazily loaded) model, lexical resolves the
+/// zero-model embedder — which never downloads anything. The model
+/// provider is boxed: it embeds a loaded-model cache and dwarfs the
+/// zero-dimension variant, and every dispatch passes the enum by
+/// reference.
+#[cfg(feature = "default-index")]
+enum RuntimeProvider {
+    Hybrid(Box<argosy::index::tract::LazyTractProvider>),
+    Lexical(argosy::index::LexicalOnlyProvider),
+}
+
+#[cfg(feature = "default-index")]
+impl RuntimeProvider {
+    /// True when the next reconcile/search may load (and on a cold cache,
+    /// download) the ~90 MB embedding model — the signal for the CLI's
+    /// loading note.
+    fn loads_model(&self) -> bool {
+        matches!(self, Self::Hybrid(_))
+    }
+}
+
+#[cfg(feature = "default-index")]
+impl argosy::index::EmbeddingProvider for RuntimeProvider {
+    fn model_id(&self) -> &str {
+        match self {
+            Self::Hybrid(provider) => provider.model_id(),
+            Self::Lexical(provider) => provider.model_id(),
+        }
+    }
+
+    fn dimensions(&self) -> usize {
+        match self {
+            Self::Hybrid(provider) => provider.dimensions(),
+            Self::Lexical(provider) => provider.dimensions(),
+        }
+    }
+
+    fn embed(&self, texts: &[String]) -> argosy::error::Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Hybrid(provider) => provider.embed(texts),
+            Self::Lexical(provider) => provider.embed(texts),
+        }
+    }
+
+    fn embed_query(&self, texts: &[String]) -> argosy::error::Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Hybrid(provider) => provider.embed_query(texts),
+            Self::Lexical(provider) => provider.embed_query(texts),
+        }
+    }
+}
+
+/// Builds the configured provider for one command invocation. Hybrid
+/// keeps the load lazy — identity and width are static, and the model
+/// (with its first-run ~90 MB download) materializes only when an embed
+/// actually happens; lexical never materializes anything.
+#[cfg(feature = "default-index")]
+fn runtime_provider(config: &Config) -> Result<RuntimeProvider> {
+    Ok(match config.index.search_mode {
+        argosy::config::SearchModeConfig::Hybrid => {
+            RuntimeProvider::Hybrid(Box::new(argosy::index::tract::LazyTractProvider::new(
+                model_spec(config)?,
+                embed_cache_override(config),
+            )?))
+        }
+        argosy::config::SearchModeConfig::Lexical => {
+            RuntimeProvider::Lexical(argosy::index::LexicalOnlyProvider)
+        }
+    })
+}
+
+/// Gated loading note: says so on stderr before the pause that could
+/// otherwise read as a hang — only for modes that actually load.
+#[cfg(feature = "default-index")]
+fn note_model_load(out: &Output, provider: &RuntimeProvider) {
+    if provider.loads_model() && !out.quiet {
+        eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
+    }
 }
 
 /// Prints the resolved configuration (defaults merged with the user's

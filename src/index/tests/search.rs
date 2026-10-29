@@ -148,7 +148,6 @@ fn facet_filters_narrow_individually_and_compose_with_semantics() {
 }
 
 // --- Unscoped search across argosys ---
-
 #[test]
 fn unscoped_search_spans_argosys_with_score_only_ranking_and_no_precedence_boost() {
     // Identical text in the local and an imported argosy: their scores
@@ -253,4 +252,146 @@ fn with_namespaces_honors_the_selection_verbatim_for_every_argosy() {
     let qid = hashes.keys().next().unwrap();
     assert_eq!(qid.argosy, "vendor");
     assert_eq!(qid.namespace, Namespace::Memory);
+}
+
+// --- Hybrid fusion: the reciprocal-rank fuse over leg rankings ---
+
+/// A minimal hit keyed for the fuse: identity, passage, score.
+fn fuse_hit(argosy: &str, id: &str, chunk_ordinal: u32, score: f32) -> SearchHit {
+    SearchHit {
+        concept: QualifiedConceptId {
+            argosy: argosy.to_string(),
+            namespace: Namespace::Document,
+            id: concept_id(id),
+        },
+        score,
+        meta: UnitMeta::default(),
+        chunk_ordinal,
+        heading_path: String::new(),
+        start_line: 0,
+        end_line: 0,
+        passage: String::new(),
+    }
+}
+
+#[test]
+fn fusing_one_leg_plus_an_empty_leg_keeps_the_legs_ranking() {
+    let leg = vec![
+        fuse_hit("local", "document/a", 0, 0.9),
+        fuse_hit("local", "document/b", 0, 0.4),
+    ];
+    // A lone leg — and a leg plus an empty one, the vector-only backend
+    // default — preserves the leg's order, rescaled by rank.
+    for fused in [
+        rrf_fuse(std::slice::from_ref(&leg), 10),
+        rrf_fuse(&[leg, Vec::new()], 10),
+    ] {
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].concept.id, concept_id("document/a"));
+        assert!(fused[0].score > fused[1].score);
+        assert!(
+            (fused[0].score as f64 - 1.0 / f64::from(RRF_K)).abs() < 1e-6,
+            "rank 0 scores 1/(RRF_K + 0): {}",
+            fused[0].score
+        );
+    }
+    assert!(rrf_fuse(&[], 10).is_empty(), "no legs: no hits");
+    assert!(
+        rrf_fuse(&[vec![fuse_hit("local", "document/a", 0, 1.0)]], 0).is_empty(),
+        "k = 0"
+    );
+}
+
+#[test]
+fn fusing_never_lets_an_argosy_precedence_reappear_in_ties() {
+    // Two hits tied in the leg share that leg's rank, so their fused
+    // scores tie exactly (QRY-7: ranking follows retrieval relevance
+    // alone) even though the fuse assigns ranks positionally.
+    let leg = vec![
+        fuse_hit("local", "document/shared", 0, 0.5),
+        fuse_hit("vendor", "document/shared", 0, 0.5),
+    ];
+    let fused = rrf_fuse(&[leg], 10);
+    assert_eq!(fused.len(), 2);
+    assert_eq!(
+        fused[0].score, fused[1].score,
+        "tied leg scores stay fused-score ties"
+    );
+}
+
+#[test]
+fn fusing_boosts_the_units_both_legs_agree_on() {
+    // The semantic winner is rank 0 on the vector leg; the exact-term
+    // document is rank 1 there but rank 0 on the lexical leg, and the
+    // sum of two contributions beats one.
+    let fused = rrf_fuse(
+        &[
+            vec![
+                fuse_hit("local", "document/nearest", 0, 0.95),
+                fuse_hit("local", "document/exact", 0, 0.60),
+                fuse_hit("local", "document/other", 0, 0.50),
+            ],
+            vec![fuse_hit("local", "document/exact", 0, -1.5)],
+        ],
+        10,
+    );
+    assert_eq!(
+        fused[0].concept.id,
+        concept_id("document/exact"),
+        "two legs agreeing outrank one leg's lone opinion"
+    );
+    assert_eq!(fused[1].concept.id, concept_id("document/nearest"));
+    // Score scales: exact = 1/61 + 1/60; nearest = 1/60.
+    assert!(
+        (fused[0].score as f64 - (1.0 / 61.0 + 1.0 / 60.0)).abs() < 1e-6,
+        "contributions sum across legs: {}",
+        fused[0].score
+    );
+}
+
+#[test]
+fn fusing_treats_passages_of_one_concept_as_separate_units() {
+    // Chunk ordinals are part of the key: a concept's passages compete
+    // independently, and only the agreement on the SAME passage boosts.
+    let fused = rrf_fuse(
+        &[
+            vec![
+                fuse_hit("local", "document/long", 0, 0.9),
+                fuse_hit("local", "document/long", 1, 0.8),
+            ],
+            vec![fuse_hit("local", "document/long", 1, 0.0)],
+        ],
+        10,
+    );
+    assert!(fused[0].score > fused[1].score);
+    assert_eq!(fused[0].chunk_ordinal, 1, "the twice-ranked passage wins");
+    assert!(
+        fused[0].score < 0.017 + 0.017,
+        "fusion replaced the leg score with the fused scale"
+    );
+}
+
+#[test]
+fn fusing_truncates_only_after_the_fusion() {
+    // A 40-hit vector leg truncated to k = 2 must contribute lexical-leg
+    // hits beyond the vector top-k to the fused head, not pre-truncate.
+    let vector_leg: Vec<SearchHit> = (0..40)
+        .map(|i| {
+            fuse_hit(
+                "local",
+                &format!("document/v{i}"),
+                0,
+                1.0 - i as f32 / 100.0,
+            )
+        })
+        .collect();
+    let lexical_leg = vec![fuse_hit("local", "document/lexical-only", 0, -2.0)];
+    let fused = rrf_fuse(&[vector_leg, lexical_leg], 2);
+    assert_eq!(fused.len(), 2);
+    assert!(
+        fused
+            .iter()
+            .any(|h| h.concept.id == concept_id("document/lexical-only")),
+        "the lexical-only hit survives truncation of the larger leg"
+    );
 }

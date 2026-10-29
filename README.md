@@ -25,7 +25,7 @@ default `~/.local/state/argosy`):
     ├── .project-root         the slot's canonical project root (sidecar)
     ├── default/              the local, writable bundle (argosy init)
     ├── <name>/               pulled read-only imports (argosy pull)
-    └── index.db              the derived semantic index (argosy index build)
+    └── index.db              the derived hybrid index (argosy index build)
 ```
 
 `<slug>` is the project directory's name plus a short hash of its
@@ -61,7 +61,7 @@ argosy init
 # 2. Add knowledge (or let your harness do it via MCP, below).
 argosy pull https://github.com/your-org/shared-argosy company-rules
 
-# 3. Build the semantic index.
+# 3. Build the search index (hybrid BM25 + vectors).
 #    FIRST RUN downloads the embedding model (~90 MB) into the argosy
 #    cache ($ARGOSY_EMBED_CACHE_DIR or the platform cache dir); later runs
 #    are offline.
@@ -103,7 +103,9 @@ projects):
 The same `mcpServers` shape works for Cursor and ZCode; any MCP client that
 can spawn a stdio server can host argosy.
 
-The server exposes semantic `search` / `search_rules` tools, `argosy://`
+The server exposes hybrid `search` / `search_rules` tools (exact-term BM25
+fused with vector similarity by reciprocal rank, so identifiers and rule
+IDs rank next to paraphrases), `argosy://`
 resources (including the global `argosy://catalog`), a `read` tool for
 concepts in any active argosy (including
 read-only imports), skill listing with trust tiers, and write tools for the
@@ -136,7 +138,7 @@ implementation detail, not a supported interface.
 When a Jev-compatible decision endpoint is configured (the optional
 `decision { ... }` section in `argosy.bml` — a self-hosted `laya-serve` or any
 Jev server), three advisory capabilities turn on. The `ask` tool retrieves
-candidate concepts semantically, asks the endpoint which candidate answers the
+candidate concepts, asks the endpoint which candidate answers the
 question, and returns the selection with its calibrated confidence.
 `search_rules` reranks candidate rules by applicability to the code under
 review, writing an `applicability` probability onto each hit. And
@@ -235,7 +237,7 @@ grounding and structured findings.
 | `argosy init [path]` | Create a bundle (manifest + reserved namespaces). |
 | `argosy validate <path>` | Structural + namespace-contract validation with requirement IDs (`--namespace` scopes one namespace). |
 | `argosy pull <url> <name>` | `git clone` an external argosy into the project's argosy store under the state dir (`--global` for the user-wide store). |
-| `argosy index build` / `status` / `query` | Build/diff/search the semantic index at `<state>/projects/<slug>/index.db`. |
+| `argosy index build` / `status` / `query` | Build/diff/search the hybrid index (BM25 + vectors) at `<state>/projects/<slug>/index.db`; with `index.search_mode = "lexical"` in the user config the model is never downloaded and search is BM25-only. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
 | `argosy catalog` | Generate the global catalog of every project slot (markdown; `--json` for machine output, `--write` to `<state>/README.md`, `--redact-home` to rewrite home paths as `~`). |

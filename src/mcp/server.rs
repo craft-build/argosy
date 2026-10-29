@@ -132,7 +132,8 @@ fn server_instructions() -> String {
     #[cfg(feature = "decision")]
     text.push_str(
         " When a Jev-compatible decision endpoint is enabled in user configuration \
-         (`decision { ... }`), the `ask` tool augments semantic retrieval by asking the \
+         (`decision { ... }`), the `ask` tool augments hybrid retrieval (BM25 and vector \
+         similarity fused by reciprocal rank fusion) by asking the \
          endpoint which retrieved concept answers a question, returning the selection with \
          its calibrated confidence.",
     );

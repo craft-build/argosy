@@ -4,7 +4,12 @@
 //! backends implement the traits, sqlite-vec + tract by default. One or
 //! more units per concept — a short concept is a single unit, a long one is
 //! split into heading-based passages ([`chunk`]) — and every hit names the
-//! passage it matched; search via [`Index::search`], lookup via resolve.
+//! passage it matched. Search is hybrid: the store's vector (k-NN) and
+//! lexical (BM25) legs are fused by reciprocal rank fusion
+//! ([`rrf_fuse`]), so exact identifiers rank next to semantic matches;
+//! a store with no lexical leg (the default trait method) keeps plain
+//! vector ranking. A zero-model [`LexicalOnlyProvider`] powers the
+//! lexical-only mode. Search via [`Index::search`], lookup via resolve.
 
 use std::collections::HashMap;
 
@@ -48,6 +53,37 @@ pub trait EmbeddingProvider {
     /// used at index time); symmetric models default to plain `embed`.
     fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.embed(texts)
+    }
+}
+
+/// The model identity the zero-model embedder records
+/// ([`LexicalOnlyProvider`]): a store built in lexical mode records it
+/// like any other model identity, so switching to or from a real model is
+/// an ordinary identity-mismatch full rebuild.
+pub const LEXICAL_ONLY_MODEL_ID: &str = "lexical-only@1";
+
+/// The zero-model [`EmbeddingProvider`]: the `index.search_mode =
+/// "lexical"` mode. Chunking, hashing, staleness diffing, and BM25 stay
+/// exactly the hybrid path's, but no vector is ever produced and no model
+/// is ever downloaded — the store records zero dimensionality (no vec0
+/// table at all) and search ranks by the lexical leg alone. This is
+/// BM25-only retrieval: exact identifiers and rule IDs match strongly,
+/// paraphrases do not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LexicalOnlyProvider;
+
+impl EmbeddingProvider for LexicalOnlyProvider {
+    fn model_id(&self) -> &str {
+        LEXICAL_ONLY_MODEL_ID
+    }
+
+    /// Always zero: the signal to the store that units have no vectors.
+    fn dimensions(&self) -> usize {
+        0
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| Vec::new()).collect())
     }
 }
 
@@ -141,7 +177,11 @@ pub struct Filter {
 pub struct SearchHit {
     /// The retrieved concept's qualified identity — origin argosy visible.
     pub concept: QualifiedConceptId,
-    /// Similarity score; hits are ordered by descending score.
+    /// Fused retrieval score: the reciprocal-rank-fusion sum over the
+    /// retrieval legs that returned this unit ([`rrf_fuse`]); higher is
+    /// better and hits are ordered by descending score. Not a
+    /// similarity — leg manifests (cosine, BM25, …) are fused by rank,
+    /// never blended by value.
     pub score: f32,
     /// The retrieved unit's facets, so callers can present/filter further
     /// without resolving the concept.
@@ -182,6 +222,79 @@ impl Query {
             filter: Filter::default(),
         }
     }
+}
+
+/// The reciprocal-rank-fusion smoothing constant: the rank offset that
+/// keeps one leg's top hits from dominating the fused order. 60 is the
+/// literature default (Cormack et al., 2009 — the same value the hybrid
+/// retrieval literature reports needs no per-corpus tuning), which is
+/// why legs are fused by rank instead of blending normalized scores.
+pub const RRF_K: u32 = 60;
+
+/// Fuses ranked retrieval legs with reciprocal rank fusion: each unit's
+/// fused score is the sum, over the legs that returned it, of
+/// `1/(RRF_K + rank)`. Legs are ordered best-first (the vector leg
+/// first); a unit is identified by `(concept, chunk_ordinal)`, so one
+/// passage returned by both legs scores twice — the intended hybrid
+/// boost — while different passages of the same concept compete
+/// independently. Result: the fused score ordering, truncated to `k`.
+///
+/// **Tie preservation:** equal-scored hits inside one leg share that leg's
+/// rank (the rank at which the tie group starts, competition-style), so
+/// content ties remain fused-score ties and fusion never introduces a
+/// distinction the legs' own rankings did not make — retrieval alone
+/// orders results, per the spec's no-precedence rule (QRY-7). A single
+/// leg therefore keeps its exact order, with scores rescaled to
+/// `1/(RRF_K + rank)`.
+pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
+    if legs.is_empty() || k == 0 {
+        return Vec::new();
+    }
+    // First-appearance payload per unit (both legs decode the same units
+    // row, so a unit's payload is leg-independent; taking the first
+    // avoids clones), the fused-score table parallel to it, and the key
+    // index into both.
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut fused: Vec<f64> = Vec::new();
+    let mut seen: HashMap<(QualifiedConceptId, u32), usize> = HashMap::new();
+
+    for leg in legs {
+        let mut rank: u32 = 0;
+        let mut prev_score: Option<f32> = None;
+        for (position, hit) in leg.iter().enumerate() {
+            // Tie-aware ranking: a hit whose leg score equals its
+            // predecessor's reuses the predecessor's rank.
+            if prev_score.is_none_or(|score| hit.score != score) {
+                rank = position as u32;
+            }
+            prev_score = Some(hit.score);
+            let contribution = 1.0 / (f64::from(RRF_K) + f64::from(rank));
+            let key = (hit.concept.clone(), hit.chunk_ordinal);
+            match seen.get(&key) {
+                Some(&index) => fused[index] += contribution,
+                None => {
+                    seen.insert(key, hits.len());
+                    fused.push(contribution);
+                    hits.push(hit.clone());
+                }
+            }
+        }
+    }
+
+    // Fused scores in, stable descending sort out: ties keep
+    // first-appearance order, which is best-leg-first — never an
+    // argosy-precedence order, because the store never sees precedence.
+    let mut fused_hits: Vec<(f64, SearchHit)> = fused
+        .into_iter()
+        .zip(hits)
+        .map(|(score, mut hit)| {
+            hit.score = score as f32;
+            (score, hit)
+        })
+        .collect();
+    fused_hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    fused_hits.truncate(k);
+    fused_hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// Stores and retrieves embedding units. Implementations own the ranking
@@ -231,6 +344,21 @@ pub trait VectorStore {
     /// filtering silently loses recall when the k nearest units are
     /// non-matching. Backends that truncate first must over-fetch.
     fn search(&self, vector: &[f32], k: usize, filter: &Filter) -> Result<Vec<SearchHit>>;
+
+    /// The lexical (BM25/full-text) leg of hybrid retrieval: the `k`
+    /// best-ranked units for `text` under `filter`, ordered best-first.
+    /// Only each leg's ORDER matters to the fuse — scores are
+    /// backend-specific and comparable within a leg, never across legs.
+    /// Honors the same filter-then-truncate contract as
+    /// [`VectorStore::search`].
+    ///
+    /// **Default:** an empty leg, so backends without a lexical index
+    /// keep ordinary vector-only ranking; fusing one non-empty leg
+    /// preserves its order verbatim.
+    fn lexical_search(&self, text: &str, k: usize, filter: &Filter) -> Result<Vec<SearchHit>> {
+        let _ = (text, k, filter);
+        Ok(Vec::new())
+    }
 }
 
 /// The report of one [`Index::reconcile`] run, for observability (printed by
@@ -415,6 +543,14 @@ struct GatheredConcept {
     /// as a warning when — and only when — the concept is (re)embedded, so
     /// an unchanged book does not re-warn on every reconcile.
     invisible: usize,
+}
+
+/// The per-leg candidate depth hybrid search fetches before fusing:
+/// several times the caller's k with a floor, so reciprocal-rank fusion
+/// has more to fuse than each leg's top handful, without paying for a
+/// corpus-wide ranking on either leg.
+fn hybrid_fetch_k(k: usize) -> usize {
+    (k * 4).max(32)
 }
 
 /// The reconcile/query engine, written against the [`EmbeddingProvider`] and
@@ -672,10 +808,16 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         Ok(report)
     }
 
-    /// Ranked semantic search: embeds [`Query::text`] and returns the
-    /// store's `k` most similar hits under [`Query::filter`]; for direct
-    /// lookup use [`ProjectContext::resolve`]. Names in `filter.argosies`
-    /// must be active in `context` — else
+    /// Ranked hybrid search: embeds [`Query::text`], runs the store's
+    /// vector leg on the embedding and its lexical (BM25) leg on the raw
+    /// text, and fuses the two rankings by reciprocal rank fusion
+    /// ([`rrf_fuse`]) before truncating to [`Query::k`]. A store without
+    /// a lexical leg (the trait default) keeps pure vector ranking;
+    /// a zero-dimension provider (`LexicalOnlyProvider`, the
+    /// `index.search_mode = "lexical"` mode) keeps pure lexical ranking.
+    /// A query with no indexable terms falls to the vector leg alone.
+    /// For direct lookup use [`ProjectContext::resolve`]. Names in
+    /// `filter.argosies` must be active in `context` — else
     /// [`crate::error::Error::UnknownArgosy`], never a silent empty.
     pub fn search(&self, context: &ProjectContext, query: &Query) -> Result<Vec<SearchHit>> {
         if let Some(reason) = self.dimension_guard_reason() {
@@ -709,7 +851,16 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
             .fail();
         }
-        self.store.search(&vector, query.k, &query.filter)
+        // Each leg ranks a wider candidate set than the caller's k —
+        // cheap on both (vec0 already brute-forces every row; the FTS5
+        // leg has one LIMIT) and what lets the fusion see past the top
+        // handful — then the fuse truncates to k.
+        let fetch = hybrid_fetch_k(query.k);
+        let vector_hits = self.store.search(&vector, fetch, &query.filter)?;
+        let lexical_hits = self
+            .store
+            .lexical_search(&query.text, fetch, &query.filter)?;
+        Ok(rrf_fuse(&[vector_hits, lexical_hits], query.k))
     }
 
     /// The read-path half of a model switch: the recorded model identity

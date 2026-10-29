@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(index)* hybrid retrieval: an FTS5 BM25 index over the chunked passages
+  (and concept ids) is fused with vector similarity by reciprocal rank
+  fusion — exact identifiers, error codes, and rule IDs now rank next to
+  paraphrase matches in every `search`/`search_rules`/`ask` and
+  `argosy index query`. Query text is tokenized to quoted FTS terms, so
+  operator-shaped queries are never parsed as match syntax, and content
+  ties in a leg stay exact ties in the fused order (QRY-7 unchanged)
+- *(index)* `index.search_mode = "lexical"` in the user config: BM25-only
+  retrieval with no embedding model at all — nothing is downloaded, the
+  vec table is never created, and the mode records its own model identity
+  so switching to or from a real model is an ordinary full rebuild
 - *(index)* heading-based passage chunking: long concepts split at ATX
   headings (then paragraphs) into units embedded behind a
   `Concept:`/`Section:` breadcrumb prefix, so text past the first ~200 words
@@ -23,9 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- the index schema is now v2: an existing index is cleared and rebuilt on
+- the index schema is now v3 (adds `unit_fts`, the FTS5 BM25 index kept in
+  sync by `units`-row triggers): an existing index is cleared and rebuilt on
   first open after the upgrade (it is a derived artifact), so the first
-  search after upgrading re-embeds the book
+  search after upgrading re-embeds the book. Search hit `score` is now the
+  reciprocal-rank-fusion score — a ranking signal, not a cosine similarity;
+  consumers that only sort or compare hits within one result set are
+  unaffected
 - `argosy index status` JSON reports `concepts` (and per-namespace
   `concepts`) where it previously reported one unit per concept; `index
   build` prints concepts and passages separately

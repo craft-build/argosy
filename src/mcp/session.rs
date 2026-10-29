@@ -26,13 +26,13 @@ use super::{
     DEFAULT_PROJECT_TTL, UNVERIFIED,
 };
 
-/// One opened project: its argosy set and its semantic index, reconciled
-/// after every mutating tool — a written or deleted concept is visible to
-/// `search`/`search_rules` in the same session.
+/// One opened project: its argosy set and its index (hybrid retrieval),
+/// reconciled after every mutating tool — a written or deleted concept is
+/// visible to `search`/`search_rules` in the same session.
 pub struct ProjectSession<P: EmbeddingProvider, S: VectorStore> {
     /// The active argosys: one local (writable) plus imported (read-only).
     pub context: ProjectContext,
-    /// The semantic index backing `search`/`search_rules`.
+    /// The hybrid index backing `search`/`search_rules`.
     pub index: Index<P, S>,
     /// The hit count when a search tool call omits `k` (user
     /// configuration; defaults to [`super::DEFAULT_K`]).
@@ -200,10 +200,11 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
     }
 
-    /// Semantic search across every active argosy and indexed namespace.
-    /// `argosy` is validated against the active set and `namespaces` against
-    /// the indexed names: an unknown spelling of either errors rather than
-    /// silently returning nothing.
+    /// Hybrid search (BM25 + vector similarity, RRF-fused) across every
+    /// active argosy and indexed namespace. `argosy` is validated against
+    /// the active set and `namespaces` against the indexed names: an
+    /// unknown spelling of either errors rather than silently returning
+    /// nothing.
     pub fn search(&self, params: SearchParams) -> Result<SearchReport> {
         if let Some(names) = &params.namespaces {
             for name in names {
@@ -245,7 +246,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         })
     }
 
-    /// The review-flow query: semantic search restricted to styleguide
+    /// The review-flow query: hybrid search restricted to styleguide
     /// rules, optionally narrowed by `language`/`category` facets. Each hit
     /// carries the rule body's `## Good` / `## Bad` sections when present.
     pub fn search_rules(&self, params: RulesParams) -> Result<SearchReport> {
@@ -993,9 +994,9 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.session(cwd)
     }
 
-    /// Semantic search across every active argosy of the project named by
-    /// `params.cwd`. Unknown `argosy` names error rather than silently
-    /// returning nothing.
+    /// Hybrid search (BM25 + vector similarity, RRF-fused) across every
+    /// active argosy of the project named by `params.cwd`. Unknown `argosy`
+    /// names error rather than silently returning nothing.
     pub fn search(&mut self, params: SearchParams) -> Result<SearchReport> {
         self.session(&params.cwd)?.search(params)
     }

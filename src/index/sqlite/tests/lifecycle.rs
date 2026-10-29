@@ -150,4 +150,27 @@ fn an_older_schema_is_cleared_and_rebuilt_on_writable_open() {
             .all(|c| columns.iter().any(|found| found == c)),
         "the v2 columns exist: {columns:?}"
     );
+    // v3 adds the lexical leg: the FTS index (and its sync triggers) are
+    // recreated on migration, empty like everything else.
+    let fts_objects: Vec<String> = store
+        .conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE name IN ('unit_fts', 'units_fts_insert', 'units_fts_delete')",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .unwrap();
+    assert_eq!(
+        fts_objects.len(),
+        3,
+        "the FTS table and both sync triggers exist: {fts_objects:?}"
+    );
+    let hits = store.lexical_search("old", 10, &Filter::default()).unwrap();
+    assert!(
+        hits.is_empty(),
+        "the dropped layout's text left no FTS shadow"
+    );
 }

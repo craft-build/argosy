@@ -1,5 +1,6 @@
-//! The `VectorStore` implementation: upserts, deletes, and filtered
-//! k-NN search over sqlite-vec.
+//! The `VectorStore` implementation: upserts, deletes, filtered k-NN
+//! search over sqlite-vec (the vector leg), and BM25 search over an FTS5
+//! index (the lexical leg).
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,7 +42,10 @@ impl VectorStore for SqliteVecStore {
         }
         // Dimension safety: the vec0 table's width is fixed at creation
         // (first write, or re-established by `clear`); anything of a
-        // different length is an error, never a silent truncation.
+        // different length is an error, never a silent truncation. A
+        // zero-dimension store is the lexical-only index
+        // (`LexicalOnlyProvider`): units are stored for BM25 and lookup
+        // with no vec0 table at all.
         let dims = self.dimensions.unwrap_or(units[0].vector.len());
         for unit in units {
             if unit.vector.len() != dims {
@@ -69,19 +73,27 @@ impl VectorStore for SqliteVecStore {
             .context(SqliteSnafu {
                 path: self.path.clone(),
             })?;
-            ensure_vec_table(&tx, &self.path, dims)?;
+            if dims > 0 {
+                ensure_vec_table(&tx, &self.path, dims)?;
+            }
         }
         {
-            let mut delete_vec = tx
-                .prepare_cached(
-                    "DELETE FROM unit_vectors WHERE rowid IN (
+            // A zero-dimension (lexical-only) store has no vec0 table: the
+            // two vector statements are not even prepared there, since
+            // preparing against a nonexistent table is itself an error.
+            let mut delete_vec = (dims > 0)
+                .then(|| {
+                    tx.prepare_cached(
+                        "DELETE FROM unit_vectors WHERE rowid IN (
                      SELECT rowid FROM units
                      WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3
                  )",
-                )
-                .context(SqliteSnafu {
-                    path: self.path.clone(),
-                })?;
+                    )
+                    .context(SqliteSnafu {
+                        path: self.path.clone(),
+                    })
+                })
+                .transpose()?;
             let mut delete_units = tx
                 .prepare_cached(
                     "DELETE FROM units
@@ -101,12 +113,14 @@ impl VectorStore for SqliteVecStore {
                 .context(SqliteSnafu {
                     path: self.path.clone(),
                 })?;
-            let mut insert_vec = tx
-                .prepare_cached("INSERT INTO unit_vectors (rowid, vector) VALUES (?1, ?2)")
-                .context(SqliteSnafu {
-                    path: self.path.clone(),
-                })?;
-
+            let mut insert_vec = (dims > 0)
+                .then(|| {
+                    tx.prepare_cached("INSERT INTO unit_vectors (rowid, vector) VALUES (?1, ?2)")
+                        .context(SqliteSnafu {
+                            path: self.path.clone(),
+                        })
+                })
+                .transpose()?;
             // vec0 has no UPDATE: re-upserting is delete-then-insert of the
             // concept's units and vec rows. The delete runs once per
             // CONCEPT, not per unit — a batch may hold several chunks, and
@@ -117,9 +131,11 @@ impl VectorStore for SqliteVecStore {
                 let concept_id = unit.concept.id.as_str();
                 let key: &[&dyn ToSql] = &[&unit.concept.argosy, &namespace, &concept_id];
                 if deleted.insert((&unit.concept.argosy, namespace, concept_id)) {
-                    delete_vec.execute(key).context(SqliteSnafu {
-                        path: self.path.clone(),
-                    })?;
+                    if let Some(delete_vec) = delete_vec.as_mut() {
+                        delete_vec.execute(key).context(SqliteSnafu {
+                            path: self.path.clone(),
+                        })?;
+                    }
                     delete_units.execute(key).context(SqliteSnafu {
                         path: self.path.clone(),
                     })?;
@@ -151,11 +167,13 @@ impl VectorStore for SqliteVecStore {
                         path: self.path.clone(),
                     })?;
                 let rowid = tx.last_insert_rowid();
-                insert_vec
-                    .execute(params![rowid, vec_to_bytes(&unit.vector)])
-                    .context(SqliteSnafu {
-                        path: self.path.clone(),
-                    })?;
+                if let Some(insert_vec) = insert_vec.as_mut() {
+                    insert_vec
+                        .execute(params![rowid, vec_to_bytes(&unit.vector)])
+                        .context(SqliteSnafu {
+                            path: self.path.clone(),
+                        })?;
+                }
             }
         }
         tx.commit().context(SqliteSnafu {
@@ -174,19 +192,24 @@ impl VectorStore for SqliteVecStore {
         // One transaction: a partially applied pair would leave units rows
         // whose vectors are gone — `unit_hashes` would still report such a
         // concept while search can never return it (silently unsearchable).
+        // A zero-dimension (lexical-only) store has no vec0 table; only
+        // the units row (and its FTS shadow) needs deleting.
+        let dims = self.dimensions.unwrap_or_default();
         let tx = self.conn.transaction().context(SqliteSnafu {
             path: self.path.clone(),
         })?;
-        tx.execute(
-            "DELETE FROM unit_vectors WHERE rowid IN (
+        if dims > 0 {
+            tx.execute(
+                "DELETE FROM unit_vectors WHERE rowid IN (
                      SELECT rowid FROM units
                      WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3
                  )",
-            key,
-        )
-        .context(SqliteSnafu {
-            path: self.path.clone(),
-        })?;
+                key,
+            )
+            .context(SqliteSnafu {
+                path: self.path.clone(),
+            })?;
+        }
         tx.execute(
             "DELETE FROM units
                  WHERE argosy = ?1 AND namespace = ?2 AND concept_id = ?3",
@@ -267,6 +290,12 @@ impl VectorStore for SqliteVecStore {
             return Ok(Vec::new());
         }
         let dims = self.dimensions.expect("dimensions checked above");
+        // A lexical-only store (zero dimensions, `LexicalOnlyProvider`)
+        // has no vec0 table and no vector leg; the lexical leg owns the
+        // query.
+        if dims == 0 {
+            return Ok(Vec::new());
+        }
         if vector.len() != dims {
             return IndexSnafu {
                 reason: format!(
@@ -298,90 +327,80 @@ impl VectorStore for SqliteVecStore {
 
         // Bound-parameter SQL: every user-influenced filter value travels as
         // a parameter, never string-interpolated. Only the number of
-        // placeholders (from counts) shapes the text.
-        let mut sql = String::from(
-            "SELECT u.argosy, u.namespace, u.concept_id, u.concept_type,
-                    u.description, u.tags, u.language, u.category, u.chunk_ordinal,
-                    u.heading_path, u.start_line, u.end_line, u.passage, v.distance
+        // placeholders (from counts) shapes the text. Score = -distance:
+        // descending order is descending similarity (module docs).
+        let mut sql = format!(
+            "SELECT {UNIT_COLUMNS}, v.distance AS leg_score
              FROM unit_vectors AS v
              JOIN units AS u ON u.rowid = v.rowid
-             WHERE v.vector MATCH ? AND k = ?",
+             WHERE v.vector MATCH ? AND k = ?"
         );
         let mut values: Vec<rusqlite::types::Value> =
             vec![vec_to_bytes(vector).into(), sql_k.into()];
+        push_filter_sql(&mut sql, &mut values, filter);
 
-        let mut push_in_list = |column: &str, entries: &[String]| {
-            if entries.is_empty() {
-                // An empty allow-list matches NOTHING (the doc-06
-                // `filter_matches` reference semantics) — never emit `IN ()`,
-                // which is a SQLite syntax error.
-                sql.push_str(" AND 1 = 0");
-            } else {
-                sql.push_str(&format!(
-                    " AND {column} IN ({})",
-                    entries.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
-                ));
-                values.extend(entries.iter().cloned().map(Into::into));
-            }
+        let mut hits = self
+            .query_hits(&sql, &values)?
+            .into_iter()
+            // vec0's KNN constraint returns at most sql_k rows; sort here
+            // so descending-score order does not depend on iteration
+            // order, then apply the caller's k to the fully filtered
+            // ranking.
+            .collect::<Result<Vec<_>>>()?;
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    fn lexical_search(&self, text: &str, k: usize, filter: &Filter) -> Result<Vec<SearchHit>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        // A query with no indexable token (empty, punctuation-only) cannot
+        // rank lexically: the expression stays unset and the vector leg
+        // owns the query alone.
+        let Some(match_expr) = fts_match_expr(text) else {
+            return Ok(Vec::new());
         };
+        // Score = -bm25: lower BM25 ranks better, so negating keeps the
+        // both-legs convention "higher score is a better hit" true. The
+        // active filters constrain the FTS5 ranking itself (WHERE before
+        // ORDER BY/LIMIT), so the lexical leg honors the same
+        // filter-then-truncate contract as the vector leg.
+        let mut sql = format!(
+            "SELECT {UNIT_COLUMNS}, bm25(unit_fts) AS leg_score
+             FROM unit_fts
+             JOIN units AS u ON u.rowid = unit_fts.rowid
+             WHERE unit_fts MATCH ?"
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![match_expr.into()];
+        push_filter_sql(&mut sql, &mut values, filter);
+        sql.push_str(" ORDER BY leg_score LIMIT ?");
+        values.push((k as i64).into());
 
-        if let Some(namespaces) = &filter.namespaces {
-            let names: Vec<String> = namespaces
-                .iter()
-                .map(|ns| ns.as_dir_name().to_string())
-                .collect();
-            push_in_list("u.namespace", &names);
-        }
-        if let Some(argosies) = &filter.argosies {
-            push_in_list("u.argosy", argosies);
-        }
-        if let Some(concept_types) = &filter.concept_types {
-            push_in_list("u.concept_type", concept_types);
-        }
-        if let Some(tags) = &filter.tags {
-            if tags.is_empty() {
-                sql.push_str(" AND 1 = 0");
-            } else {
-                sql.push_str(&format!(
-                    " AND EXISTS (SELECT 1 FROM json_each(u.tags) je WHERE je.value IN ({}))",
-                    tags.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
-                ));
-                values.extend(tags.iter().cloned().map(Into::into));
-            }
-        }
-        if let Some(language) = &filter.language {
-            sql.push_str(" AND u.language = ?");
-            values.push(language.clone().into());
-        }
-        if let Some(category) = &filter.category {
-            sql.push_str(" AND u.category = ?");
-            values.push(category.clone().into());
-        }
+        let hits = self
+            .query_hits(&sql, &values)?
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(hits)
+    }
+}
 
-        let mut stmt = self.conn.prepare(&sql).context(SqliteSnafu {
+impl SqliteVecStore {
+    /// Runs one retrieval leg's query and decodes every row; the score
+    /// column is expected as `leg_score` at index 13 (see
+    /// [`UNIT_COLUMNS`]). Hits arrive roughly ranked; each leg sorts or
+    /// truncates as its engine requires.
+    fn query_hits(
+        &self,
+        sql: &str,
+        values: &[rusqlite::types::Value],
+    ) -> Result<Vec<Result<SearchHit>>> {
+        let mut stmt = self.conn.prepare(sql).context(SqliteSnafu {
             path: self.path.clone(),
         })?;
         let rows = stmt
-            .query_map(params_from_iter(values.iter()), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, String>(12)?,
-                    // Score = -distance: descending order is descending
-                    // similarity (module docs).
-                    -row.get::<_, f64>(13)? as f32,
-                ))
-            })
+            .query_map(params_from_iter(values.iter()), decode_unit_row)
             .context(SqliteSnafu {
                 path: self.path.clone(),
             })?
@@ -389,57 +408,180 @@ impl VectorStore for SqliteVecStore {
             .context(SqliteSnafu {
                 path: self.path.clone(),
             })?;
-
-        let mut hits = rows
-            .into_iter()
-            .map(
-                |(
-                    a,
-                    ns,
-                    cid,
-                    ty,
-                    desc,
-                    tags,
-                    lang,
-                    cat,
-                    chunk_ordinal,
-                    heading_path,
-                    start_line,
-                    end_line,
-                    passage,
-                    score,
-                )|
-                 -> Result<SearchHit> {
-                    let tags: Vec<String> = serde_json::from_str(&tags).map_err(|e| -> Error {
-                        IndexSnafu {
-                            reason: format!("corrupt index row: tags JSON failed to parse: {e}"),
-                        }
-                        .build()
-                    })?;
-                    Ok(SearchHit {
-                        concept: row_key(a, ns, cid)?,
-                        score,
-                        meta: UnitMeta {
-                            concept_type: ty,
-                            description: desc,
-                            tags,
-                            language: lang,
-                            category: cat,
-                        },
-                        chunk_ordinal: chunk_ordinal.max(0) as u32,
-                        heading_path,
-                        start_line: start_line.max(0) as u32,
-                        end_line: end_line.max(0) as u32,
-                        passage,
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>>>()?;
-        // vec0's KNN constraint returns at most sql_k rows; sort here so
-        // descending-score order does not depend on iteration order, then
-        // apply the caller's k to the fully filtered ranking.
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        hits.truncate(k);
-        Ok(hits)
+        Ok(rows.into_iter().map(RawHit::into_hit).collect())
     }
+}
+
+/// The `units` columns both retrieval legs SELECT, in the fixed order
+/// [`decode_unit_row`] reads them. Each leg appends one scalar score
+/// column aliased `leg_score` at index 13 — `-distance` for the vector
+/// leg, `-bm25` for the lexical leg.
+const UNIT_COLUMNS: &str = "u.argosy, u.namespace, u.concept_id, u.concept_type,
+       u.description, u.tags, u.language, u.category, u.chunk_ordinal,
+       u.heading_path, u.start_line, u.end_line, u.passage";
+
+/// One `units` row plus its leg score, mid-decode (between rusqlite's
+/// strict `rusqlite::Result` and argosy's fallible key/JSON decoding).
+struct RawHit {
+    argosy: String,
+    namespace: String,
+    concept_id: String,
+    concept_type: Option<String>,
+    description: Option<String>,
+    tags: String,
+    language: Option<String>,
+    category: Option<String>,
+    chunk_ordinal: i64,
+    heading_path: String,
+    start_line: i64,
+    end_line: i64,
+    passage: String,
+    leg_score: f64,
+}
+
+/// Decodes the 14 fixed columns both legs emit (see [`UNIT_COLUMNS`]).
+fn decode_unit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHit> {
+    Ok(RawHit {
+        argosy: row.get(0)?,
+        namespace: row.get(1)?,
+        concept_id: row.get(2)?,
+        concept_type: row.get(3)?,
+        description: row.get(4)?,
+        tags: row.get(5)?,
+        language: row.get(6)?,
+        category: row.get(7)?,
+        chunk_ordinal: row.get(8)?,
+        heading_path: row.get(9)?,
+        start_line: row.get(10)?,
+        end_line: row.get(11)?,
+        passage: row.get(12)?,
+        leg_score: row.get(13)?,
+    })
+}
+
+impl RawHit {
+    /// Converts a decoded row into a [`SearchHit`], scoring it as the
+    /// leg already arranged: `leg_score` is negated here so both engines'
+    /// "lower raw value is better" metrics (distance, bm25) share the
+    /// store's higher-is-better convention.
+    fn into_hit(self) -> Result<SearchHit> {
+        let tags: Vec<String> = serde_json::from_str(&self.tags).map_err(|e| -> Error {
+            IndexSnafu {
+                reason: format!("corrupt index row: tags JSON failed to parse: {e}"),
+            }
+            .build()
+        })?;
+        Ok(SearchHit {
+            concept: row_key(self.argosy, self.namespace, self.concept_id)?,
+            score: -self.leg_score as f32,
+            meta: UnitMeta {
+                concept_type: self.concept_type,
+                description: self.description,
+                tags,
+                language: self.language,
+                category: self.category,
+            },
+            chunk_ordinal: self.chunk_ordinal.max(0) as u32,
+            heading_path: self.heading_path,
+            start_line: self.start_line.max(0) as u32,
+            end_line: self.end_line.max(0) as u32,
+            passage: self.passage,
+        })
+    }
+}
+
+/// Appends bound-parameter SQL for every active filter field, pushing the
+/// values; shared by both retrieval legs so a filter constrains exactly
+/// the same rows in each. Only the number of placeholders (from counts)
+/// shapes the text — every user-influenced value travels as a parameter,
+/// never string-interpolated.
+fn push_filter_sql(sql: &mut String, values: &mut Vec<rusqlite::types::Value>, filter: &Filter) {
+    let push_in_list = |sql: &mut String,
+                        values: &mut Vec<rusqlite::types::Value>,
+                        column: &str,
+                        entries: &[String]| {
+        if entries.is_empty() {
+            // An empty allow-list matches NOTHING (the doc-06
+            // `filter_matches` reference semantics) — never emit `IN ()`,
+            // which is a SQLite syntax error.
+            sql.push_str(" AND 1 = 0");
+        } else {
+            sql.push_str(&format!(
+                " AND {column} IN ({})",
+                entries.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+            ));
+            values.extend(entries.iter().cloned().map(Into::into));
+        }
+    };
+
+    if let Some(namespaces) = &filter.namespaces {
+        let names: Vec<String> = namespaces
+            .iter()
+            .map(|ns| ns.as_dir_name().to_string())
+            .collect();
+        push_in_list(sql, values, "u.namespace", &names);
+    }
+    if let Some(argosies) = &filter.argosies {
+        push_in_list(sql, values, "u.argosy", argosies);
+    }
+    if let Some(concept_types) = &filter.concept_types {
+        push_in_list(sql, values, "u.concept_type", concept_types);
+    }
+    if let Some(tags) = &filter.tags {
+        if tags.is_empty() {
+            sql.push_str(" AND 1 = 0");
+        } else {
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM json_each(u.tags) je WHERE je.value IN ({}))",
+                tags.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+            ));
+            values.extend(tags.iter().cloned().map(Into::into));
+        }
+    }
+    if let Some(language) = &filter.language {
+        sql.push_str(" AND u.language = ?");
+        values.push(language.clone().into());
+    }
+    if let Some(category) = &filter.category {
+        sql.push_str(" AND u.category = ?");
+        values.push(category.clone().into());
+    }
+}
+
+/// The most terms ever OR-ed into one FTS5 MATCH expression: past this a
+/// pathological query costs more to plan than it can ever return.
+const MAX_FTS_TERMS: usize = 32;
+
+/// Builds an FTS5 MATCH expression from free text: every maximal
+/// alphanumeric run becomes one quoted term, and the terms are OR-ed.
+///
+/// Quoting disables every MATCH operator (`AND`, `OR`, `NOT`, `NEAR`,
+/// prefixes, column filters, leading `-`), so arbitrary — adversarial —
+/// query text can never be parsed as FTS syntax; alphanumeric runs also
+/// cannot contain the quote character, so no escaping is needed. OR
+/// semantics maximize recall (a document matching any query term ranks),
+/// with BM25 weighting toward rarer and more-matched terms — the lexical
+/// leg of the reciprocal-rank fusion, where only the ordering matters.
+///
+/// Returns `None` when the text holds no indexable term (empty or
+/// punctuation-only queries), leaving the vector leg to own the query.
+fn fts_match_expr(text: &str) -> Option<String> {
+    let mut terms = 0usize;
+    let mut expr = String::new();
+    for term in text.split(|c: char| !c.is_alphanumeric()) {
+        if term.is_empty() {
+            continue;
+        }
+        if terms >= MAX_FTS_TERMS {
+            break;
+        }
+        if !expr.is_empty() {
+            expr.push_str(" OR ");
+        }
+        expr.push('"');
+        expr.push_str(term);
+        expr.push('"');
+        terms += 1;
+    }
+    if expr.is_empty() { None } else { Some(expr) }
 }

@@ -15,7 +15,10 @@ pub struct SearchHitOut {
     pub namespace: String,
     /// Bundle-relative concept id (includes the namespace prefix).
     pub concept_id: String,
-    /// Similarity score (higher is better).
+    /// Fused retrieval score: reciprocal-rank fusion over the search
+    /// legs that returned this passage (BM25 and/or vector similarity);
+    /// higher is better and hits are ordered by descending score. Not a
+    /// similarity — the legs are fused by rank, never blended by value.
     pub score: f32,
     /// Which passage of the concept matched (`0` for a whole-concept or the
     /// first passage).

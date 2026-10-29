@@ -7,8 +7,12 @@ mod store;
 use tempfile::TempDir;
 
 use super::*;
-use crate::index::tests::{MockEmbedder, fixture};
-use crate::index::{EmbeddingProvider, EmbeddingUnit, Index, Query, UnitMeta, VectorStore};
+use crate::context::ProjectContext;
+use crate::index::tests::{MockEmbedder, fixture, make_argosy};
+use crate::index::{
+    EmbeddingProvider, EmbeddingUnit, Index, LEXICAL_ONLY_MODEL_ID, LexicalOnlyProvider, Query,
+    UnitMeta, VectorStore,
+};
 
 fn open_in_tmp() -> (TempDir, SqliteVecStore) {
     let dir = TempDir::new().unwrap();

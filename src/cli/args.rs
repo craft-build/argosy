@@ -95,7 +95,7 @@ pub(super) enum IndexVerb {
     /// Read-only index status and staleness preview.
     Status,
 
-    /// Semantic search over the index.
+    /// Hybrid retrieval over the index (BM25 + vector similarity, fused).
     Query(QueryArgs),
 }
 

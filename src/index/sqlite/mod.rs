@@ -1,11 +1,14 @@
 //! The `sqlite-vec`-backed default [`VectorStore`], gated behind the
 //! `default-index` Cargo feature: one `.argosy/index.db` file spanning all
 //! active argosys (`meta` model row, `units` facet rows, `unit_vectors`
-//! vec0 keyed by units rowid). Scores are `-distance`. Filtered queries
-//! rank the full corpus (vec0 applies filters after its top-k, so
-//! `search` raises the SQL-side k to the row count and truncates after
-//! filtering — exact, at no asymptotic cost). v1 limit: single-process
-//! writers only.
+//! vec0 keyed by units rowid, `unit_fts` an FTS5 BM25 index over the units
+//! rows kept in sync by INSERT/DELETE triggers). Vector-leg scores are
+//! `-distance`, lexical-leg scores are `-bm25`; only the ordering within a
+//! leg is load-bearing — [`Index::search`](crate::index::Index::search)
+//! fuses the legs with reciprocal rank fusion. Filtered queries rank the
+//! full corpus (vec0 applies filters after its top-k, so `search` raises
+//! the SQL-side k to the row count and truncates after filtering — exact,
+//! at no asymptotic cost). v1 limit: single-process writers only.
 
 use std::ffi::{c_char, c_int};
 use std::fs;
@@ -29,8 +32,10 @@ mod tests;
 
 /// Schema generation (`PRAGMA user_version`); bump with a migration when the
 /// layout changes. v2 adds passage columns (`heading_path`, `start_line`,
-/// `end_line`, `passage`) and real multi-chunk concepts.
-const SCHEMA_VERSION: i32 = 2;
+/// `end_line`, `passage`) and real multi-chunk concepts. v3 adds the
+/// `unit_fts` FTS5 BM25 index (external content over `units`, trigger
+/// maintained) — the lexical leg of hybrid search.
+const SCHEMA_VERSION: i32 = 3;
 
 /// Pointer signature SQLite expects for an extension init function.
 type SqliteExtensionInit = unsafe extern "C" fn(
@@ -125,10 +130,13 @@ impl SqliteVecStore {
             // The index is a derived artifact (spec §3.1, IDX-1): the
             // cheapest correct migration is to drop the old layout and let
             // the next reconcile rebuild it from the bundles.
-            conn.execute_batch("DROP TABLE IF EXISTS unit_vectors; DROP TABLE IF EXISTS units;")
-                .context(SqliteSnafu {
-                    path: path.to_path_buf(),
-                })?;
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS unit_fts;
+                 DROP TABLE IF EXISTS unit_vectors; DROP TABLE IF EXISTS units;",
+            )
+            .context(SqliteSnafu {
+                path: path.to_path_buf(),
+            })?;
             conn.execute(
                 "UPDATE meta SET model_id = NULL, dimensions = NULL, updated_at = datetime('now') WHERE id = 1",
                 [],
@@ -171,9 +179,37 @@ impl SqliteVecStore {
         .context(SqliteSnafu {
             path: path.to_path_buf(),
         })?;
+        // The lexical leg: one FTS5 BM25 index over the same rows the
+        // vector leg embeds. External content — the indexed text is read
+        // through from `units` on demand, so nothing is stored twice, and
+        // `units`-row lifecycles stay the single source of truth through
+        // the two triggers below: every upsert/delete/clear writes
+        // `units`, so the FTS index never drifts. `concept_id` is indexed
+        // alongside the passage so exact rule/document ids stay
+        // lexical-queryable even when the passage text never spells them
+        // out in full.
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(
+                passage, concept_id,
+                content='units', content_rowid='rowid'
+            );
+            CREATE TRIGGER IF NOT EXISTS units_fts_insert AFTER INSERT ON units BEGIN
+                INSERT INTO unit_fts(rowid, passage, concept_id)
+                VALUES (new.rowid, new.passage, new.concept_id);
+            END;
+            CREATE TRIGGER IF NOT EXISTS units_fts_delete AFTER DELETE ON units BEGIN
+                INSERT INTO unit_fts(unit_fts, rowid, passage, concept_id)
+                VALUES ('delete', old.rowid, old.passage, old.concept_id);
+            END;",
+        )
+        .context(SqliteSnafu {
+            path: path.to_path_buf(),
+        })?;
 
         let (model_id, dimensions) = Self::read_meta(&conn, path)?;
-        if let Some(dims) = dimensions {
+        if let Some(dims) = dimensions
+            && dims > 0
+        {
             ensure_vec_table(&conn, path, dims)?;
         }
         Ok(Self {
@@ -355,7 +391,9 @@ fn filter_is_active(filter: &Filter) -> bool {
 
 impl SqliteVecStore {
     /// Shared read-side vec-table check (kept separate from `ensure_vec_table`
-    /// so `search` can stay `&self`).
+    /// so `search` can stay `&self`). A zero-dimension store — the
+    /// lexical-only index built with `LexicalOnlyProvider` — never has a
+    /// vec0 table, and its vector leg is empty by construction.
     fn ensure_vec_table_read(&self) -> Result<()> {
         let Some(dimensions) = self.dimensions else {
             return IndexSnafu {
@@ -363,6 +401,9 @@ impl SqliteVecStore {
             }
             .fail();
         };
+        if dimensions == 0 {
+            return Ok(());
+        }
         ensure_vec_table(&self.conn, &self.path, dimensions)
     }
 }

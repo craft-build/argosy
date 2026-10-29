@@ -299,6 +299,10 @@ Independent of the specific database, an index **MUST** support:
 - **IDX-9**: Filtering or combining search with the structured metadata OKF frontmatter already provides — `tags`, `type`, `status`, and so on — so semantic and structured filtering can be used together.
 - **IDX-10**: Incremental maintenance: adding, updating, or removing the embedding(s) for a single concept without requiring a full-bundle rebuild.
 
+### 7.4.1 Lexical and Hybrid Search (informative)
+
+This document requires similarity search (`IDX-7`); it does not forbid augmenting it. The reference implementation's search is hybrid: a lexical BM25 leg (FTS5 over the same chunked passages) runs beside the vector leg, both honoring the same filter contract (`IDX-8`, `IDX-9`), and the rankings are fused by reciprocal rank fusion. Rank-based fusion keeps the requirements intact — results remain ranked by retrieval relevance (`QRY-7`) and the fused score remains a ranking, not a similarity — while making exact identifiers and rule IDs first-class queries. A zero-model mode (BM25 without any embedding model) satisfies `IDX-6` by recording the zero-model provider's identity like any other, so `IDX-5`/`IDX-12` mismatch detection still governs switching modes.
+
 ### 7.5 Rebuild and Staleness
 
 - **IDX-11**: A harness **SHOULD** detect when a concept's content has changed since it was last embedded (for example, via a content hash) and treat its existing embedding as stale.
