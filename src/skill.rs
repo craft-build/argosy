@@ -1,8 +1,6 @@
-//! The typed model and namespace contract for `skill/` concepts. A skill
-//! is instructions a harness loads on demand: a single concept file under
-//! `skill/`, or a directory holding an entry point plus materials.
-//! [`Skill::list`] is tolerant — one broken skill cannot poison consumers;
-//! [`validate`] surfaces the breakage. Materials stay plain concepts.
+//! The typed model and namespace contract for `skill/` concepts. A skill is
+//! instructions a harness loads on demand; its materials stay plain concepts.
+//! [`Skill::list`] is tolerant, and [`validate`] surfaces the breakage.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -22,35 +20,29 @@ const TYPE: &str = "Skill";
 pub enum SkillForm {
     /// A single concept file directly under `skill/`.
     SingleFile,
-    /// A directory under `skill/` holding the entry point plus any
-    /// supporting materials. `root` is the bundle-relative skill directory.
+    /// A directory under `skill/` holding the entry point plus materials;
+    /// `root` is the bundle-relative skill directory.
     Directory { root: PathBuf },
 }
 
-/// A discovered skill: its name (the lookup key for listing and collision
-/// checks), its entry-point concept id, and its routing description.
+/// A discovered skill: its name, entry-point concept id, and routing description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     /// The bundle's `skill/` directory.
     pub namespace_dir: PathBuf,
-    /// The entry point's file stem — e.g. `deploy` for both `skill/deploy.md`
-    /// and `skill/deploy/deploy.md`.
+    /// The entry point's file stem, e.g. `deploy` for either form.
     pub name: String,
     /// The entry-point concept's id within the bundle.
     pub entry_point: ConceptId,
-    /// The entry point's `description`: what the skill does and
-    /// when a harness should reach for it.
+    /// The entry point's `description`: what the skill does and when to reach for it.
     pub description: String,
     /// File- or directory-form.
     pub form: SkillForm,
 }
 
 impl Skill {
-    /// Lists every contract-satisfying skill under `skill/`, sorted by
-    /// name. Discovery looks at the top level only: a `.md` file is a
-    /// file-form candidate, a directory a directory-form candidate whose
-    /// entry point is `<dir>/<basename>.md`. Candidates failing any check
-    /// are skipped silently; use [`Argosy::validate_skills`] to see why.
+    /// Lists every contract-satisfying skill under `skill/`, sorted by name;
+    /// failing candidates are skipped silently — see [`Argosy::validate_skills`].
     pub fn list(argosy: &Argosy) -> Result<Vec<Skill>> {
         let Some(ns_dir) = argosy.namespace_dir(&Namespace::Skill) else {
             return Ok(Vec::new());
@@ -73,9 +65,8 @@ struct Candidate {
     form: SkillForm,
 }
 
-/// Enumerates top-level candidates, skipping OKF listing/history files
-/// (index/log files) and stray non-markdown files (a validation
-/// question, not discovery).
+/// Enumerates top-level candidates, skipping OKF listing files and stray
+/// non-markdown files (a validation question, not discovery).
 fn candidates(ns_dir: &Path) -> Result<Vec<Candidate>> {
     let rd = fs::read_dir(ns_dir).context(IoSnafu {
         path: ns_dir.to_path_buf(),
@@ -87,14 +78,11 @@ fn candidates(ns_dir: &Path) -> Result<Vec<Candidate>> {
     for entry in entries {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        // The index is a derivative artifact, not bundle content — consistent
-        // with `walk_bundle` skipping `.argosy` at every depth.
+        // A derivative artifact, not content — skipped as `walk_bundle` does.
         if name == ".argosy" {
             continue;
         }
-        // Per-entry tolerance (a stat failure must not poison the whole
-        // listing); validation surfaces such entries via the structural
-        // layer's generic finding.
+        // A stat failure must not poison the listing; the structural layer reports it.
         let Ok(ty) = entry.file_type() else {
             continue;
         };
@@ -119,12 +107,10 @@ fn candidates(ns_dir: &Path) -> Result<Vec<Candidate>> {
 }
 
 /// Builds the typed view of a candidate, or `None` if it violates the
-/// entry-point contract (tolerant listing: breakage belongs to validation).
+/// entry-point contract.
 fn load(candidate: &Candidate, ns_dir: &Path, root: &Path) -> Option<Skill> {
     let path = root.join(&candidate.entry_rel);
-    // Reads never follow symlinks: a symlinked entry point (file-form
-    // candidates are already filtered by `file_type`; directory-form ones
-    // land here) is not a skill.
+    // Reads never follow symlinks: a symlinked entry point is not a skill.
     if !is_real_file(&path) {
         return None;
     }
@@ -149,22 +135,18 @@ fn load(candidate: &Candidate, ns_dir: &Path, root: &Path) -> Option<Skill> {
     })
 }
 
-/// Validates the `skill/` namespace contract of the bundle at `root`.
-/// Absent `skill/` is fine. Unreadable directories and unparseable or
-/// untyped concepts are the structural layer's job (see
-/// [`Argosy::validate`]) and are skipped here rather than doubly reported;
-/// attested computations are optional, so they have no check.
+/// Validates the `skill/` namespace contract of the bundle at `root`;
+/// structural failures are [`Argosy::validate`]'s job and are skipped here
+/// rather than doubly reported.
 pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     let ns_dir = root.join("skill");
-    // Only a real directory counts — a symlinked namespace must read as
-    // absent here exactly as it does in listing, or validation would
-    // report on files outside the bundle.
+    // A symlinked namespace reads as absent, as in listing, or validation
+    // would report on files outside the bundle.
     if !is_real_dir(&ns_dir) {
         return Vec::new();
     }
     let mut findings = Vec::new();
-    // An unreadable `skill/` is already the structural layer's finding;
-    // reporting it here too would double-report one root cause.
+    // An unreadable `skill/` is already the structural layer's finding.
     let mut entries: Vec<fs::DirEntry> = match fs::read_dir(&ns_dir) {
         Ok(rd) => rd.filter_map(std::result::Result::ok).collect(),
         Err(_) => return findings,
@@ -178,14 +160,12 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             continue; // derivative index dir, consistent with `walk_bundle`
         }
         let rel = PathBuf::from("skill").join(&name);
-        // A per-entry stat failure is already the structural layer's;
-        // reporting it here too would double-report one root cause.
+        // A per-entry stat failure is already the structural layer's finding.
         let Ok(ty) = entry.file_type() else {
             continue;
         };
-        // A symlinked entry is the structural layer's finding (reads
-        // never follow symlinks); contract checks on it would read
-        // through the link.
+        // A symlinked entry is the structural layer's finding; contract
+        // checks would read through the link.
         if ty.is_symlink() {
             continue;
         }
@@ -209,8 +189,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             }
         } else if ty.is_dir() {
             // An unreadable skill directory is the structural layer's
-            // finding; claiming the entry point is missing would be
-            // a guess, so this layer stays out of it.
+            // finding; the entry point's presence there would be a guess.
             let Ok(dir_entries) = fs::read_dir(root.join(&rel)) else {
                 continue;
             };
@@ -218,13 +197,9 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
                 dir_entries.filter_map(std::result::Result::ok).collect();
             let entry_name = format!("{name}.md");
             let entry_rel = rel.join(&entry_name);
-            // The entry point must exist *as a file*: a directory named
-            // `deploy.md` does not satisfy the entry-point contract. An
-            // entry whose own metadata failed to stat falls to the
-            // structural layer, so guessing here would only add noise —
-            // treat it as seen. A symlinked entry point is likewise the
-            // structural layer's finding; claiming it is missing here
-            // would double-report one root cause.
+            // The entry point must exist as a file — a directory named
+            // `deploy.md` does not count. A symlinked or unstatable entry
+            // is the structural layer's, so treat it as seen.
             let entry_point = dir_entries
                 .iter()
                 .find(|e| e.file_name() == *OsStr::new(&entry_name));
@@ -250,8 +225,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             if let Ok(concept) = Concept::from_file(root.join(&entry_rel)) {
                 entry_point_findings(&entry_rel, &concept, &mut findings);
             }
-            // Supporting materials should live under `references/`.
-            // Info only — there is no hardness to check here and overreach
+            // Info only: nothing enforceable — mandating `references/`
             // would penalize legitimate layouts.
             let stray = dir_entries.iter().any(|e| {
                 let n = e.file_name();
@@ -284,16 +258,14 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     findings
 }
 
-/// The entry-point checks on a parsed concept. An untyped concept is
-/// wholly the structural layer's finding, so all checks are skipped for it;
-/// the type check fires only on a present-but-wrong `type`.
+/// The entry-point checks on a parsed concept; untyped concepts are the
+/// structural layer's, so only a present-but-wrong `type` fires here.
 pub(crate) fn entry_point_findings(rel: &Path, concept: &Concept, findings: &mut Vec<Finding>) {
     let Some(ty) = concept.concept_type() else {
         return;
     };
-    // A present-but-empty `type` is "untyped" as far as OKF conformance is
-    // concerned (`is_okf_conformant`): the generic pass already reports it,
-    // so the type check must not double-report.
+    // An empty `type` counts as untyped to `is_okf_conformant`; the generic
+    // pass already reports it, so don't double-report.
     if ty.trim().is_empty() {
         return;
     }
@@ -325,8 +297,7 @@ pub(crate) fn entry_point_findings(rel: &Path, concept: &Concept, findings: &mut
 }
 
 impl Argosy {
-    /// Validates only the `skill/` namespace contract, for
-    /// callers that want a single namespace rather than the full
+    /// Validates only the `skill/` namespace contract, rather than the full
     /// [`Argosy::validate`] report.
     pub fn validate_skills(&self) -> Vec<Finding> {
         validate(self.root())
@@ -383,7 +354,7 @@ mod tests {
         let skills = Skill::list(&argosy).unwrap();
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.contains(&"checklist"));
-        //...but the checklist is still a raw concept of the namespace.
+        // The checklist is still a raw concept of the namespace.
         let concepts = argosy.concepts(&Namespace::Skill).unwrap();
         assert!(
             concepts
@@ -436,8 +407,8 @@ mod tests {
         assert!(validate(&fixture("skill-untyped")).is_empty());
         let report = Argosy::validate(fixture("skill-untyped"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
-        // `skill/` has no generic concept-conformance ID of its own, so the
-        // finding carries none rather than a misleading bundle-level one.
+        // `skill/` has no conformance ID of its own, so the finding carries
+        // none rather than a misleading bundle-level one.
         assert_eq!(ids, vec![None]);
     }
 
@@ -511,7 +482,6 @@ mod tests {
         assert_eq!(validate(bundle.path()), vec![]);
         let report = Argosy::validate(bundle.path());
         let errors: Vec<_> = report.errors().collect();
-        // The generic pass's untyped finding only.
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0].path.as_deref(),
@@ -537,8 +507,7 @@ mod tests {
         assert_eq!(validate(bundle.path()), vec![]);
     }
 
-    /// Symlinked entry points — file-form and directory-form — are not
-    /// skills: reads never follow symlinks, whatever the link points at.
+    /// Symlinked entry points are not skills: reads never follow symlinks.
     #[cfg(unix)]
     #[test]
     fn symlinked_entry_points_are_not_skills() {
@@ -555,13 +524,11 @@ mod tests {
         let skills = Skill::list(&argosy).unwrap();
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["real"]);
-        // The namespace pass stays out of symlink reporting entirely
-        // (the structural layer owns it), so it reports nothing here.
+        // Validation stays silent: symlink reporting belongs to the structural layer.
         assert_eq!(validate(bundle.path()), vec![]);
     }
 
-    /// A symlinked `skill/` namespace reads as absent everywhere:
-    /// validation does not read through the link.
+    /// A symlinked `skill/` namespace reads as absent in validation.
     #[cfg(unix)]
     #[test]
     fn symlinked_skill_namespace_reads_as_absent_in_validation() {

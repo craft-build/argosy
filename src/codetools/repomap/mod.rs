@@ -1,12 +1,5 @@
-//! The `repomap` functionality, vendored from Craft's standalone
-//! `craft-repomap` crate (which had no craft dependencies): a ranked,
-//! token-budgeted map of repository definitions built from a def/ref tag
-//! graph over PageRank.
-//!
-//! Port notes: `lib.rs` became `mod.rs` and gained the MCP-facing `run`
-//! handler plus a `Clone` derive (the caches are `Arc`'d, so clones share
-//! them — exactly what the per-root cache in [`super::CodeTools`] wants).
-//! Everything else is Craft's code verbatim.
+//! The `repomap` tool: a ranked, token-budgeted map of repository definitions
+//! from a def/ref tag graph over PageRank.
 
 pub mod graph;
 pub mod render;
@@ -35,13 +28,11 @@ const MAX_DEFS_BASE: usize = 100;
 pub struct RepomapParams {
     /// Repository root (default: the server's working directory).
     pub path: Option<String>,
-    /// Files the conversation already touched — they seed the PageRank
-    /// personalization (and tighten the token budget).
+    /// Files the conversation already touched; they seed the PageRank personalization.
     pub mentioned_files: Option<Vec<String>>,
     /// Files currently in context; with none, the budget widens ×8.
     pub context_files: Option<Vec<String>>,
-    /// Free-text query (typically the user's last message): identifiers in
-    /// it are extracted and boost matching definitions.
+    /// Free-text query (typically the user's last message) whose identifiers boost definitions.
     pub query: Option<String>,
     /// Maximum tokens for the rendered map (default 1024).
     pub max_tokens: Option<u32>,
@@ -54,8 +45,7 @@ pub struct RepomapParams {
 pub struct RepoMapReport {
     /// The repository root that was mapped (display form).
     pub root: String,
-    /// The rendered map (fenced, grouped by file, ranked), or an
-    /// explanatory note when the repo yielded no tags.
+    /// The rendered map (fenced, grouped by file, ranked), or a note when nothing was tagged.
     pub text: String,
 }
 
@@ -194,9 +184,8 @@ impl RepoMap {
         let defs = graph::top_defs_for_files(&file_tags, &ranked, &mentioned_idents, max_defs);
 
         let budget = if context_files.is_empty() {
-            // `max_tokens` is client-supplied; saturate rather than
-            // overflow (a panic in debug builds, a wrapped near-empty
-            // budget in release).
+            // `max_tokens` is client-supplied (u32::MAX is legal), so the ×8
+            // widening must saturate rather than overflow.
             self.max_tokens.saturating_mul(NO_CONTEXT_MULTIPLIER)
         } else {
             self.max_tokens
@@ -307,8 +296,7 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// `max_tokens` is a client-supplied u32; the ×8 no-context widening
-    /// must saturate instead of overflowing.
+    /// The ×8 no-context widening must saturate: `max_tokens` is client-supplied.
     #[test]
     fn repomap_saturates_token_budget_instead_of_overflowing() {
         let dir = TempDir::new().unwrap();

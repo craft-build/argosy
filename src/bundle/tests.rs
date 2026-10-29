@@ -47,7 +47,6 @@ fn open_valid_fixture_lists_all_reserved_and_custom_namespaces() {
             Namespace::Custom("roadmap".to_string()),
         ]
     );
-    // Reserved namespaces map back to directories; absent handling works.
     assert!(argosy.namespace_dir(&Namespace::Skill).is_some());
     assert!(
         argosy
@@ -75,7 +74,6 @@ fn valid_fixture_is_conformant_with_no_errors() {
 fn unknown_manifest_keys_are_retained_without_findings() {
     let fixture = fixture("valid-acme-billing");
     let argosy = Argosy::open(&fixture).unwrap();
-    // Unknown manifest keys parse fine and are retained.
     assert_eq!(
         argosy
             .manifest()
@@ -248,8 +246,7 @@ fn custom_namespace_rejects_path_traversal() {
     for bad in ["", ".", "..", "../x", "a/b", "a\\b", "a:b"] {
         assert!(Namespace::custom(bad).is_err(), "{bad:?} must be rejected");
     }
-    // Even a directly constructed `Custom` cannot make `namespace_dir`
-    // or `concepts` escape the bundle root.
+    // Even a directly constructed `Custom` cannot escape the bundle root.
     let argosy = Argosy::open(fixture("valid-acme-billing")).unwrap();
     assert!(
         argosy
@@ -264,8 +261,7 @@ fn custom_namespace_rejects_path_traversal() {
     );
 }
 
-/// A symlinked namespace directory must not be entered: listing
-/// pretends it does not exist rather than walking outside the bundle.
+/// Listing pretends a symlinked namespace does not exist.
 #[cfg(unix)]
 #[test]
 fn symlinked_namespace_is_not_entered() {
@@ -291,9 +287,7 @@ fn symlinked_namespace_is_not_entered() {
     assert!(argosy.concepts(&Namespace::Skill).unwrap().is_empty());
 }
 
-/// Reads never follow symlinks: a symlinked concept *file* is skipped by
-/// listing (never ingested from outside the bundle) and reported by
-/// validation, so its invisibility is not silent.
+/// Never ingested from outside the bundle; the skip is reported, not silent.
 #[cfg(unix)]
 #[test]
 fn symlinked_concept_file_is_skipped_and_reported() {
@@ -331,8 +325,7 @@ fn symlinked_concept_file_is_skipped_and_reported() {
     assert!(findings[0].message.contains("symlink"));
 }
 
-/// A symlinked root `argosy.md` must not be read through: `open` refuses
-/// the bundle and `validate` reports STR-2.
+/// `open` refuses it; `validate` reports it as STR-2.
 #[cfg(unix)]
 #[test]
 fn symlinked_root_manifest_is_refused() {
@@ -374,8 +367,8 @@ fn manifest_parse_rejects_missing_name_and_version() {
     assert!(Manifest::parse(&concept).is_err());
 }
 
-/// A name outside the URI charset must fail at parse/open, not surface
-/// later as `argosy://` URIs the resolver rejects.
+/// An unsafe name must fail at parse/open, not surface later as `argosy://`
+/// URIs the resolver rejects.
 #[test]
 fn manifest_parse_rejects_unsafe_name_charset() {
     for bad in ["my bundle", "acme/billing", "ünïcode", ".."] {
@@ -396,9 +389,7 @@ fn manifest_parse_rejects_unsafe_name_charset() {
     assert!(Manifest::parse(&concept).is_ok());
 }
 
-/// `validate` and `open` must agree: a name outside the URI charset
-/// fails to open (STR-5), so `validate` reports it as an error finding
-/// instead of passing a bundle nothing else can use.
+/// `validate` and `open` must agree: what `validate` passes must be openable.
 #[test]
 fn validate_reports_unsafe_manifest_name_as_str5() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,8 +418,7 @@ fn open_reports_bad_manifest_fields_as_not_an_argosy() {
     );
 }
 
-/// A permission-denied subdirectory must not abort validation: the rest
-/// of the checks still run, and the finding names the offending path.
+/// The other checks still run, and the finding names the offending path.
 #[cfg(unix)]
 #[test]
 fn unreadable_subdirectory_is_a_targeted_str1_not_a_root_failure() {

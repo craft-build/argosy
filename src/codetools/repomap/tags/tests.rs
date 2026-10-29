@@ -95,8 +95,7 @@ fn file_path_to_idents_stem_and_parts() {
     assert!(set.contains("bar"));
 }
 
-/// `.tsx`/`.jsx` route to the TSX grammar: plain TypeScript cannot parse
-/// JSX, and error-ridden parses yield broken tags.
+/// `.tsx`/`.jsx` route to the TSX grammar; plain TypeScript cannot parse JSX.
 #[test]
 fn tsx_files_extract_tags_through_the_tsx_grammar() {
     let src = "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title}</div>;\n}\nexport const helper = () => <Card title=\"x\" />;\n";

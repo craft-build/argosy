@@ -1,8 +1,6 @@
-//! The multi-argosy project context: one local (writable) argosy plus any
-//! number of imported (read-only) ones, with qualified identity,
-//! `argosy://` URIs, and precedence-ordered aggregate listings. Imports
-//! are read-only by construction; duplicate names are rejected; v1 URIs
-//! have no percent-encoding — ids outside `[A-Za-z0-9._-/]` error.
+//! The multi-argosy project context: one local (writable) argosy plus
+//! any number of imported (read-only) ones, with qualified identity,
+//! `argosy://` URIs, and precedence-ordered aggregate listings.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,14 +17,11 @@ use crate::local::LocalArgosy;
 use crate::skill::Skill;
 use crate::styleguide::StyleguideRule;
 
-/// The characters an `argosy://` URI body may contain (v1: no
-/// percent-encoding, so this is the identity charset wholesale).
+/// The characters an `argosy://` URI body may contain (v1 has no percent-encoding).
 const URI_CHARSET: &str = "[A-Za-z0-9._-/]";
 
-/// A concept's identity qualified by its argosy: two argosys both
-/// defining `document/architecture.md` are two distinct [`QualifiedConceptId`]s.
-/// The `id` is bundle-relative and includes the namespace prefix, matching
-/// the codebase-wide [`ConceptId`] convention.
+/// A concept's identity qualified by its argosy: two argosys both defining
+/// `document/architecture.md` are two distinct ids.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct QualifiedConceptId {
     /// The owning argosy's manifest name (e.g. `acme-billing`).
@@ -39,18 +34,16 @@ pub struct QualifiedConceptId {
 
 impl QualifiedConceptId {
     /// Formats this identity as an `argosy://<argosy>/<namespace>/<concept-id>`
-    /// URI. The fields are public, so an unrepresentable value cannot be
-    /// rejected here: it will not round-trip through
-    /// [`QualifiedConceptId::from_uri`].
+    /// URI.
+    ///
+    /// The fields are public, so an unrepresentable value will not
+    /// round-trip through [`QualifiedConceptId::from_uri`].
     pub fn to_uri(&self) -> String {
         format!("argosy://{}/{}", self.argosy, self.id)
     }
 
-    /// Parses an `argosy://` URI strictly. Rejects (as
-    /// [`crate::error::Error::InvalidUri`]): a scheme other than `argosy://`;
-    /// fewer than namespace + one concept-id segment; characters outside
-    /// `[A-Za-z0-9._-/]`; a first segment that is not a reserved namespace
-    /// name; or an id [`ConceptId`] itself rejects.
+    /// Parses an `argosy://` URI strictly, rejecting malformed, non-canonical,
+    /// or out-of-charset URIs as [`crate::error::Error::InvalidUri`].
     pub fn from_uri(uri: &str) -> Result<Self> {
         let bad = |reason: &str| {
             InvalidUriSnafu {
@@ -106,8 +99,7 @@ impl QualifiedConceptId {
                 }
                 .build()
             })?;
-        // `path` is `<namespace>/<...>` by construction above, so the id's
-        // first segment already matches the namespace.
+        // `path` begins with the namespace segment, so id and namespace agree.
         Ok(QualifiedConceptId {
             argosy: argosy.to_string(),
             namespace,
@@ -127,21 +119,18 @@ pub enum ArgosyRef<'a> {
 }
 
 /// A skill in an aggregate listing, tagged with its origin argosy and
-/// whether a higher-precedence argosy shadows it under the same name
-/// (losers are annotated, never silently dropped).
+/// whether a higher-precedence argosy shadows it under the same name.
 #[derive(Debug, Clone)]
 pub struct SkillListing {
     /// The manifest name of the argosy providing this skill.
     pub argosy: String,
     /// The skill itself.
     pub skill: Skill,
-    /// True iff another argosy earlier in precedence order provides a skill
-    /// with the same name; this listing would lose a `resolve_skill` lookup.
+    /// True iff an earlier argosy shadows this skill in `resolve_skill`.
     pub shadowed: bool,
 }
 
-/// A styleguide rule in an aggregate listing, tagged with its origin argosy
-/// (rules combine across argosys, never replace).
+/// A styleguide rule in an aggregate listing, tagged with its origin argosy.
 #[derive(Debug, Clone)]
 pub struct RuleListing {
     /// The manifest name of the argosy providing this rule.
@@ -150,13 +139,12 @@ pub struct RuleListing {
     pub rule: StyleguideRule,
 }
 
-/// An import refused at open: its integrity sidecar
+/// An import refused at open because its integrity sidecar
 /// ([`crate::package::INTEGRITY_FILENAME`]) disagreed with the checkout's
-/// contents, so it was tampered with after packaging. An excluded import is
-/// never served — none of its concepts, skills or rules are visible — which
-/// is why the exclusion is recorded rather than swallowed: surfaces such as
-/// the `argosy://_argosys` listing report it so the missing content is
-/// investigated instead of silently lost.
+/// contents.
+///
+/// Never served, but recorded rather than swallowed so surfaces can report
+/// the excluded content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcludedImport {
     /// Best-effort identity of the refused checkout: its directory name
@@ -167,29 +155,24 @@ pub struct ExcludedImport {
 }
 
 /// The active argosys of a project: exactly one local (writable) argosy and
-/// any number of imported (read-only) ones. The composition rules live here
-/// as enforced behavior; see the module docs.
+/// any number of imported (read-only) ones.
 #[derive(Debug)]
 pub struct ProjectContext {
     local: LocalArgosy,
     imported: Vec<Argosy>,
     excluded: Vec<ExcludedImport>,
     /// The git commit each import's checkout resolved to at open (by
-    /// manifest name — [`ProjectContext::import_commit`]): the provenance
-    /// hits and reads report for imported content. Checkouts without git
-    /// metadata have no entry.
+    /// manifest name — [`ProjectContext::import_commit`]); checkouts
+    /// without git metadata have no entry.
     import_commits: HashMap<String, String>,
 }
 
 impl ProjectContext {
-    /// Opens the local argosy plus every imported one, in registration
-    /// order. An import that ships an integrity sidecar is verified first:
-    /// one whose contents disagree with the sidecar is *excluded* (recorded
-    /// via [`ProjectContext::excluded_imports`], never served) rather than
-    /// failing the whole open — the local book and the healthy imports
-    /// stay usable. Fails if any surviving argosy fails to open or if two
-    /// share a manifest name — erroring at open keeps identity-by-name
-    /// unambiguous.
+    /// Opens the local argosy plus every imported one, in registration order.
+    ///
+    /// An import whose integrity sidecar disagrees with its contents is
+    /// excluded (see [`ProjectContext::excluded_imports`]) so the healthy
+    /// argosys still open; duplicate manifest names are an error.
     pub fn open(
         local_path: impl AsRef<Path>,
         imported_paths: impl IntoIterator<Item = PathBuf>,
@@ -199,10 +182,6 @@ impl ProjectContext {
         let mut excluded = Vec::new();
         let mut import_commits = HashMap::new();
         for path in imported_paths {
-            // Integrity first: a pulled checkout is verified against its
-            // pull-time stamp (sidecar present, unchanged, and still
-            // covering the contents). `Err` means tampered — *excluded*,
-            // never served — while the rest of the context still opens.
             // Books without a stamp (pre-stamp checkouts, hosts pointing
             // at arbitrary trees) keep the standing rule: a present
             // sidecar is verified, an absent one was never packaged (a
@@ -215,8 +194,7 @@ impl ProjectContext {
                 continue;
             }
             let argosy = Argosy::open(&path)?;
-            // File-read git provenance (no subprocess per open): what a
-            // hit or read reports as this import's source commit.
+            // File-read git provenance; no subprocess per open.
             if let Some(commit) = crate::pull::checkout_head_commit(&path) {
                 import_commits.insert(argosy.manifest().name().to_string(), commit);
             }
@@ -247,35 +225,29 @@ impl ProjectContext {
         })
     }
 
-    /// The local argosy with its full write surface. The only mutable
-    /// accessor: imports are strictly read-only, including any `memory/`
-    /// directory they happen to contain.
+    /// The local argosy with its full write surface.
+    ///
+    /// The only write-bearing accessor: imports are read-only, including
+    /// any `memory/` directory they happen to contain.
     pub fn local(&self) -> &LocalArgosy {
         &self.local
     }
 
-    /// Opens the standard argosy set of a project: the local bundle,
-    /// pulled checkouts under the project's state-dir slot
-    /// ([`crate::pull::project_argosy_dir`]), then the global store.
-    /// Manifest-less directories and `index.db` are skipped; duplicates
-    /// hard-fail; a missing `default` points at `argosy init`.
+    /// Opens the standard argosy set of a project: the local bundle, the
+    /// project's pulled checkouts ([`crate::pull::project_argosy_dir`]),
+    /// then the global store.
     pub fn open_project(project_root: impl AsRef<Path>) -> Result<Self> {
         let state = crate::pull::state_dir()?;
         Self::open_project_with_state(project_root, &state)
     }
 
-    /// [`Self::open_project`] with an explicit state root (hosts and
-    /// tests inject a tempdir instead of touching `~/.local/state`): the
-    /// project's checkouts come from `<state_root>/projects/<slug>`, the
-    /// globals from `<state_root>/global`.
+    /// [`Self::open_project`] with an explicit state root, so hosts and
+    /// tests inject a tempdir instead of touching `~/.local/state`.
     pub fn open_project_with_state(
         project_root: impl AsRef<Path>,
         state_root: &Path,
     ) -> Result<Self> {
         let project_dir = crate::pull::project_argosy_dir_at(state_root, project_root);
-        // Everything under the project's state dir that is a bundle (a
-        // directory holding `argosy.md`), in sorted order, minus the
-        // local checkout.
         let mut imported = Vec::new();
         collect_checkouts(
             &project_dir,
@@ -305,25 +277,19 @@ impl ProjectContext {
         self.imported.iter()
     }
 
-    /// The git commit an imported argosy's checkout resolved to at open —
-    /// the provenance surfaced on hits and reads of its content. `None`
-    /// for the local book, unknown names, and checkouts without git
-    /// metadata (hosts pointing at plain trees).
+    /// The git commit an import's checkout resolved to at open, or `None`
+    /// for the local book, unknown names, and git-less checkouts.
     pub fn import_commit(&self, name: &str) -> Option<&str> {
         self.import_commits.get(name).map(String::as_str)
     }
 
-    /// Imports refused at open because their integrity sidecar disagreed
-    /// with the checkout's contents (see [`ExcludedImport`]). Empty for a
-    /// healthy context.
+    /// The imports refused at open; see [`ExcludedImport`].
     pub fn excluded_imports(&self) -> &[ExcludedImport] {
         &self.excluded
     }
 
     /// Finds an active argosy by manifest name — the local one first, then
-    /// the imported ones in registration order. Names are unique (enforced
-    /// at [`ProjectContext::open`]), so the search order cannot matter; it
-    /// just short-circuits.
+    /// the imported ones in registration order.
     pub fn argosy_named(&self, name: &str) -> Option<ArgosyRef<'_>> {
         if self.local.manifest().name() == name {
             return Some(ArgosyRef::Local(&self.local));
@@ -334,11 +300,10 @@ impl ProjectContext {
             .map(ArgosyRef::Imported)
     }
 
-    /// Resolves a qualified id to the concept in that argosy: reads the
-    /// file at the id's bundle-relative path. Errors:
-    /// [`crate::error::Error::UnknownArgosy`] or
-    /// [`crate::error::Error::ConceptNotFound`]. A defensive check refuses
-    /// an id outside its namespace; symlinks are never followed.
+    /// Resolves a qualified id to its concept, reading the file at the id's
+    /// bundle-relative path.
+    ///
+    /// Refuses ids outside their namespace; symlinks are never followed.
     pub fn resolve(&self, qid: &QualifiedConceptId) -> Result<Concept> {
         let first = qid.id.as_str().split('/').next().unwrap_or_default();
         ensure!(
@@ -362,8 +327,7 @@ impl ProjectContext {
             }
         };
         let not_found = || crate::error::ConceptNotFoundSnafu { id: qid.id.clone() }.fail();
-        // A symlinked (or absent) namespace directory is treated as absent
-        // crate-wide (`Argosy::namespace_dir`); honor that here.
+        // A symlinked namespace dir counts as absent crate-wide (`Argosy::namespace_dir`).
         if argosy.namespace_dir(&qid.namespace).is_none() {
             return not_found();
         }
@@ -401,9 +365,8 @@ impl ProjectContext {
     }
 
     /// Lists every skill across all active argosys in precedence order,
-    /// each tagged with its origin argosy. Collisions annotate
-    /// rather than drop: every skill whose `name` already appeared earlier
-    /// in precedence order is flagged [`SkillListing::shadowed`].
+    /// each tagged with its origin argosy. Name collisions are flagged
+    /// [`SkillListing::shadowed`] rather than dropped.
     pub fn list_skills(&self) -> Result<Vec<SkillListing>> {
         let mut listings = Vec::new();
         for (name, argosy) in self.in_precedence_order() {
@@ -424,11 +387,9 @@ impl ProjectContext {
         Ok(listings)
     }
 
-    /// The highest-precedence skill of that name: the local argosy wins over
-    /// every import, an earlier import over a later one — the first matching
-    /// entry of [`ProjectContext::list_skills`]. Returned by value: a borrow
-    /// is not expressible without a listing cache, and a cache would go
-    /// stale on writes through [`ProjectContext::local`].
+    /// The highest-precedence skill of that name: the first matching entry
+    /// of [`ProjectContext::list_skills`]. Returned by value — a cache
+    /// would go stale on writes through [`ProjectContext::local`].
     pub fn resolve_skill(&self, name: &str) -> Result<Option<SkillListing>> {
         Ok(self
             .list_skills()?
@@ -436,11 +397,12 @@ impl ProjectContext {
             .find(|listing| listing.skill.name == name))
     }
 
-    /// Lists styleguide rules across all active argosys in precedence order
-    /// (combined, never replaced), each tagged with its origin argosy and
-    /// narrowed by exact facet matches via [`StyleguideRule::filter`]
-    /// (`None` = no constraint). These filesystem-level listings are the
-    /// ground truth the semantic index must match.
+    /// Lists styleguide rules across all active argosys (combined, never
+    /// replaced), narrowed by exact facet matches via [`StyleguideRule::filter`]
+    /// (`None` = no constraint).
+    ///
+    /// These filesystem-level listings are the ground truth the semantic
+    /// index must match.
     pub fn list_rules(
         &self,
         language: Option<&str>,
@@ -460,8 +422,7 @@ impl ProjectContext {
 }
 
 /// Best-effort identity of an excluded import for surfacing: the
-/// checkout's directory name (a state-dir checkout is named after the
-/// `argosy pull`), or the whole path when it has no file name.
+/// checkout's directory name, or the whole path when it has no file name.
 fn checkout_label(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -469,10 +430,9 @@ fn checkout_label(path: &Path) -> String {
 }
 
 /// Appends the bundle checkouts directly under `dir`: every subdirectory
-/// holding `argosy.md`, in sorted order for a deterministic precedence, not
-/// following symlinks (consistent with the bundle walk's policy). `skip`
-/// excludes one checkout name (the local `default`, visited separately).
-/// Missing or unreadable `dir` means "no argosies here", not an error.
+/// holding `argosy.md`, sorted for deterministic precedence, never
+/// following symlinks. `skip` excludes one checkout name. A missing or
+/// unreadable `dir` means "no argosies here", not an error.
 fn collect_checkouts(dir: &Path, skip: Option<&str>, out: &mut Vec<PathBuf>) {
     let Ok(mut entries) = std::fs::read_dir(dir).map(|rd| rd.flatten().collect::<Vec<_>>()) else {
         return;
@@ -485,7 +445,7 @@ fn collect_checkouts(dir: &Path, skip: Option<&str>, out: &mut Vec<PathBuf>) {
         }
         let Ok(ty) = entry.file_type() else { continue };
         if !ty.is_dir() {
-            continue; // e.g. the derived `index.db` — never a checkout
+            continue;
         }
         let path = entry.path();
         if path.join("argosy.md").is_file() {

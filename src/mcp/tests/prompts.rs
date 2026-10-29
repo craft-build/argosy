@@ -94,7 +94,6 @@ fn get_prompt_result_scan_names_the_core_documents_and_write_tools() {
             for tool in ["search", "read_memory", "write_document", "delete_document"] {
                 assert!(text.text.contains(tool), "scan prompt must name `{tool}`");
             }
-            // The core document set the workflow promises.
             for path in [
                 "document/summary",
                 "document/architecture",

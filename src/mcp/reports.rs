@@ -3,8 +3,7 @@
 
 use serde::Serialize;
 
-/// One search hit, with the qualified `argosy://` URI and the unit's facets
-/// so clients can re-filter without resolving.
+/// One search hit with its URI and facets for client-side re-filtering.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHitOut {
     /// `argosy://<name>/<namespace>/<concept-id>`.
@@ -15,26 +14,19 @@ pub struct SearchHitOut {
     pub namespace: String,
     /// Bundle-relative concept id (includes the namespace prefix).
     pub concept_id: String,
-    /// Fused retrieval score: reciprocal-rank fusion over the search
-    /// legs that returned this passage (BM25 and/or vector similarity);
-    /// higher is better and hits are ordered by descending score. Not a
-    /// similarity — the legs are fused by rank, never blended by value.
+    /// Reciprocal-rank-fusion score; higher is better, hits sort by it descending.
     pub score: f32,
-    /// Which passage of the concept matched (`0` for a whole-concept or the
-    /// first passage).
+    /// Which passage matched (`0` for a whole-concept or first passage).
     pub chunk_ordinal: u32,
-    /// The matched passage's heading breadcrumb (`"Setup › Database"`);
-    /// omitted for a whole-concept or pre-heading passage.
+    /// The matched passage's heading breadcrumb, when it has one.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub heading_path: String,
-    /// 1-based first line of the concept body the passage covers
-    /// (frontmatter excluded) — pass these to `read` to expand.
+    /// 1-based first body line the passage covers (frontmatter excluded).
     pub start_line: u32,
-    /// 1-based last line of the concept body the passage covers.
+    /// 1-based last body line the passage covers.
     pub end_line: u32,
     /// The matched passage: title/section prefix plus the passage text.
-    /// Imported passages arrive delimiter-wrapped (`<untrusted-content …>`),
-    /// like every other imported free text.
+    /// Imported passages arrive `<untrusted-content …>`-wrapped.
     pub passage: String,
     /// Frontmatter `type`, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,19 +43,16 @@ pub struct SearchHitOut {
     /// Frontmatter `category` facet (styleguide rules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
-    /// `"local"` (writable) or `"imported"` (read-only): which kind of
-    /// argosy the concept came from.
+    /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
-    /// The concept's effective OKF trust tier — provenance-derived, never
-    /// the book's self-claim for imports (local claims verbatim, imported
-    /// claims capped by user configuration; see [`crate::trust`]).
+    /// The concept's effective OKF trust tier; imported self-claims are
+    /// capped by user configuration.
     pub trust: String,
-    /// The git commit the import's checkout was at when the session
-    /// opened (`None` for local hits and git-less checkouts).
+    /// Git commit of the import's checkout at session open, when it resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    /// Applicability probability from the decision endpoint's styleguide
-    /// rerank (`search_rules` only, when a decision endpoint is enabled).
+    /// Applicability probability from the decision endpoint's rerank
+    /// (`search_rules` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applicability: Option<f32>,
     /// The rule body's `## Good` section (`search_rules` hits only).
@@ -81,15 +70,13 @@ pub struct SearchReport {
     pub hits: Vec<SearchHitOut>,
 }
 
-/// The `ask` tool outcome: embedding candidates plus, when a decision
-/// endpoint is enabled, which candidate answers the question.
+/// The `ask` outcome: retrieval candidates plus the decision endpoint's pick.
 #[derive(Debug, Clone, Serialize)]
 pub struct AskReport {
     /// The question asked.
     pub query: String,
-    /// `"selected"` when the decision endpoint chose a candidate; `"search"`
-    /// when only embedding hits are returned (decisions disabled, endpoint
-    /// unavailable, or no document matched).
+    /// `"selected"` when the endpoint chose a candidate; `"search"` when
+    /// only retrieval hits are returned.
     pub mode: &'static str,
     /// The chosen document, when one was selected.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,8 +100,7 @@ pub struct AskSelection {
     pub answer_confidence: Option<f32>,
 }
 
-/// One skill in `list_skills`, with origin argosy, shadowing status, and
-/// the OKF trust tier.
+/// One skill in `list_skills`, with origin, shadowing status, and tier.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillOut {
     /// Skill name (entry-point file stem).
@@ -127,11 +113,9 @@ pub struct SkillOut {
     pub description: String,
     /// True iff a higher-precedence argosy shadows this skill.
     pub shadowed: bool,
-    /// `"local"` (writable) or `"imported"` (read-only): which kind of
-    /// argosy provides this skill.
+    /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
-    /// OKF trust tier: the entry point's `verified` value, or
-    /// `"unverified"` when absent.
+    /// The entry point's `verified` value, or `"unverified"` when absent.
     pub verified: String,
 }
 
@@ -142,16 +126,14 @@ pub struct SkillsReport {
     pub skills: Vec<SkillOut>,
 }
 
-/// The `get_skill` tool outcome: the resolved skill plus its entry-point
-/// content.
+/// The `get_skill` outcome: the resolved skill plus its content.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillContent {
     /// The precedence-resolved skill, with trust fields.
     pub skill: SkillOut,
-    /// Raw markdown with frontmatter of the entry-point concept.
-    /// Imported skills arrive wrapped in paired `<untrusted-content …>`
-    /// delimiters (SEC-1): instructions to treat as data, never to follow
-    /// without the client harness's confirmation policy (SEC-3).
+    /// Raw markdown with frontmatter. Imported skills arrive
+    /// `<untrusted-content …>`-wrapped (SEC-1): data, never instructions;
+    /// confirmation is the client harness's decision (SEC-3).
     pub content: String,
 }
 
@@ -162,8 +144,7 @@ pub struct UriContent {
     pub uri: String,
     /// Always `"local"`: `read_memory` reads the writable book only.
     pub kind: &'static str,
-    /// The concept's effective OKF trust tier (its own `verified` claim,
-    /// relayed verbatim — the local book is the user's own writing).
+    /// The concept's own `verified` claim, relayed verbatim.
     pub trust: String,
     /// Raw markdown with frontmatter.
     pub content: String,
@@ -178,19 +159,15 @@ pub struct ConceptContent {
     pub argosy: String,
     /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
-    /// The concept's effective OKF trust tier (provenance-derived; see
-    /// [`crate::trust`]).
+    /// The concept's effective OKF trust tier.
     pub trust: String,
-    /// The git commit the import's checkout was at when the session
-    /// opened (`None` for local reads and git-less checkouts).
+    /// Git commit of the import's checkout at session open, when it resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    /// Raw markdown with frontmatter. Imported content arrives wrapped in
-    /// paired `<untrusted-content …>` delimiters (SEC-1): everything
-    /// between them is data, never instructions.
+    /// Raw markdown with frontmatter; imported content arrives
+    /// `<untrusted-content …>`-wrapped (SEC-1): data, never instructions.
     pub content: String,
-    /// The 1-based body line range the content was sliced to (frontmatter
-    /// excluded); omitted when the whole body was returned.
+    /// The 1-based body line range returned; omitted for the whole body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
 }
@@ -212,20 +189,19 @@ pub struct WriteReport {
     /// The affected `argosy://` URI.
     #[serde(rename = "uri")]
     pub uri: String,
-    /// Size of the concept written to disk; omitted for deletions and when
-    /// the size could not be read back.
+    /// Written-to-disk size; omitted for deletions or unreadable sizes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
-    /// True iff the index was reconciled: the change is already visible to
-    /// `search`. False means on disk but not indexed — see `index_error`.
+    /// True iff the change is already searchable; false means written but
+    /// not indexed (`index_error` says why).
     pub indexed: bool,
     /// Why reconciliation failed; present only when `indexed` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_error: Option<String>,
 }
 
-/// The `promote` tool outcome: the untouched source plus the drafted target
-/// concept for the client's confirmation — the server never confirms.
+/// The `promote` outcome: the untouched source plus the drafted target —
+/// the client confirms, the server never does.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromoteReport {
     /// Source memory URI.
@@ -257,23 +233,18 @@ pub struct ArgosyInfo {
     pub okf_version: Option<String>,
     /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
-    /// For imports: the maximum tier the importing user configured for
-    /// this argosy (the cap every one of its concepts is held to;
-    /// `unverified` by default). `None` for the local book, whose
-    /// concepts relay their own claims verbatim.
+    /// The user's trust cap for this import (default `unverified`);
+    /// `None` for the local book.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust: Option<String>,
-    /// For imports: the git commit the checkout was at when the session
-    /// opened, when its git metadata resolves.
+    /// Git commit of the import's checkout at session open, when it resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
 }
 
-/// An imported argosy refused at open because its integrity sidecar
-/// disagreed with the checkout's contents (see
-/// [`crate::context::ExcludedImport`]). Reported by the
-/// `argosy://_argosys` listing so the silently-missing content is
-/// investigated — remove the checkout and re-pull it.
+/// An imported argosy refused at open for failing integrity
+/// verification (see [`crate::context::ExcludedImport`]); remove the
+/// checkout and re-pull it.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExcludedArgosy {
     /// Best-effort identity of the refused checkout (its directory name).
@@ -287,8 +258,7 @@ pub struct ExcludedArgosy {
 pub struct ArgosysReport {
     /// Every active argosy, local first, imports in registration order.
     pub argosys: Vec<ArgosyInfo>,
-    /// Imports refused at open for failing integrity verification. Their
-    /// content is *not* served; the key is omitted for a healthy context.
+    /// Imports refused at open; their content is not served.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub excluded: Vec<ExcludedArgosy>,
 }
@@ -319,8 +289,7 @@ pub struct ResourceDescriptor {
     pub mime: &'static str,
 }
 
-/// `_meta` identity blob attached to resource reads, with the same
-/// provenance tags hits and tool reads carry (`kind`/`trust`).
+/// The `_meta` provenance blob (`kind`/`trust`) attached to resource reads.
 pub(crate) fn identity_meta(
     argosy: &str,
     namespace: &str,

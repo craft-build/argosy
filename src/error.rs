@@ -6,8 +6,7 @@ use snafu::Snafu;
 
 use crate::concept::ConceptId;
 
-/// All errors argosy can produce. Marked `#[non_exhaustive]`: later layers
-/// (bundles, indexing, packaging) add variants without breaking matches.
+/// All errors argosy can produce.
 #[non_exhaustive]
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -36,7 +35,7 @@ pub enum Error {
     ))]
     MissingFrontmatter { path: Option<PathBuf> },
 
-    /// A required frontmatter field was absent. The field name is included.
+    /// A required frontmatter field was absent.
     #[snafu(display(
         "missing required field `{field}`{}",
         path.as_ref().map(|p| format!(" in `{}`", p.display())).unwrap_or_default()
@@ -51,22 +50,23 @@ pub enum Error {
     Validation { reason: String },
 
     /// The user-level BarkML configuration could not be read or parsed.
-    ///
-    /// `barkml::Error` is large; it is boxed to keep `Error` small.
     #[snafu(display("failed to load configuration: {source}"))]
     Config {
         #[snafu(source(from(barkml::Error, Box::new)))]
         source: Box<barkml::Error>,
     },
 
-    /// Serving infrastructure failed (async runtime startup, transport
-    /// handshake, serve loop) — distinct from validation so callers can
-    /// tell "bad input" from "the server could not run".
+    /// Serving infrastructure failed (async runtime startup, transport handshake,
+    /// serve loop).
+    ///
+    /// Distinct from validation so callers can tell "bad input" from "the server
+    /// could not run".
     #[snafu(display("transport error: {reason}"))]
     Transport { reason: String },
 
-    /// A write or promotion targeted a concept id that already exists; the
-    /// library never overwrites silently except through the deliberate
+    /// A write or promotion targeted a concept id that already exists.
+    ///
+    /// The library never overwrites silently except through the deliberate
     /// `write_concept` edit path.
     #[snafu(display("concept `{id}` already exists"))]
     ConceptExists { id: ConceptId },
@@ -75,77 +75,67 @@ pub enum Error {
     #[snafu(display("concept `{id}` does not exist"))]
     ConceptNotFound { id: ConceptId },
 
-    /// A write targeted a filename reserved by the bundle format
-    /// `argosy.md`, `index.md`, `log.md`).
+    /// A write targeted a filename reserved by the bundle format.
     #[snafu(display(
         "`argosy.md`, `index.md`, and `log.md` are reserved filenames and cannot be write targets"
     ))]
     ReservedFilename,
 
-    /// A write violated the target namespace's hard contract
-    /// when a `styleguide/` concept lacks `type: Styleguide Rule`).
+    /// A write violated the target namespace's hard contract.
     #[snafu(display("namespace contract violation ({requirement}): {detail}"))]
     NamespaceContractViolation {
         requirement: &'static str,
         detail: String,
     },
 
-    /// A path could not be opened as an argosy bundle root (`Argosy::open`'s
-    /// hard failures: not a directory, or no parseable `Argosy Manifest`
-    /// concept at `argosy.md`).
+    /// A path could not be opened as an argosy bundle root (not a
+    /// directory, or no parseable `Argosy Manifest` at `argosy.md`).
     #[snafu(display("`{}` is not an openable argosy bundle: {reason}", path.display()))]
     NotAnArgosy { path: PathBuf, reason: String },
 
-    /// A project context activated two argosys with the same manifest name
-    /// (identity by name must be unambiguous). The colliding name is
-    /// included.
+    /// A project context activated two argosys with the same manifest name.
     #[snafu(display(
         "duplicate argosy name `{name}`: every active argosy must have a distinct manifest name (MUL-5)"
     ))]
     DuplicateArgosyName { name: String },
 
-    /// A qualified lookup named an argosy that is not active in the project
-    /// context (neither the local argosy nor any imported one).
+    /// A qualified lookup named an argosy that is not active in the project context.
     #[snafu(display("no active argosy named `{name}`"))]
     UnknownArgosy { name: String },
 
-    /// An `argosy://` URI failed strict parsing (wrong scheme, missing
-    /// segments, non-reserved namespace, or out-of-charset id).
+    /// An `argosy://` URI failed strict parsing.
     #[snafu(display("invalid argosy URI `{uri}`: {reason}"))]
     InvalidUri { uri: String, reason: String },
 
     /// An embedding provider or vector store could not carry out an index
-    /// operation (embed, upsert, search,...); the reason names the failing
-    /// backend and operation.
+    /// operation (embed, upsert, search, ...).
     #[snafu(display("index operation failed: {reason}"))]
     Index { reason: String },
 
     /// The default embedding provider failed to initialize the local model
-    /// (including the first-run download) or to embed a batch; the reason
-    /// carries the underlying tract/hf-hub/tokenizer error message.
+    /// (including the first-run download) or to embed a batch.
     #[cfg(feature = "default-index")]
     #[snafu(display("embedding model failed: {reason}"))]
     Embedding { reason: String },
 
     /// A Jev-compatible decision-provider call failed: no endpoint is
     /// enabled, the endpoint is unreachable, or it returned an unexpected
-    /// response. The reason names the endpoint and the failure so the caller
-    /// can act (start `laya-serve`, fix `decision.endpoint`, disable it).
+    /// response.
     #[snafu(display("decision provider failed: {reason}"))]
     Decision { reason: String },
 
     /// A bundle file was a symlink whose resolved target escapes the bundle
-    /// root. Packaging refuses to follow it (the same root-containment
-    /// rule as the readers): materializing it would smuggle outside content
-    /// into the distributed artifact.
+    /// root.
+    ///
+    /// Packaging refuses to follow it: materializing it would smuggle
+    /// outside content into the distributed artifact.
     #[snafu(display(
         "symlink `{}` escapes the bundle root and cannot be packaged",
         path.display()
     ))]
     SymlinkEscape { path: PathBuf },
 
-    /// Recomputing a bundle's integrity sidecar disagreed with what
-    /// is on disk (missing sidecar, missing file, or hash mismatch).
+    /// Recomputing a bundle's integrity sidecar disagreed with what is on disk.
     #[snafu(display("integrity check failed for `{}`: {reason}", path.display()))]
     IntegrityMismatch { path: PathBuf, reason: String },
 
@@ -173,10 +163,7 @@ pub enum Error {
         source: std::string::FromUtf8Error,
     },
 
-    /// A code-intelligence tool (`outline`, `zoom`, `astgrep`, `conflicts`,
-    /// `inspect`, `callgraph`, `repomap`, review) failed on caller input: an
-    /// unsupported language, an ambiguous symbol, a stale read, an invalid
-    /// pattern. The message is phrased for an LLM caller to act on.
+    /// A code-intelligence tool failed on caller input.
     #[cfg(feature = "code-tools")]
     #[snafu(display("{message}"))]
     CodeTool { message: String },

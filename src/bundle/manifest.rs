@@ -26,8 +26,7 @@ impl Manifest {
     /// The `type` value a root `argosy.md` must declare.
     pub const TYPE: &'static str = "Argosy Manifest";
 
-    /// Frontmatter keys the manifest consumes; everything else lands in
-    /// [`Manifest::extra`].
+    /// Frontmatter keys the manifest consumes; everything else lands in [`Manifest::extra`].
     const KNOWN_KEYS: [&'static str; 5] = [
         "type",
         "name",
@@ -36,11 +35,10 @@ impl Manifest {
         "description",
     ];
 
-    /// Builds a manifest from the parsed root concept. Fails if `name` is
-    /// missing/empty or outside the URI charset `[A-Za-z0-9._-]` (the name
-    /// appears in `argosy://` URIs — a name the resolver would reject must
-    /// fail at open, not at first use), or if `argosy_version` is
-    /// missing/malformed.
+    /// Builds a manifest from the parsed root concept.
+    ///
+    /// Fails if `name` is missing/empty or outside the URI charset `[A-Za-z0-9._-]`
+    /// (it appears in `argosy://` URIs), or if `argosy_version` is missing/malformed.
     pub fn parse(concept: &Concept) -> Result<Self> {
         let name = concept
             .get_str("name")
@@ -122,15 +120,13 @@ impl Manifest {
 }
 
 /// True iff `name` is a single safe path component — never empty, `.`/`..`,
-/// or containing separators — so joining it under the bundle root cannot
-/// traverse out of the bundle.
+/// or separators — so joining it cannot traverse out of the bundle.
 pub(super) fn is_safe_component(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':'])
 }
 
-/// True iff `name` is a usable manifest/checkout name: the URI charset
-/// `[A-Za-z0-9._-]` (the manifest name appears in `argosy://` URIs), never
-/// empty or a `.`/`..` component.
+/// True iff `name` is a usable manifest name — within the URI charset
+/// `[A-Za-z0-9._-]` (needed for `argosy://` URIs) — and never `.`/`..`.
 pub(crate) fn is_safe_bundle_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -140,25 +136,17 @@ pub(crate) fn is_safe_bundle_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// True iff `path` is a real directory. `symlink_metadata` (not `is_dir`) is
-/// used so a symlink pointing outside the bundle is refused — entering a
-/// namespace through a symlink would bypass the walk's no-follow policy and
-/// let bundle content live outside the bundle root.
+/// True iff `path` is a real directory, so a symlink pointing outside the bundle is refused.
 pub(crate) fn is_real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
 }
 
-/// True iff `path` is a real file. `symlink_metadata` (not `is_file`) is
-/// used so a concept can never be read through a symlink — the walk's
-/// no-follow policy must hold for files too, or a symlinked concept would
-/// let bundle content live outside (or outside content leak into) the
-/// bundle root.
+/// True iff `path` is a real file, so a concept can never be read through a symlink.
 pub(crate) fn is_real_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
-/// Extracts a string-ish scalar, tolerating unquoted YAML numbers/bools (an
-/// unquoted `okf_version: 0.2` parses as a number, yet is read as `"0.2"`).
+/// Extracts a string-ish scalar, tolerating unquoted YAML numbers/bools.
 pub(super) fn scalar_str(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),

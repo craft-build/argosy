@@ -1,40 +1,17 @@
-//! Fitting decision requests to an endpoint's context window.
+//! Fitting decision requests to an endpoint's small context window.
 //!
-//! The Jev family runs small context windows — laya's shipped checkpoints
-//! read 512 tokens (`english`), 1024 (`multilingual`, `typed-decisions`),
-//! or up to 8192 (`laya-multilingual` with `max_len=8192`) — and an
-//! over-budget request is either rejected or silently cut, potentially
-//! past the questions it carries. argosy cannot know the serving
-//! checkpoint's exact limit, so it fits each request to a configurable
-//! token *estimate* before sending:
-//! [`crate::config::DecisionConfig::max_input_tokens`].
-//!
-//! Token counts are a heuristic, not a tokenizer: roughly 3 characters per
-//! token for Latin-script text (JSON, code, and URIs tokenize denser than
-//! prose) and one per CJK character, whitespace-free. Over-budget requests
-//! are trimmed longest-field-first — the bulk carriers (a question, the
-//! code under review, a diff hunk, rule examples) shed tokens before
-//! anything short is touched — and every cut is marked in place so the
-//! endpoint can see that content was dropped. Object keys (question names,
-//! option labels) are counted but never rewritten: answers map back onto
-//! them, so trimming a key would corrupt the response. Fitting never
-//! fails; when the untrimmable overhead alone exceeds the budget the
-//! request still goes out, matching the decision layer's fail-open
-//! philosophy.
+//! Token counts are a heuristic; keys are never rewritten (answers map back
+//! onto them), and fitting never fails.
 
-/// Conservative characters-per-token for Latin-script payload text. The
-/// repomap renderer uses 4 for prose; decision payloads mix in JSON
-/// syntax, code, and URIs, which tokenize denser.
+/// Conservative characters-per-token for Latin-script payload text; JSON,
+/// code, and URIs tokenize denser than prose.
 const CHARS_PER_TOKEN: usize = 3;
 
-/// Fields at or below this many estimated tokens are never trimmed: the
-/// in-place cut marker costs a handful of tokens itself, so shrinking a
-/// short field gains nothing.
+/// Fields at or below this many estimated tokens are never trimmed; the cut
+/// marker costs tokens itself.
 const MIN_FIELD_TOKENS: usize = 16;
 
-/// Whether a character tokenizes at roughly one token per character
-/// (CJK scripts and fullwidth punctuation on laya's multilingual
-/// checkpoint).
+/// Whether a character tokenizes at roughly one token per character.
 fn is_dense(ch: char) -> bool {
     matches!(
         ch,
@@ -49,9 +26,7 @@ fn is_dense(ch: char) -> bool {
     )
 }
 
-/// Estimated token count of `text`: dense-script characters count one
-/// each, everything else roughly `CHARS_PER_TOKEN` per character,
-/// whitespace-free.
+/// Estimated token count of `text`.
 pub(crate) fn estimate_tokens(text: &str) -> usize {
     let mut dense = 0usize;
     let mut plain = 0usize;
@@ -68,9 +43,8 @@ pub(crate) fn estimate_tokens(text: &str) -> usize {
     dense + plain.div_ceil(CHARS_PER_TOKEN)
 }
 
-/// `text` with head and tail kept and the middle replaced by a marker
-/// stating how many characters were cut. Head-heavy (60/40) because the
-/// start of a state usually carries more signal than its end.
+/// `text` with head and tail kept and the middle replaced by a cut marker;
+/// head-heavy because the start of a state carries more signal.
 fn head_tail(text: &str, allowance_chars: usize) -> String {
     let total = text.chars().count();
     if total <= allowance_chars {
@@ -84,15 +58,14 @@ fn head_tail(text: &str, allowance_chars: usize) -> String {
     format!("{head_str} […{cut} chars cut…] {tail_str}")
 }
 
-/// Trims `text` to at most `max_tokens` (estimated), keeping its head and
-/// tail and marking the cut. Text that already fits is returned unchanged.
+/// Trims `text` to at most `max_tokens` (estimated), marking the cut; text
+/// that fits is returned unchanged.
 pub(crate) fn fit_text(text: &str, max_tokens: usize) -> String {
     if estimate_tokens(text) <= max_tokens {
         return text.to_string();
     }
-    // The marker costs tokens too, and dense scripts break the
-    // chars-per-token arithmetic, so propose a character allowance and
-    // shrink it until the estimate actually fits.
+    // The marker costs tokens too and dense scripts break the chars-per-token
+    // arithmetic, so shrink the allowance until the estimate fits.
     let mut allowance = max_tokens.saturating_mul(CHARS_PER_TOKEN);
     while allowance > 0 {
         let candidate = head_tail(text, allowance);
@@ -101,8 +74,7 @@ pub(crate) fn fit_text(text: &str, max_tokens: usize) -> String {
         }
         allowance = (allowance * 9) / 10;
     }
-    // Degenerate budget: a plain head cut of one character per token
-    // always fits the estimate.
+    // Degenerate budget: one character per token always fits the estimate.
     text.chars().take(max_tokens).collect()
 }
 
@@ -122,9 +94,8 @@ pub(crate) fn request_tokens(request: &super::DecisionRequest) -> usize {
     overhead + slots.iter().map(|s| estimate_tokens(s)).sum::<usize>()
 }
 
-/// Collects every string *value* under `value` for trimming. Object keys
-/// are skipped: they are counted in [`request_tokens`] but must never be
-/// rewritten (answers map back onto question names and option labels).
+/// Collects every string *value* under `value` for trimming; object keys
+/// are counted but never rewritten.
 fn collect_strings<'a>(value: &'a mut serde_json::Value, slots: &mut Vec<&'a mut String>) {
     match value {
         serde_json::Value::String(slot) => slots.push(slot),
@@ -166,12 +137,11 @@ fn collect_string_refs<'a>(
     }
 }
 
-/// Fits a request to at most `budget` estimated input tokens by trimming
-/// its longest string values (state fields, question instructions, option
-/// descriptions) first, marking each cut in place. Keys, labels, and the
-/// model passthrough are counted but left intact. A request whose
-/// untrimmable parts alone exceed the budget is still returned — fitting
-/// is best-effort, never a gate.
+/// Fits a request to at most `budget` estimated input tokens by trimming its
+/// longest string values first, marking each cut in place.
+///
+/// Untrimmable parts are counted but left intact; a request whose overhead
+/// alone exceeds the budget still goes out.
 pub(crate) fn fit_request(request: &mut super::DecisionRequest, budget: usize) {
     let total = request_tokens(request);
     if total <= budget {
@@ -184,9 +154,7 @@ pub(crate) fn fit_request(request: &mut super::DecisionRequest, budget: usize) {
     }
 
     let mut over = total - budget;
-    // Longest first: the bulk fields shed tokens before anything short is
-    // touched, and a single oversized field is trimmed alone when it can
-    // cover the overflow.
+    // Longest first: the bulk fields shed tokens before anything short.
     slots.sort_by_key(|slot| std::cmp::Reverse(estimate_tokens(slot.as_str())));
     for slot in slots {
         if over == 0 {
@@ -269,14 +237,12 @@ mod tests {
     #[test]
     fn fit_request_trims_the_longest_field_first_and_only() {
         let mut request = sample_request();
-        // Same request, but the code field is now enormous.
         request.state["code_under_review"] =
             serde_json::Value::String("let x = 1;\n".repeat(2_000));
         fit_request(&mut request, 120);
         let code = request.state["code_under_review"].as_str().unwrap();
         assert!(code.contains("chars cut…"), "the oversized field is marked");
         assert!(code.contains("let x = 1;"));
-        // The short fields and the question are untouched.
         assert_eq!(
             request.state["candidate_rules"]["rule/a"].as_str(),
             Some("prefer explicit types")
@@ -310,7 +276,6 @@ mod tests {
         );
         fit_request(&mut request, 60);
         let question = &request.questions["answer"];
-        // Labels (object keys) survive verbatim; only values are trimmed.
         assert!(question["criteria"].as_object().unwrap().contains_key("A"));
         assert!(
             question["criteria"]
@@ -339,7 +304,6 @@ mod tests {
         fit_request(&mut request, 200);
         let code = request.state["code"].as_str().unwrap();
         let body = request.state["body"].as_str().unwrap();
-        // Both bulk fields are trimmed, each marked.
         assert!(code.contains("chars cut…"));
         assert!(body.contains("chars cut…"));
     }
@@ -348,7 +312,6 @@ mod tests {
     fn fit_request_never_panics_when_overhead_alone_exceeds_the_budget() {
         let mut request = sample_request();
         fit_request(&mut request, 1);
-        // Still serializable, keys intact.
         assert!(serde_json::to_value(&request).is_ok());
         assert!(request.questions.contains_key("rule_0"));
     }

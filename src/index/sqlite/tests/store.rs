@@ -184,19 +184,15 @@ fn clear_empties_and_stays_operational() {
             .is_empty()
     );
 
-    // And the store is immediately usable again (the rebuild path):
-    // the re-seed re-establishes identity-less dimensionality in the same
-    // transaction as its inserts.
+    // The re-seed re-establishes dimensionality in the same transaction as its inserts.
     seed(&mut store, &embedder);
     assert_eq!(store.unit_hashes().unwrap().len(), 3);
     assert_eq!(store.dimensions, Some(128));
-    // The re-established vec table is queryable immediately.
     let hits = store.search(&query, 10, &Filter::default()).unwrap();
     assert_eq!(hits.len(), 3);
 }
 
-/// Regression (review P1): a batch holding several chunks of ONE concept
-/// must keep all of them — the delete is per concept, not per unit.
+/// Regression (review P1): the delete is per concept, not per unit — batches keep every chunk.
 #[test]
 fn upsert_keeps_every_chunk_of_a_multi_chunk_concept() {
     let (_dir, mut store) = open_in_tmp();
@@ -230,7 +226,6 @@ fn upsert_keeps_every_chunk_of_a_multi_chunk_concept() {
     assert_eq!(vec_rows, 2, "every chunk has exactly one vector");
     assert_eq!(store.unit_hashes().unwrap().len(), 1, "one concept");
 
-    // And re-upserting the pair remains stable (no growth, no loss).
     store.upsert(&[chunk0, chunk1]).unwrap();
     let units_rows: i64 = store
         .conn
@@ -239,9 +234,7 @@ fn upsert_keeps_every_chunk_of_a_multi_chunk_concept() {
     assert_eq!(units_rows, 2, "re-upsert replaces both chunks in place");
 }
 
-/// Regression (review P1): a provider whose model has a DIFFERENT vector
-/// width must be able to rebuild through mismatch → clear → upsert, not
-/// wedge on the store's old dimensionality forever.
+/// Regression (review P1): a different-width model must rebuild, not wedge on the old width.
 #[test]
 fn model_upgrade_with_a_different_dimension_rebuilds_cleanly() {
     let (_dir, mut store) = open_in_tmp();
@@ -249,7 +242,6 @@ fn model_upgrade_with_a_different_dimension_rebuilds_cleanly() {
     seed(&mut store, &embedder); // 128-dim
     store.set_model_id("mock-embedder@1").unwrap();
 
-    // The engine's mismatch path.
     store.clear().unwrap();
     let mut moved = make_unit(
         &embedder,
@@ -274,8 +266,7 @@ fn model_upgrade_with_a_different_dimension_rebuilds_cleanly() {
     );
 }
 
-/// Regression (review P2): empty allow-list filters return no hits, never
-/// a SQLite syntax error — parity with the doc-06 reference semantics.
+/// Regression (review P2): empty allow-list filters return no hits, never a SQLite syntax error.
 #[test]
 fn empty_filter_lists_return_no_hits_not_an_error() {
     let (_dir, mut store) = open_in_tmp();
@@ -311,9 +302,7 @@ fn empty_filter_lists_return_no_hits_not_an_error() {
     }
 }
 
-/// Regression (review P3): a db written by a NEWER argosy must fail
-/// loudly instead of being misread as v1 (and its version must not be
-/// clobbered).
+/// Regression (review P3): a newer argosy's db must fail loudly, never be misread or clobbered.
 #[test]
 fn opening_a_newer_schema_version_is_a_loud_error() {
     let (dir, store) = open_in_tmp();
@@ -380,8 +369,7 @@ fn unit_hashes_round_trip_tracks_every_mutation() {
     assert_eq!(store.unit_hashes().unwrap().len(), 2);
 }
 
-/// SQLite errors name the database they failed on — the one identifying
-/// detail on a machine with several project indexes.
+/// SQLite errors name the database they failed on — the identifying detail with several indexes.
 #[test]
 fn sqlite_errors_name_the_database() {
     let err = crate::error::Error::Sqlite {

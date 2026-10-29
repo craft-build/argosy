@@ -14,10 +14,9 @@ use super::namespace::Namespace;
 use super::validation::{Finding, Severity, ValidationReport};
 use super::walk::{WalkEntry, sorted_walk};
 
-/// The requirement ID under which an unparseable or untyped concept under a
-/// reserved namespace is reported. `skill/` has no such requirement of its
-/// own, so findings there carry no ID rather than a misleading root-structure
-/// one.
+/// The requirement ID used to report an unparseable or untyped concept under
+/// a reserved namespace; `skill/` has no such requirement, so its findings
+/// carry no ID.
 fn ns_conformance_id(ns: &str) -> Option<&'static str> {
     match ns {
         "document" => Some("DOC-1"),
@@ -36,9 +35,9 @@ pub struct Argosy {
 }
 
 impl Argosy {
-    /// Opens the bundle rooted at `path`. Errors only on hard failures:
-    /// unreadable root, missing or unparseable `argosy.md`, wrong manifest
-    /// type, or invalid manifest fields. Everything else surfaces via
+    /// Opens the bundle rooted at `path`.
+    ///
+    /// Errors only on hard failures; everything else surfaces via
     /// [`Argosy::validate`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref();
@@ -100,9 +99,8 @@ impl Argosy {
             ));
         }
 
-        // Manifest-field errors (missing `name`, malformed `argosy_version`)
-        // hard-fail here as `NotAnArgosy` so callers classify "not an argosy"
-        // by one variant; the same problems still surface via `validate()`.
+        // Manifest-field errors hard-fail as `NotAnArgosy` so callers classify
+        // "not an argosy" by one variant; they still surface via `validate()`.
         let manifest = Manifest::parse(&concept).map_err(|e| {
             NotAnArgosySnafu {
                 path: root.to_path_buf(),
@@ -116,19 +114,18 @@ impl Argosy {
         })
     }
 
-    /// Validates the bundle rooted at `path`. Works on any directory — even
-    /// one [`Argosy::open`] would refuse — translating every problem into a
-    /// [`Finding`] (an unreadable root becomes an error, for instance).
-    /// Never rejects an argosy over a declared version.
+    /// Validates the bundle rooted at `path`.
+    ///
+    /// Works on any directory — even one [`Argosy::open`] would refuse — and
+    /// never rejects an argosy over a declared version.
     pub fn validate(path: impl AsRef<Path>) -> ValidationReport {
         let root = path.as_ref();
         let mut report = ValidationReport::default();
 
         let walk = sorted_walk(root, Path::new(""));
         let (unreadable, entries) = (walk.unreadable, walk.entries);
-        // An unreadable root ends validation outright; unreadable
-        // directories deeper down become targeted errors and the rest of the
-        // checks still run.
+        // An unreadable root ends validation outright; deeper unreadable
+        // directories become targeted errors and the other checks still run.
         if let Some((_, e)) = unreadable.iter().find(|(p, _)| p.as_os_str().is_empty()) {
             report.push(Finding::new(
                 Severity::Error,
@@ -153,8 +150,7 @@ impl Argosy {
         Self::validate_manifest(root, &entries, &mut report);
         Self::validate_namespaces(&entries, &mut report);
         Self::validate_concepts(root, &entries, &mut report);
-        // Namespace contracts. Unreadable directories are already reported
-        // above; these validators skip them.
+        // Namespace contracts; unreadable directories are already reported above.
         for finding in crate::skill::validate(root) {
             report.push(finding);
         }
@@ -164,8 +160,7 @@ impl Argosy {
         report
     }
 
-    /// Root manifest checks: presence, type, parseability, and field
-    /// validity, plus `SHOULD` fields as warnings.
+    /// Root manifest checks plus `SHOULD` fields as warnings.
     fn validate_manifest(root: &Path, entries: &[WalkEntry], report: &mut ValidationReport) {
         // `argosy.md` below the root is forbidden, whatever it contains.
         for entry in entries
@@ -194,9 +189,7 @@ impl Argosy {
             ));
             return;
         }
-        // A symlinked root manifest is refused for the same reason `open`
-        // refuses it; reading through it could pull content from outside
-        // the bundle.
+        // Refused as in `open`: reading through the symlink could pull in outside content.
         if entries
             .iter()
             .any(|e| !e.is_dir && e.is_symlink && e.rel == manifest_rel)
@@ -249,8 +242,7 @@ impl Argosy {
             ));
         }
 
-        // `name` and `argosy_version` are required; `okf_version` and
-        // `description` are recommended (Warning when absent).
+        // `name` and `argosy_version` are required; the other two are recommended.
         if concept.get_str("name").is_none_or(|n| n.trim().is_empty()) {
             report.push(Finding::new(
                 Severity::Error,
@@ -291,8 +283,7 @@ impl Argosy {
             }
             Some(_) => {}
         }
-        // The SHOULD-level fields have no requirement ID of their own; the
-        // finding labels the section so consumers can still trace them.
+        // SHOULD-level fields carry no requirement ID; the finding labels the section.
         if concept.get("okf_version").is_none() {
             report.push(Finding::new(
                 Severity::Warning,
@@ -362,10 +353,9 @@ impl Argosy {
         }
     }
 
-    /// Generic OKF concept conformance (`type` present) for every `.md` under
-    /// the four reserved namespaces. OKF listing/history files and nested
-    /// `argosy.md` are skipped; namespace-specific contracts come from
-    /// [`crate::skill::validate`]/[`crate::styleguide::validate`].
+    /// Generic OKF concept conformance (`type` present) for `.md` files under
+    /// the reserved namespaces, skipping listing/history files and nested
+    /// `argosy.md`.
     fn validate_concepts(root: &Path, entries: &[WalkEntry], report: &mut ValidationReport) {
         for entry in entries {
             if entry.is_dir || entry.rel.extension() != Some(std::ffi::OsStr::new("md")) {
@@ -383,9 +373,8 @@ impl Argosy {
                 continue;
             }
             let id = ns_conformance_id(&ns);
-            // Symlinked concepts are invisible to listing and the index
-            // (reads never follow symlinks); validation is where that
-            // becomes visible instead of silently dropping content.
+            // Symlinked concepts are invisible to listing and the index;
+            // validation makes that visible instead of silently dropping it.
             if entry.is_symlink {
                 report.push(Finding::new(
                     Severity::Error,
@@ -424,10 +413,9 @@ impl Argosy {
         &self.manifest
     }
 
-    /// The directory of `namespace`, if it exists; absent namespaces are
-    /// fine. Only real directories count: a symlinked namespace would let
-    /// reads escape the bundle root, and an unsafe [`Namespace::Custom`]
-    /// name is refused rather than joined.
+    /// The directory of `namespace`, if it exists; only real directories
+    /// count, since a symlinked namespace would let reads escape the root
+    /// and unsafe names are refused, not joined.
     pub fn namespace_dir(&self, namespace: &Namespace) -> Option<PathBuf> {
         if let Namespace::Custom(name) = namespace
             && !is_safe_component(name)
@@ -447,8 +435,7 @@ impl Argosy {
             .map(|name| Namespace::from_dir_name(name))
             .collect();
 
-        // A read error just means the custom list is empty — the reserved
-        // namespaces above are still authoritative.
+        // A read error only loses the custom list; the reserved ones still stand.
         let mut custom: Vec<String> = fs::read_dir(&self.root)
             .map(|rd| {
                 rd.filter_map(|entry| entry.ok())
@@ -465,10 +452,9 @@ impl Argosy {
         present
     }
 
-    /// Every concept under `namespace`, as `(id, concept)` pairs sorted by
-    /// [`ConceptId`]. OKF listing/history files (`index.md`/`log.md`) are
-    /// excluded, as is the `.argosy/` index directory. An absent
-    /// namespace yields an empty vec.
+    /// Every concept under `namespace` as `(id, concept)` pairs sorted by
+    /// [`ConceptId`], excluding OKF listing/history files and `.argosy/`;
+    /// an absent namespace yields an empty vec.
     pub fn concepts(&self, namespace: &Namespace) -> Result<Vec<(ConceptId, Concept)>> {
         let Some(dir) = self.namespace_dir(namespace) else {
             return Ok(Vec::new());

@@ -51,8 +51,7 @@ fn read_argosys_resource_lists_local_and_imported() {
     assert_eq!(argosys.len(), 2);
     assert_eq!(argosys[0]["name"], "acme-billing");
     assert_eq!(argosys[0]["kind"], "local");
-    // Local concepts relay their own claims, so the listing carries no
-    // argosy-level tier for the local book.
+    // Local concepts relay their own claims, so the local book gets no argosy-level tier.
     assert!(argosys[0].get("trust").is_none(), "got {parsed}");
     assert_eq!(argosys[1]["name"], "acme-shared");
     assert_eq!(argosys[1]["kind"], "imported");
@@ -61,9 +60,7 @@ fn read_argosys_resource_lists_local_and_imported() {
 
 #[test]
 fn read_argosys_resource_reports_a_tampered_import_as_excluded() {
-    // A packaged import whose contents are tampered with after the sidecar
-    // was written: open excludes it, and the listing is where the exclusion
-    // becomes visible (the import's content is not served at all).
+    // Contents tampered after the sidecar was written — the exclusion surfaces in the listing.
     let local = fixture_copy("valid-acme-billing");
     let imported = import_fixture();
     let packaged = tempfile::tempdir().unwrap();

@@ -1,6 +1,4 @@
-//! The `callgraph` tool: intra-file call-graph analysis, ported from Craft's
-//! `tools/callgraph.rs`. Reuses [`outline`]'s language registry and symbol
-//! extraction, then adds a call-extraction pass of its own.
+//! The `callgraph` tool: intra-file call-graph analysis reusing [`outline`]'s symbol extraction.
 
 use std::collections::HashSet;
 
@@ -19,8 +17,7 @@ use crate::error::Result;
 pub struct CallgraphParams {
     /// Operation: `call_tree`, `callers`, or `impact`.
     pub op: String,
-    /// Path (absolute, or relative to the server's working directory) of the
-    /// file to analyze.
+    /// Path (absolute, or relative to the server's working directory) of the file to analyze.
     pub path: String,
     /// Symbol name (function/method/struct).
     pub symbol: String,
@@ -35,15 +32,14 @@ pub struct CallgraphReport {
     pub op: String,
     /// The target symbol.
     pub symbol: String,
-    /// The rendered call tree (`call_tree`) or symbol list (`callers`,
-    /// `impact`).
+    /// The rendered call tree (`call_tree`) or symbol list (`callers`/`impact`).
     pub text: String,
 }
 
 /// Runs the `callgraph` tool over a single file.
 pub fn run(code: &CodeTools, params: CallgraphParams) -> Result<CallgraphReport> {
-    // Language detection runs on the raw input path (as in Craft), so plain
-    // relative paths like `src/main.rs` work without resolution first.
+    // Language detection runs on the raw input path: plain relative paths
+    // work without resolution first.
     let lang = LangId::from_path(params.path.as_ref()).ok_or_else(|| {
         tool_error(format!(
             "unsupported file type: {}",
@@ -224,8 +220,7 @@ fn calls_in_range(calls: &[RawCall], range: &Range) -> Vec<usize> {
 struct CallTreeNode {
     name: String,
     line: usize,
-    /// True when this edge closes a cycle back to a symbol already on the
-    /// path — rendered as a marked leaf rather than silently pruned.
+    /// True when this edge closes a cycle; rendered as a marked leaf, not pruned.
     recursive: bool,
     children: Vec<CallTreeNode>,
 }
@@ -248,8 +243,7 @@ fn build_call_tree_inner(
 ) -> CallTreeNode {
     let in_scope_calls = calls_in_range(calls, &symbol.range);
 
-    // A symbol already on the current path marks a cycle: keep the edge
-    // (dropping it would hide the recursion) but do not descend.
+    // A cycle keeps the edge (dropping it would hide the recursion) but does not descend.
     let fresh = visited.insert(symbol.name.clone());
     let recursive = remaining > 0 && !fresh;
     let mut children = Vec::new();
@@ -322,9 +316,7 @@ fn find_impact<'a>(target: &Symbol, symbols: &'a [Symbol], calls: &[RawCall]) ->
     impacted
 }
 
-/// Like every other code tool, the rendered tree is capped; with a deep
-/// `depth` and diamond call patterns the tree is exponential, so rendering
-/// also stops early once past the cap instead of building it all first.
+/// Deep diamonds make the tree exponential, so rendering stops once past this cap.
 const MAX_OUTPUT_BYTES: usize = 30_000;
 
 fn render_call_tree(node: &CallTreeNode, depth: usize) -> String {
@@ -479,8 +471,7 @@ fn baz() {
         );
     }
 
-    /// A self-recursive call must render as a marked leaf, not silently
-    /// disappear or masquerade as a plain leaf.
+    /// A self-recursive call must render as a marked leaf, not silently vanish.
     #[test]
     fn recursive_calls_render_as_marked_leaves() {
         let src = "fn walk(n: u32) {\n    if n > 0 {\n        walk(n - 1);\n    }\n}\n";
@@ -495,7 +486,6 @@ fn baz() {
         );
     }
 
-    /// The rendered tree is capped like every other code tool's output.
     #[test]
     fn call_tree_render_caps_output() {
         let children: Vec<CallTreeNode> = (0..30_000)

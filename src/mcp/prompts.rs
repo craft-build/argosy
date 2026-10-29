@@ -1,7 +1,7 @@
 //! Prompts: reusable workflows served as `prompts/list` / `prompts/get`.
-//! Each is a curation workflow — every step names a tool this server
-//! already exposes, so any MCP harness can run it without special client
-//! support.
+//!
+//! Every step names a tool this server exposes, so any MCP harness can run
+//! them.
 
 #[cfg(feature = "code-tools")]
 use rmcp::model::PromptArgument;
@@ -10,8 +10,7 @@ use rmcp::model::{GetPromptResult, JsonObject, Prompt, PromptMessage, Role};
 #[cfg(feature = "code-tools")]
 use crate::harness::REVIEWER_PROMPT;
 
-/// The `dream` prompt body: a memory-consolidation pass over the local
-/// argosy, adapted from craft's `/dream`.
+/// The `dream` prompt body: a memory-consolidation pass over the local argosy.
 pub const DREAM_PROMPT: &str = r#"# Dream: Memory Consolidation
 
 Review the local argosy's memory and the recent conversation, then consolidate memory so it stays useful and current. This is a curation pass, not a work pass.
@@ -45,10 +44,8 @@ Review the local argosy's memory and the recent conversation, then consolidate m
 /// the resolved result.
 const DREAM_DESCRIPTION: &str = "Consolidate and deduplicate the local argosy's memory: enumerate memory concepts via search, read them, then merge, update, delete, or add entries with write_memory and delete_memory. Use it after a long session or whenever memory feels redundant.";
 
-/// The `scan` prompt body: a project-documentation pass that investigates
-/// the project at `cwd` and writes the core document set into the local
-/// argosy. Investigation is done with the harness's own file tools, while
-/// every persistence step names a tool this server exposes.
+/// The `scan` prompt body: a project-documentation pass that writes the core
+/// document set into the local argosy.
 pub const SCAN_PROMPT: &str = r#"# Scan: Project Documentation
 
 Investigate the project at `cwd` and write what you learn into the local argosy as curated documents, so future sessions start oriented instead of re-reading the whole tree. This is a documentation pass — do not change any project files.
@@ -90,8 +87,7 @@ const SCAN_DESCRIPTION: &str = "Investigate the project at cwd and write its cor
 #[cfg(feature = "code-tools")]
 const REVIEW_DESCRIPTION: &str = "Review tracked working-tree changes or one commit with the shared Argosy reviewer process: inspect the actual code and blast radius, ground verified findings in styleguide rules, record them through report_finding, audit the structured finding set, and return a prioritized verdict without modifying files.";
 
-/// The advertised prompt set. The set is static — no `list_changed`
-/// notifications.
+/// The advertised prompt set; static, with no `list_changed` notifications.
 pub fn prompt_definitions() -> Vec<Prompt> {
     #[allow(unused_mut)]
     let mut prompts = vec![
@@ -130,9 +126,7 @@ pub fn prompt_definitions() -> Vec<Prompt> {
 }
 
 /// Resolves one prompt by name to its messages, or `None` when the name is
-/// unknown. Pure and stateless: prompts are static workflows, so unlike
-/// tools they never touch [`super::McpState`]. Each workflow runs as a
-/// single user-role message.
+/// unknown; each workflow runs as a single user-role message.
 pub fn get_prompt_result(
     name: &str,
     arguments: Option<&JsonObject>,

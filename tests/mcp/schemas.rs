@@ -1,8 +1,6 @@
 //! Tool-schema tests.
 
-/// Imported argosys are read-only *structurally* — no
-/// mutating tool may expose an `argosy` selector. If a future tool violates
-/// this, the invariant breaks here, not in a runtime exploit.
+/// Imported argosys are read-only *structurally*: no mutating tool may expose an `argosy` selector.
 #[test]
 fn write_tools_have_no_argosy_selector_in_their_schemas() {
     let tools = argosy::mcp::tool_definitions();
@@ -96,7 +94,6 @@ fn write_tools_have_no_argosy_selector_in_their_schemas() {
                 tool.name
             );
         }
-        // Every tool carries an LLM-facing description.
         assert!(
             tool.description.as_deref().is_some_and(|d| d.len() > 40),
             "tool `{}` needs a real description",

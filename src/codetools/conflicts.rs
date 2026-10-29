@@ -1,10 +1,7 @@
-//! The `conflicts` tool: find and resolve git merge-conflict markers,
-//! ported from Craft's `tools/conflicts.rs`.
+//! The `conflicts` tool: find and resolve git merge-conflict markers.
 //!
-//! Port note: unlike Craft, which wrote resolutions with a bare
-//! `std::fs::write`, the resolve path here goes through the same
-//! read → stale-read check → write discipline as `astgrep` apply: every file
-//! read is recorded, and a write is refused when the file changed since.
+//! Resolving writes only files whose recorded read is still fresh; files
+//! that changed since the last read (or were never read) are refused.
 
 #[cfg(feature = "mcp")]
 use rmcp::schemars;
@@ -26,15 +23,12 @@ const BASE: &str = "@base";
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConflictsParams {
-    /// Directory (or file) to scan (default: the server's working
-    /// directory).
+    /// Directory (or file) to scan (default: the server's working directory).
     pub path: Option<String>,
-    /// Resolve conflicts instead of listing. `"@theirs"` keeps the incoming
-    /// (their branch) side, `"@ours"` keeps the current (our branch) side,
-    /// `"@base"` drops both sides. Omit to list only.
+    /// Resolve conflicts instead of listing: `"@theirs"` keeps their side,
+    /// `"@ours"` keeps ours, `"@base"` drops both sides.
     pub resolve: Option<String>,
-    /// Resolve only the Nth conflict (1-indexed) per file. Omit to resolve
-    /// all conflicts in scope.
+    /// Resolve only the Nth conflict (1-indexed) per file; omit to resolve all.
     pub index: Option<usize>,
 }
 
@@ -71,9 +65,7 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
                 )));
             }
         };
-        // Mutating runs serialize against each other (see
-        // `CodeTools::begin_write`) so the per-file stale-read check cannot
-        // race a concurrent resolve's write.
+        // Serializes mutating runs so the stale-read check cannot race a concurrent write.
         let _write_guard = code.begin_write();
         let scope = resolve_in_scope(code, &scope_path, side, params.index);
 
@@ -184,26 +176,23 @@ struct ResolvedFile {
     /// Number of complete conflicts resolved.
     resolved: usize,
     /// 1-based line of a conflict opener that never reached its `>>>>>>> `
-    /// end marker. When set, the rewrite is abandoned: everything from the
-    /// stray opener to EOF is ambiguous, so the file must be left untouched
-    /// rather than silently truncated.
+    /// end marker; when set, the file must be left untouched rather than
+    /// truncated at the stray opener.
     unterminated_at: Option<usize>,
 }
 
-/// Rewrite a file's content, resolving conflict markers according to `side`.
-/// `index` selects only the Nth (1-indexed) conflict; `None` resolves all.
-/// Conflicts outside the selection are re-emitted verbatim, original branch
-/// labels included.
+/// Resolve conflict markers in `content` per `side`; `index` selects only the Nth conflict.
+///
+/// Unselected conflicts are re-emitted verbatim, original branch labels included.
 fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> ResolvedFile {
     let mut out = String::with_capacity(content.len());
     // 0 = outside a conflict, 1 = ours, 2 = theirs, 3 = diff3 base.
     let mut state = 0u8;
     let mut ours = String::new();
     let mut theirs = String::new();
-    // diff3 and zdiff3 conflict styles (`merge.conflictStyle = diff3`)
-    // interpose a `|||||||` base section between ours and the separator.
-    // Every side choice drops it (`@base` drops the whole conflict), but
-    // a preserved block re-emits it verbatim, original label included.
+    // diff3/zdiff3 styles interpose a `|||||||` base section between ours
+    // and the separator: every side choice drops it (`@base` drops the
+    // whole conflict), but a preserved block re-emits it verbatim.
     let mut base = String::new();
     let mut base_marker_line = String::new();
     let mut opener_line = String::new();
@@ -213,10 +202,8 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> R
     let mut resolved = 0usize;
 
     for (i, line) in content.split_inclusive('\n').enumerate() {
-        // Tolerate CRLF checkouts: the markers compare on the bare line, the
-        // original bytes are re-emitted verbatim when a block is preserved.
-        // Each strip falls back to its own input — falling back to `line`
-        // would re-attach the stripped newline.
+        // Tolerate CRLF: each strip falls back to its own input — falling
+        // back to `line` would re-attach the stripped newline.
         let bare = line.strip_suffix('\n').unwrap_or(line);
         let bare = bare.strip_suffix('\r').unwrap_or(bare);
         match state {
@@ -296,8 +283,7 @@ fn resolve_content(content: &str, side: ConflictSide, index: Option<usize>) -> R
     }
 }
 
-/// Files resolved, counts for the summary, and warnings for files skipped
-/// because they end inside an unterminated conflict block.
+/// Files resolved, summary counts, and warnings for skipped files.
 struct ScopeResolution {
     resolved_files: Vec<String>,
     total_resolved: usize,
@@ -337,11 +323,9 @@ fn resolve_in_scope(
         }
         out.remaining += marker_count.saturating_sub(file.resolved);
         if file.resolved > 0 {
-            // The stale-read guard compares against the last read from an
-            // earlier tool call (zoom, ...); this scan deliberately does not
-            // record its reads first, so the guard stays meaningful. The
-            // refusal goes into the report (not just logs) so an MCP
-            // caller can self-correct: read the file, then retry.
+            // This scan deliberately does not record its reads first, so the
+            // stale-read guard stays meaningful; the refusal goes into the
+            // report so the caller can self-correct.
             if let Err(message) = code.check_before_edit(std::path::Path::new(&path)) {
                 out.skipped
                     .push(format!("{}: {message}", relative_path(&path)));
@@ -361,10 +345,8 @@ fn resolve_in_scope(
     out
 }
 
-/// Files with conflict markers in scope, split by readability: UTF-8 files
-/// (resolvable here) and files whose raw bytes carry markers but which are
-/// not valid UTF-8 — those stay conflicted and unresolvable by this tool,
-/// so they must be surfaced, never silently dropped.
+/// Marker-bearing files split by readability: resolvable UTF-8 files, and
+/// non-UTF-8 ones that must be surfaced, never silently dropped.
 #[derive(Default)]
 struct ScannedConflicts {
     files: Vec<(String, String)>,
@@ -384,10 +366,8 @@ fn scan_conflict_files(code: Option<&CodeTools>, scope_path: &str) -> ScannedCon
         let path = entry.path();
         match std::fs::read_to_string(path) {
             Ok(content) => {
-                // Listing mode records its reads (feeding the stale-read
-                // guard); resolve mode deliberately does not, so its guard
-                // keeps comparing against the last read from an earlier
-                // tool call.
+                // Listing records its reads (feeding the stale-read guard);
+                // resolve deliberately does not, so its guard stays meaningful.
                 if let Some(code) = code {
                     code.record_read(path);
                 }
@@ -397,9 +377,8 @@ fn scan_conflict_files(code: Option<&CodeTools>, scope_path: &str) -> ScannedCon
                 }
             }
             Err(_) => {
-                // Not valid UTF-8 (or unreadable): check the raw bytes so a
-                // conflicted file in another encoding or a mangled checkout
-                // cannot hide behind the failed read.
+                // Check raw bytes so a conflicted non-UTF-8 file cannot hide
+                // behind the failed read.
                 let Ok(bytes) = std::fs::read(path) else {
                     continue;
                 };
@@ -415,8 +394,7 @@ fn scan_conflict_files(code: Option<&CodeTools>, scope_path: &str) -> ScannedCon
     out
 }
 
-/// Resolve-mode view of the scan: resolvable files plus warnings and a
-/// remaining-count contribution for the non-UTF-8 ones.
+/// Resolve-mode view of the scan: resolvable files, warnings, remaining count.
 fn collect_conflict_files(scope_path: &str) -> (Vec<(String, String)>, Vec<String>, usize) {
     let scanned = scan_conflict_files(None, scope_path);
     let mut remaining = 0usize;
@@ -555,8 +533,7 @@ end";
         );
     }
 
-    /// A diff3/zdiff3-style conflict (`merge.conflictStyle = diff3`) carries
-    /// a `|||||||` base section that must never leak into a resolution.
+    /// A diff3/zdiff3-style conflict's `|||||||` base section must never leak into a resolution.
     const DIFF3_TEXT: &str = "\
 top
 <<<<<<< HEAD
@@ -783,8 +760,7 @@ stray-ours
         assert!(err.to_string().contains("unknown resolve choice"), "{err}");
     }
 
-    /// A conflicted file that is not valid UTF-8 cannot be resolved here,
-    /// but it must not silently vanish from either report.
+    /// An unresolvable file must not silently vanish from either report.
     #[test]
     fn non_utf8_conflicted_file_is_surfaced_not_dropped() {
         let dir = tempfile::tempdir().unwrap();
@@ -832,9 +808,7 @@ stray-ours
         );
     }
 
-    /// Fail-closed stale-write guard: resolving files never read through
-    /// the tools is refused with an actionable message in the report —
-    /// never a blind overwrite (docs/next.md item 2).
+    /// Fail-closed: a never-read file is refused, never blindly overwritten.
     #[test]
     fn run_resolve_without_prior_read_refuses() {
         let dir = tempfile::tempdir().unwrap();

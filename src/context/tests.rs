@@ -96,7 +96,6 @@ fn open_project_without_default_points_at_init() {
 #[test]
 fn open_project_rejects_duplicate_manifest_names_across_tiers() {
     let (project, state) = project_layout(&["default"], &[]);
-    // A global with the same manifest name as the local default.
     write_file(
         &state.path().join("global/rogue"),
         "argosy.md",
@@ -108,8 +107,7 @@ fn open_project_rejects_duplicate_manifest_names_across_tiers() {
 
 #[test]
 fn same_named_projects_get_isolated_state_dirs() {
-    // The slug hashes the absolute path, so two `craft` directories
-    // never share storage — each opens its own local bundle.
+    // The slug hashes the absolute path, so two `craft` dirs never collide.
     let state = TempDir::new().unwrap();
     let mut guards = Vec::new();
     let mut locals = Vec::new();
@@ -136,7 +134,6 @@ fn same_named_projects_get_isolated_state_dirs() {
         .map(|(dir, _)| crate::pull::project_slug(dir))
         .collect();
     assert_ne!(slugs[0], slugs[1], "same-named projects collide: {slugs:?}");
-    // Both live under one state root, side by side.
     for slug in &slugs {
         assert!(state.path().join("projects").join(slug).is_dir());
     }
@@ -303,8 +300,7 @@ fn an_import_with_a_valid_sidecar_opens_normally() {
 fn an_import_with_git_metadata_reports_its_head_commit() {
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[]);
-    // Hand-rolled git metadata, exactly what a cloned checkout carries:
-    // HEAD pointing at a loose branch ref.
+    // Hand-rolled git metadata like a clone: HEAD at a loose branch ref.
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     let git = imp.path().join(".git");
     fs::create_dir_all(git.join("refs/heads")).unwrap();
@@ -313,8 +309,6 @@ fn an_import_with_git_metadata_reports_its_head_commit() {
 
     let ctx = ProjectContext::open(local.path(), [imp.path().to_path_buf()]).unwrap();
     assert_eq!(ctx.import_commit("imp"), Some(COMMIT));
-    // The local book and unknown names have no commit; a git-less import
-    // (hosts point at plain trees) has none either.
     assert_eq!(ctx.import_commit("local"), None);
     assert_eq!(ctx.import_commit("nope"), None);
     let plain = make_argosy("plain", &[]);
@@ -327,7 +321,6 @@ fn an_import_tampered_after_packaging_is_excluded_not_served() {
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);
     let pkg = packaged_copy(imp.path());
-    // Tamper *after* the sidecar was written: contents no longer match.
     write_file(&pkg.path().join("book"), "document/guide.md", "Injected.\n");
 
     let ctx = ProjectContext::open(local.path(), [pkg.path().join("book")]).unwrap();
@@ -340,7 +333,6 @@ fn an_import_tampered_after_packaging_is_excluded_not_served() {
         "reason carries the error chain: {}",
         excluded[0].reason
     );
-    // And its concepts are unresolvable — the exclusion is real.
     let err = ctx
         .resolve(&qid("imp", Namespace::Document, "document/guide"))
         .unwrap_err();
@@ -372,8 +364,7 @@ fn a_tampered_import_does_not_take_healthy_imports_down_with_it() {
 
 #[test]
 fn an_import_without_a_sidecar_needs_no_verification() {
-    // Hand-rolled books ship no sidecar (nothing was ever packaged):
-    // they open exactly as before — trust is a config question for them.
+    // Nothing was ever packaged: no sidecar, so trust stays a config question.
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);
     let ctx = ProjectContext::open(local.path(), [imp.path().to_path_buf()]).unwrap();
@@ -383,8 +374,7 @@ fn an_import_without_a_sidecar_needs_no_verification() {
 
 #[test]
 fn open_project_with_state_reports_tampered_checkouts_as_excluded() {
-    // The discovery path must surface exclusions the same way the
-    // explicit-path path does.
+    // Discovery must surface exclusions like the explicit-path route does.
     let (project, state) = project_layout(&["default"], &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);
     let pkg = packaged_copy(imp.path());
@@ -416,9 +406,10 @@ fn stamp(checkout: &Path) {
     fs::write(crate::pull::import_integrity_stamp(checkout), body).unwrap();
 }
 
-/// Repackages the argosy at `source` over `dest` (removed first), the
-/// shape of an upstream rewrite: a fully self-consistent new tree. The
-/// pull-time stamp lives *beside* `dest` and survives.
+/// Repackages the argosy at `source` over `dest` (removed first) as a
+/// fully self-consistent tree — the shape of an upstream rewrite.
+///
+/// The pull-time stamp lives *beside* `dest` and survives.
 fn repackage_onto(source: &Path, dest: &Path) {
     fs::remove_dir_all(dest).unwrap();
     crate::package::package(
@@ -453,17 +444,14 @@ fn deleting_the_sidecar_after_a_stamped_pull_excludes_the_import() {
 
 #[test]
 fn rewriting_the_sidecar_after_a_stamped_pull_excludes_the_import() {
-    // Even a *self-consistent* replacement sidecar (attacker regenerates
-    // it over injected content) fails: the stamp recorded what was
-    // verified at pull time.
+    // Even a *self-consistent* replacement sidecar fails: the stamp
+    // recorded what was verified at pull time.
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);
     let tampered = make_argosy("imp", &[("document/guide.md", "Injected.\n")]);
     let pkg = packaged_copy(imp.path());
     let book = pkg.path().join("book");
     stamp(&book);
-    // "Rug pull": the whole tree is replaced — every hash in the new
-    // sidecar is internally consistent, and only the stamp disagrees.
     repackage_onto(tampered.path(), &book);
 
     let ctx = ProjectContext::open(local.path(), [book]).unwrap();
@@ -477,7 +465,6 @@ fn rewriting_the_sidecar_after_a_stamped_pull_excludes_the_import() {
 
 #[test]
 fn a_sidecar_appearing_on_an_unstamped_book_excludes_the_import() {
-    // Pulled without a sidecar (`absent` stamp), then one appears.
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("document/guide.md", "Guide.\n")]);
     let pkg = packaged_copy(imp.path());
@@ -605,13 +592,12 @@ fn list_rules_combines_across_argosys_and_tags_origins() {
     assert_eq!(ctx.list_rules(None, None).unwrap().len(), 2);
 }
 
-// --- Read-only imports with memory/, STR-9 ---
+// --- Read-only imports with memory/ ---
 
 #[test]
 fn imported_argosy_containing_memory_is_tolerated_and_readable() {
     let local = make_argosy("local", &[]);
     let imp = make_argosy("imp", &[("memory/vendor-gotchas.md", "Their notes.\n")]);
-    // Tolerated at open even though imports are read-only.
     let ctx = ProjectContext::open(local.path(), [imp.path().to_path_buf()]).unwrap();
     let concept = ctx.read_uri("argosy://imp/memory/vendor-gotchas").unwrap();
     assert!(concept.body().contains("Their notes"));
@@ -638,8 +624,7 @@ fn write_through_local_then_resolve_reads_it_back() {
     assert!(read.body().contains("A learnings note"));
 
     // Compile-time: `local()` is the only write-bearing accessor —
-    // there is no `local_mut`/`imported_mut`, and `ArgosyRef` splits
-    // local from imported so callers see which is which.
+    // there is no `local_mut`/`imported_mut`.
     let _: &LocalArgosy = ctx.local();
     assert!(matches!(
         ctx.argosy_named("local").unwrap(),
@@ -736,7 +721,6 @@ fn resolve_never_follows_symlinks_so_reads_cannot_escape_the_bundle() {
         matches!(err, Error::ConceptNotFound { .. }),
         "symlinked file must read as absent, got {err}"
     );
-    // A genuine file next to the symlink still resolves.
     assert!(
         ctx2.resolve(&qid("imp2", Namespace::Document, "document/real"))
             .is_ok()

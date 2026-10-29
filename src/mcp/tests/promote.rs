@@ -36,7 +36,6 @@ fn promote_to_document_returns_source_and_draft_untouched_source() {
         .read_resource("argosy://acme-billing/document/processor-gotchas")
         .unwrap();
     assert_eq!(promoted.text, out.drafted);
-    // The memory file still exists.
     assert!(
         rig.state
             .session(project())

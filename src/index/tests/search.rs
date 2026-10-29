@@ -7,8 +7,7 @@ use super::*;
 #[test]
 fn search_against_a_store_built_with_a_different_width_is_a_rebuild_hint() {
     let (_local, _imported, ctx) = fixture();
-    // MockEmbedder emits 128-dim vectors; a store recorded at 64 is the
-    // stale half of a model switch — the error must say what to do.
+    // A 128-dim embedder against a store recorded at 64 is the stale half of a model switch.
     let index = Index::new(
         MockEmbedder::new(),
         MemStore::new().with_recorded_dimensions(64),
@@ -55,8 +54,7 @@ fn namespace_filter_scopes_search_to_the_selected_namespaces() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    // Search is query-side: it must go through `embed_query`, never the
-    // document-side `embed` (asymmetric models depend on the split).
+    // Search is query-side: asymmetric models depend on the `embed_query`/`embed` split.
     let (q_before, e_before) = (
         index.provider().query_embed_calls(),
         index.provider().embed_calls(),
@@ -84,7 +82,6 @@ fn namespace_filter_scopes_search_to_the_selected_namespaces() {
         concept_id("styleguide/rust/naming/case")
     );
 
-    // Skills only: the styleguide hit is gone.
     query.filter.namespaces = Some(vec![Namespace::Skill]);
     let hits = index.search(&ctx, &query).unwrap();
     assert!(hits.iter().all(|h| h.concept.namespace == Namespace::Skill));
@@ -98,7 +95,6 @@ fn facet_filters_narrow_individually_and_compose_with_semantics() {
 
     let mut query = Query::unscoped("service", 10);
 
-    // language + category facets.
     query.filter.language = Some("rust".to_string());
     let hits = index.search(&ctx, &query).unwrap();
     assert_eq!(hits.len(), 1, "only the styleguide rule declares language");
@@ -129,9 +125,7 @@ fn facet_filters_narrow_individually_and_compose_with_semantics() {
     assert_eq!(hits[0].concept.id, concept_id("skill/deploy"));
     query.filter.concept_types = None;
 
-    // Semantic + structured in one call: the database-tagged
-    // locking note tops a `database locking` semantic query, and the
-    // namespace constraint still holds.
+    // Semantic + structured in one call.
     let mut query = Query::unscoped("database locking retries", 10);
     query.filter.namespaces = Some(vec![Namespace::Document]);
     let hits = index.search(&ctx, &query).unwrap();
@@ -150,9 +144,7 @@ fn facet_filters_narrow_individually_and_compose_with_semantics() {
 // --- Unscoped search across argosys ---
 #[test]
 fn unscoped_search_spans_argosys_with_score_only_ranking_and_no_precedence_boost() {
-    // Identical text in the local and an imported argosy: their scores
-    // must tie exactly — any local-first reordering would require
-    // precedence data the search path never receives.
+    // Identical text in both argosies must tie exactly — the search path never sees precedence.
     const SAME: &str = "---\ntype: Note\ndescription: Shared body.\n---\nalpha beta gamma.\n";
     let local = make_argosy("local", &[("document/shared.md", SAME)]);
     let imported = make_argosy("vendor", &[("document/shared.md", SAME)]);
@@ -171,7 +163,6 @@ fn unscoped_search_spans_argosys_with_score_only_ranking_and_no_precedence_boost
         "identical text ⇒ identical score; no precedence reweighting"
     );
 
-    // Scoping to a single argosy by name narrows to it.
     let mut query = Query::unscoped("alpha beta gamma", 10);
     query.filter.argosies = Some(vec!["vendor".to_string()]);
     let hits = index.search(&ctx, &query).unwrap();
@@ -202,8 +193,7 @@ fn local_memory_is_searchable_but_imported_memory_stays_out_of_the_default_walk(
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    // The two memory notes share identical text, so with no walk
-    // difference both would appear.
+    // The two memory notes share identical text, so only the walk rule can separate them.
     let hits = index
         .search(&ctx, &Query::unscoped("Cargo lockfile build gotchas", 10))
         .unwrap();
@@ -238,8 +228,7 @@ fn with_namespaces_honors_the_selection_verbatim_for_every_argosy() {
     let imported = make_argosy("vendor", &[("memory/vendor-notes.md", MEMORY_GOTCHAS)]);
     let ctx = ProjectContext::open(local.path(), [imported.path().to_path_buf()]).unwrap();
 
-    // Memory only: local arch is excluded; vendor memory is included —
-    // explicit selection overrides the default local-only memory rule.
+    // Explicit memory selection overrides the default local-only memory rule.
     let mut index = Index::with_namespaces(
         MockEmbedder::new(),
         MemStore::new(),
@@ -280,8 +269,7 @@ fn fusing_one_leg_plus_an_empty_leg_keeps_the_legs_ranking() {
         fuse_hit("local", "document/a", 0, 0.9),
         fuse_hit("local", "document/b", 0, 0.4),
     ];
-    // A lone leg — and a leg plus an empty one, the vector-only backend
-    // default — preserves the leg's order, rescaled by rank.
+    // A lone leg — or one beside an empty leg, the vector-only default — keeps its order.
     for fused in [
         rrf_fuse(std::slice::from_ref(&leg), 10),
         rrf_fuse(&[leg, Vec::new()], 10),
@@ -304,9 +292,7 @@ fn fusing_one_leg_plus_an_empty_leg_keeps_the_legs_ranking() {
 
 #[test]
 fn fusing_never_lets_an_argosy_precedence_reappear_in_ties() {
-    // Two hits tied in the leg share that leg's rank, so their fused
-    // scores tie exactly (QRY-7: ranking follows retrieval relevance
-    // alone) even though the fuse assigns ranks positionally.
+    // Tied leg scores stay exact ties in the fused scores (QRY-7), despite positional ranks.
     let leg = vec![
         fuse_hit("local", "document/shared", 0, 0.5),
         fuse_hit("vendor", "document/shared", 0, 0.5),
@@ -321,9 +307,7 @@ fn fusing_never_lets_an_argosy_precedence_reappear_in_ties() {
 
 #[test]
 fn fusing_boosts_the_units_both_legs_agree_on() {
-    // The semantic winner is rank 0 on the vector leg; the exact-term
-    // document is rank 1 there but rank 0 on the lexical leg, and the
-    // sum of two contributions beats one.
+    // The exact-term doc is rank 1 on the vector leg and rank 0 on the lexical leg.
     let fused = rrf_fuse(
         &[
             vec![
@@ -351,8 +335,7 @@ fn fusing_boosts_the_units_both_legs_agree_on() {
 
 #[test]
 fn fusing_treats_passages_of_one_concept_as_separate_units() {
-    // Chunk ordinals are part of the key: a concept's passages compete
-    // independently, and only the agreement on the SAME passage boosts.
+    // Chunk ordinals are part of the key — only agreement on the SAME passage boosts.
     let fused = rrf_fuse(
         &[
             vec![
@@ -373,8 +356,7 @@ fn fusing_treats_passages_of_one_concept_as_separate_units() {
 
 #[test]
 fn fusing_truncates_only_after_the_fusion() {
-    // A 40-hit vector leg truncated to k = 2 must contribute lexical-leg
-    // hits beyond the vector top-k to the fused head, not pre-truncate.
+    // Truncation happens after the fusion: hits beyond a leg's top-k still reach the head.
     let vector_leg: Vec<SearchHit> = (0..40)
         .map(|i| {
             fuse_hit(

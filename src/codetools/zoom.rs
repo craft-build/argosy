@@ -1,5 +1,4 @@
-//! The `zoom` tool: the body of one symbol (or a line range) in a file,
-//! ported from Craft's `tools/zoom.rs`.
+//! The `zoom` tool: the body of one symbol (or a line range) in a file.
 
 use std::path::Path;
 
@@ -16,8 +15,7 @@ use crate::error::Result;
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ZoomParams {
-    /// Path (absolute, or relative to the server's working directory) of the
-    /// file to zoom into.
+    /// Path (absolute, or relative to the server's working directory) of the file to zoom into.
     pub path: String,
     /// Symbol name to zoom into (function, struct, class, heading, etc.).
     pub symbol: Option<String>,
@@ -34,13 +32,11 @@ pub struct ZoomParams {
 pub struct ZoomReport {
     /// The resolved path that was zoomed.
     pub path: String,
-    /// Header line (`<kind> <name> (<lines>)` or `lines N-M`) followed by
-    /// the numbered snippet.
+    /// Header (`<kind> <name> (<lines>)` or `lines N-M`) plus the numbered snippet.
     pub text: String,
 }
 
-/// Runs the `zoom` tool: by symbol, by line range, or (fallback) by textual
-/// definition-prefix match.
+/// Runs the `zoom` tool: by symbol, by line range, or (fallback) textual prefix match.
 pub fn run(code: &CodeTools, params: ZoomParams) -> Result<ZoomReport> {
     let path = code.resolve_path(&params.path)?;
     let p = Path::new(&path);
@@ -267,8 +263,7 @@ mod tests {
         assert!(result.text.contains("1 |"));
     }
 
-    /// Zooming a markdown heading returns the section's content, not just
-    /// the heading line plus context.
+    /// Zooming a heading returns the section's content, not just the heading line.
     #[test]
     fn zoom_markdown_heading_returns_section_content() {
         let content = "# Guide\n\n## Error Handling\n\nfirst line of section\n\nmore detail\n\n## Next Section\n\nbye\n";
@@ -286,8 +281,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
-        // Each candidate carries its line range — the discriminator the
-        // caller needs to pick one.
+        // Each candidate carries its line range, the discriminator to pick one.
         assert!(err.to_string().contains("(lines "), "{err}");
     }
 

@@ -1,12 +1,6 @@
 //! User-level configuration, loaded from `~/.config/argosy` (BarkML).
 //!
-//! One user, one machine — nothing here is project specific. Either a
-//! single `~/.config/argosy.bml` file or any number of `*.bml` files under
-//! `~/.config/argosy/` (loaded in sorted file-name order); when both
-//! exist, both load. Missing files are fine: the all-defaults [`Config`]
-//! applies. Each key may be set in exactly one file — setting the same
-//! key twice is reported as a configuration collision, never a silent
-//! override.
+//! A key set in more than one file is a collision, never a silent override.
 //!
 //! ```bml
 //! output {
@@ -59,11 +53,6 @@
 //!     max_input_tokens = 512             // trim over-budget requests (estimated)
 //! }
 //! ```
-//!
-//! Paths honor `$XDG_CONFIG_HOME` (falling back to `~/.config`). Location
-//! of argosy state and cache data stays with the standard environment
-//! (`$XDG_STATE_HOME`, `$ARGOSY_EMBED_CACHE_DIR`) except where this
-//! config explicitly overrides it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -73,9 +62,8 @@ use barkml::{Loader, StandardLoader};
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::ResultExt;
 
-/// Deserializes a `usize` from any BarkML integer. Plain literals lex as
-/// signed (`5`), suffixed ones as unsigned (`5u64`); both spellings must
-/// configure a count.
+/// Deserializes a `usize` from any BarkML integer: plain literals lex as
+/// signed (`5`), suffixed ones as unsigned (`5u64`).
 fn flex_uint<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<usize, D::Error> {
     struct V;
     impl serde::de::Visitor<'_> for V {
@@ -96,8 +84,7 @@ fn flex_uint<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<
 use crate::error::{ConfigSnafu, Result};
 use crate::trust::{TrustPolicy, TrustTier};
 
-/// The user-level configuration. Every field has a default matching the
-/// pre-configuration behavior; command-line flags always win over it.
+/// The user-level configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -137,9 +124,8 @@ pub struct OutputConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PathsConfig {
-    /// Where the embedding model weights are cached (default: the
-    /// `~/.cache/argosy/embeddings` layout; same effect as setting
-    /// `$ARGOSY_EMBED_CACHE_DIR`).
+    /// Where the embedding model weights are cached; same effect as
+    /// `$ARGOSY_EMBED_CACHE_DIR`.
     pub embed_cache_dir: Option<PathBuf>,
     /// File name of the derived index inside a project's state directory.
     pub index_db_name: Option<String>,
@@ -158,12 +144,12 @@ pub struct PullConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IndexConfig {
     /// The embedding model for semantic indexing, by registry name
-    /// (e.g. `"all-minilm-l6-v2"`). `None` is the compiled-in default.
-    /// Changing it invalidates existing indexes — the next `index build`
+    /// (e.g. `"all-minilm-l6-v2"`).
+    ///
+    /// Changing it invalidates existing indexes: the next `index build`
     /// performs a full rebuild.
     pub model: Option<String>,
-    /// How `search` ranks: BM25 fused with vector similarity (the
-    /// default) or BM25 alone. See [`SearchModeConfig`].
+    /// How `search` ranks; see [`SearchModeConfig`].
     pub search_mode: SearchModeConfig,
     /// Default hit count for `argosy index query`.
     #[serde(deserialize_with = "flex_uint")]
@@ -171,10 +157,10 @@ pub struct IndexConfig {
     /// Default hit count for the MCP `search`/`search_rules` tools.
     #[serde(deserialize_with = "flex_uint")]
     pub mcp_default_k: usize,
-    /// Token budget for one embedded passage (prefix included). Long
-    /// concepts split by heading into passages at or under this size;
-    /// changing it re-chunks and re-embeds affected concepts on the next
-    /// reconcile. Capped at the embedder's 256-token truncation.
+    /// Token budget for one embedded passage.
+    ///
+    /// Changing it re-chunks and re-embeds affected concepts on the next
+    /// reconcile.
     #[serde(deserialize_with = "flex_uint")]
     pub chunk_max_tokens: usize,
 }
@@ -191,20 +177,17 @@ impl Default for IndexConfig {
     }
 }
 
-/// The `index.search_mode` selector: how search ranks, and whether an
-/// embedding model is involved at all.
+/// The `index.search_mode` selector: how search ranks.
+///
+/// Switching between modes invalidates existing indexes, forcing a full
+/// rebuild.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SearchModeConfig {
-    /// Hybrid retrieval: an FTS5 BM25 leg and a vector leg, fused by
-    /// reciprocal rank fusion — exact identifiers rank next to semantic
-    /// matches. The default.
+    /// Hybrid retrieval: BM25 fused with vector similarity; the default.
     #[default]
     Hybrid,
-    /// Lexical-only retrieval: BM25 over the same chunked passages, no
-    /// embedding model is ever downloaded (the zero-model mode). Exact
-    /// terms rank strongly; paraphrases do not. Switching between modes
-    /// invalidates existing indexes — the next `index build` performs a
-    /// full rebuild.
+    /// Lexical-only retrieval: BM25 alone, no embedding model is ever
+    /// downloaded.
     #[serde(rename = "lexical")]
     Lexical,
 }
@@ -236,16 +219,16 @@ pub struct CatalogConfig {
     pub redact_home: bool,
 }
 
-/// Defaults for the code-intelligence tools (`outline`, `zoom`, `astgrep`,
-/// `conflicts`, `inspect`, `callgraph`, `repomap`).
+/// Defaults for the code-intelligence tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CodeToolsConfig {
     /// Let the code tools resolve absolute paths outside the workspace
-    /// directory the server was spawned in. Off by default: every path
-    /// parameter must stay inside the workspace, so a confused or
-    /// injected caller cannot read — or, through `astgrep apply` /
-    /// `conflicts resolve`, write — files outside it.
+    /// directory the server was spawned in.
+    ///
+    /// Off by default so a confused or injected caller cannot read — or,
+    /// through `astgrep apply` and `conflicts resolve`, write — files
+    /// outside the workspace.
     pub allow_external_paths: bool,
 }
 
@@ -290,13 +273,9 @@ impl SessionConfig {
     }
 }
 
-/// Defaults for the optional Jev-compatible decision endpoint (Laya's
-/// `laya-serve`, TypeSafe Jev, or any clone). Off by default; when disabled,
-/// every decision-backed feature degrades to its non-decision behavior.
+/// Defaults for the optional Jev-compatible decision endpoint.
 ///
-/// The wire protocol is the same Jev `POST /v1/systemone` for every provider;
-/// `provider` selects defaults only (default port, API-key env var name), not
-/// behavior.
+/// When disabled, every decision-backed feature degrades to its non-decision behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DecisionConfig {
@@ -304,29 +283,21 @@ pub struct DecisionConfig {
     pub enabled: bool,
     /// Which endpoint family this configuration targets.
     pub provider: DecisionProviderConfig,
-    /// Base URL of the endpoint, e.g. `http://127.0.0.1:8000`. `None` uses the
-    /// provider's default (only `laya-serve` has one).
+    /// Base URL of the endpoint; `None` uses the provider's default.
     pub endpoint: Option<String>,
-    /// Name of the environment variable holding the bearer token. The secret
-    /// itself is never stored in configuration.
+    /// Name of the environment variable holding the bearer token, never
+    /// the secret itself.
     pub api_key_env: Option<String>,
     /// Per-request timeout in milliseconds.
     #[serde(deserialize_with = "flex_uint")]
     pub timeout_ms: usize,
     /// Optional checkpoint/model passthrough honored by servers that support
-    /// it (e.g. Laya's `english` / `multilingual` / `typed-decisions`).
+    /// it.
     pub model: Option<String>,
-    /// Approximate input-token budget for one decision request (state plus
-    /// questions together). Over-budget requests are trimmed before
-    /// sending — longest string fields first, each cut marked in place —
-    /// because the Jev family runs small context windows (laya's shipped
-    /// checkpoints read 512, 1024, or up to 8192 tokens) and an overflowing
-    /// request is either rejected or silently cut past its questions. The
-    /// estimate is a heuristic (roughly 3 characters per token, one per CJK
-    /// character), not a tokenizer. The default 512 matches the smallest
-    /// context laya ships (the `english` checkpoint); raise it for wider
-    /// checkpoints (e.g. 8192 for `laya-multilingual` served with
-    /// `max_len=8192`).
+    /// Approximate input-token budget for one decision request.
+    ///
+    /// Over-budget requests are trimmed before sending; the estimate is a
+    /// heuristic, not a tokenizer.
     #[serde(deserialize_with = "flex_uint")]
     pub max_input_tokens: usize,
 }
@@ -346,8 +317,8 @@ impl Default for DecisionConfig {
 }
 
 impl DecisionConfig {
-    /// The base URL to call: the configured endpoint, or the provider default.
-    /// `None` when neither exists (an enabled `jev` with no explicit endpoint).
+    /// The base URL to call; `None` when neither config nor provider
+    /// supplies one.
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint
             .as_deref()
@@ -371,11 +342,10 @@ impl DecisionConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DecisionProviderConfig {
-    /// A local `laya-serve` (the `laya[serve]` HTTP server). Default.
+    /// A local `laya-serve` HTTP server.
     #[default]
     LayaServe,
-    /// Any other Jev-compatible endpoint, including TypeSafe Jev. Requires an
-    /// explicit `endpoint`.
+    /// Any other Jev-compatible endpoint; requires an explicit `endpoint`.
     Jev,
 }
 
@@ -384,7 +354,7 @@ impl DecisionProviderConfig {
     fn default_endpoint(self) -> Option<&'static str> {
         match self {
             Self::LayaServe => Some("http://127.0.0.1:8000"),
-            // No known default for the hosted Jev API: require an endpoint.
+            // No known default for the hosted Jev API.
             Self::Jev => None,
         }
     }
@@ -410,11 +380,11 @@ pub enum PackageFormatConfig {
     TarGz,
 }
 
-/// The configuration search root: `$XDG_CONFIG_HOME/argosy` (falling
-/// back to `~/.config/argosy`; on Windows, where neither
-/// `$XDG_CONFIG_HOME` nor `$HOME` is set by default,
-/// `%USERPROFILE%\.config\argosy`). A sibling single file
-/// `<...>/argosy.bml` is also part of the search (see [`Config::load`]).
+/// The configuration search root: `$XDG_CONFIG_HOME/argosy`, falling
+/// back to `~/.config/argosy` (`%USERPROFILE%\.config\argosy` on
+/// Windows).
+///
+/// A sibling single file `argosy.bml` is also part of the search.
 pub fn config_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -428,18 +398,15 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 impl Config {
-    /// Loads the user configuration, or the all-defaults [`Config`] when
-    /// no configuration files exist.
+    /// Loads the user configuration, or the all-defaults [`Config`] when none exists.
     pub fn load() -> Result<Self> {
         let dir = config_dir();
         Self::load_from(dir.as_deref())
     }
 
-    /// [`Config::load`] against an explicit search root (tests and hosts
-    /// inject a tempdir instead of touching `~/.config`): the single file
-    /// `<root>.bml` — i.e. the root without its final `argosy` component,
-    /// plus `.bml` — then every `*.bml` file under `<root>/`, in sorted
-    /// name order. `None` means no configuration was found at all.
+    /// [`Config::load`] against an explicit search root: the single file
+    /// `<root>.bml`, then every `*.bml` under `<root>/`, in sorted name
+    /// order.
     pub fn load_from(root: Option<&Path>) -> Result<Self> {
         let Some(root) = root else {
             return Ok(Self::default());
@@ -447,14 +414,12 @@ impl Config {
         let mut loader = StandardLoader::default();
         let mut found = false;
 
-        // The single-file spelling: ~/.config/argosy.bml.
         let single = root.with_extension("bml");
         if single.is_file() {
             loader.add_file(&single).context(ConfigSnafu)?;
             found = true;
         }
 
-        // The directory spelling: every *.bml under ~/.config/argosy/.
         if root.is_dir() {
             let mut files: Vec<PathBuf> = fs::read_dir(root)
                 .map_err(|source| crate::error::Error::Io {
@@ -585,9 +550,9 @@ impl Config {
         Ok(())
     }
 
-    /// The provenance trust policy derived from the `trust` section: the
-    /// maximum OKF tier each named import may carry. Imports with no entry
-    /// are capped at `unverified` whatever their concepts claim.
+    /// The provenance trust policy derived from the `trust` section;
+    /// imports with no entry are capped at `unverified` whatever their
+    /// concepts claim.
     pub fn trust_policy(&self) -> TrustPolicy {
         TrustPolicy::from_caps(self.trust.clone())
     }
@@ -632,7 +597,6 @@ fn home() -> Option<PathBuf> {
 }
 
 /// The user's home directory (`$HOME`, falling back to `%USERPROFILE%`).
-/// Shared by configuration `~` expansion and catalog path redaction.
 pub fn home_dir() -> Option<PathBuf> {
     home()
 }
@@ -812,8 +776,7 @@ mod tests {
 
     #[test]
     fn search_mode_parses_from_config_and_names_its_invariants() {
-        // Default is hybrid; both names load; anything else is a config
-        // error, never a silent default.
+        // Unknown values are a config error, never a silent default.
         assert_eq!(
             Config::default().index.search_mode,
             SearchModeConfig::Hybrid
@@ -925,8 +888,7 @@ mod tests {
         let policy = config.trust_policy();
         assert_eq!(policy.cap("acme-shared"), TrustTier::MachineConfirmed);
         assert_eq!(policy.cap("acme-vetted"), TrustTier::HumanReviewed);
-        // An import with no configured entry caps at unverified, and the
-        // default configuration grants nothing.
+        // No configured entry caps at unverified; the default grants nothing.
         assert_eq!(policy.cap("anything-else"), TrustTier::Unverified);
         assert_eq!(
             Config::default().trust_policy().cap("acme-shared"),

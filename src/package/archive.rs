@@ -1,5 +1,4 @@
-//! The packaging pipeline: directory and tar.gz materialization, the
-//! content hash, and sidecar validation.
+//! Directory and tar.gz materialization, the content hash, and sidecar validation.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -19,16 +18,16 @@ use super::payload::{
 };
 use super::{INTEGRITY_FILENAME, PackageFormat, PackageOptions, PackageReport};
 
-/// Copies `source` to `dest` for distribution. `dest` must be empty for
-/// [`PackageFormat::Directory`] and lie outside the source bundle. Both
-/// formats stage to a sibling temp path and rename on success, so a
-/// mid-copy failure leaves no partial tree or truncated archive.
+/// Copies `source` to `dest` for distribution; `dest` must be empty for
+/// [`PackageFormat::Directory`] and lie outside the source bundle.
+///
+/// Both formats stage and rename on success, so a mid-copy failure leaves
+/// no partial tree or truncated archive.
 pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result<PackageReport> {
     let root = source.root();
 
     // Refuse to package a bundle into itself: Directory mode would mutate
-    // the source underfoot, TarGz would truncate a payload file that was
-    // part of the copy set.
+    // the source; TarGz would truncate a payload file mid-copy.
     let canonical_root = fs::canonicalize(root).context(IoSnafu {
         path: root.to_path_buf(),
     })?;
@@ -60,8 +59,7 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
         .fail();
     }
 
-    // Probe before copying so the exclusion is *visible* whenever memory/
-    // existed at packaging time, even though it always works.
+    // The memory/ exclusion is unconditional; the probe only makes it visible in the report.
     let memory_excluded = fs::symlink_metadata(root.join(MEMORY_DIR)).is_ok();
     #[cfg(feature = "default-index")]
     if options.include_index {
@@ -91,8 +89,7 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                 .fail();
             }
             let staging = staging_path(dest);
-            // A crashed earlier run may have left a stale staging tree behind
-            // (PID reuse makes the name collide); never merge into it.
+            // A crashed run may leave a stale staging tree (PID reuse); never merge into it.
             let _ = fs::remove_dir_all(&staging);
             let result = (|staging: &Path| -> Result<()> {
                 fs::create_dir_all(staging).context(IoSnafu {
@@ -116,8 +113,7 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                 let _ = fs::remove_dir_all(&staging);
                 return Err(e);
             }
-            // Commit: swap the staged tree into place. On failure, clean up
-            // the staging tree too — a full payload copy must not linger.
+            // Commit: swap the staged tree into place. A full copy must not linger on failure.
             let result = (|staging: &Path| -> Result<()> {
                 if dest.exists() {
                     // Verified empty above; remove so the rename can take over.
@@ -136,9 +132,7 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
             }
         }
         PackageFormat::TarGz => {
-            // Symmetry with Directory mode: never clobber an existing
-            // artifact (which also makes the rename cross-platform —
-            // Windows errors on rename-over-existing).
+            // Never clobber an existing artifact (rename-over-existing also fails on Windows).
             if dest.exists() {
                 return ValidationSnafu {
                     reason: format!(
@@ -159,10 +153,8 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                     let mut header = tar::Header::new_gnu();
                     header.set_size(bytes.len() as u64);
                     header.set_mode(0o644);
-                    // mtime 0 (the GNU default for unset) is a deliberate
-                    // reproducibility choice: identical bundles produce
-                    // byte-identical archives. Some strict extractors warn
-                    // about epoch timestamps — that is expected.
+                    // mtime 0 (the GNU default) is a reproducibility choice: identical
+                    // bundles produce byte-identical archives; epoch warnings are expected.
                     header.set_cksum();
                     builder
                         .append_data(&mut header, posix(rel), bytes.as_slice())
@@ -182,7 +174,6 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                 builder.finish().context(IoSnafu {
                     path: staging.to_path_buf(),
                 })?;
-                // `finish()` flushes the gzip stream; the `File` then closes on drop.
                 let _file = builder
                     .into_inner()
                     .and_then(|enc| enc.finish())
@@ -195,7 +186,7 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
                 let _ = fs::remove_file(&staging);
                 return Err(e);
             }
-            // Commit with the same cleanup discipline as the copy path.
+            // Commit; a failed rename must not leave the staged archive behind.
             let result = fs::rename(&staging, dest).context(IoSnafu {
                 path: dest.to_path_buf(),
             });
@@ -221,9 +212,10 @@ pub fn package(source: &Argosy, dest: &Path, options: &PackageOptions) -> Result
 }
 
 /// One SHA-256 over the ordered `(relative-path, file-hash)` pairs of
-/// everything [`package`] would copy — a change detector independent of
-/// `argosy_version` bumps, stable across a packaged copy. Errors when
-/// `argosy_root` is not a bundle root (no `argosy.md`).
+/// everything [`package`] would copy.
+///
+/// A change detector independent of `argosy_version` bumps and stable
+/// across a packaged copy.
 pub fn bundle_content_hash(argosy_root: &Path) -> Result<String> {
     if !argosy_root.join("argosy.md").is_file() {
         return NotAnArgosySnafu {
@@ -243,10 +235,10 @@ pub fn bundle_content_hash(argosy_root: &Path) -> Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Recomputes every hash in the bundle's integrity sidecar. A
-/// missing sidecar, a line whose file is absent, or a hash that disagrees is
-/// an [`Error::IntegrityMismatch`], as is a bundle file present on disk but
-/// not listed in the sidecar — the sidecar claims completeness.
+/// Recomputes every hash in the bundle's integrity sidecar.
+///
+/// A missing sidecar, absent file, disagreeing hash, or unlisted bundle
+/// file is an [`Error::IntegrityMismatch`]: the sidecar claims completeness.
 pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
     let sidecar_path = argosy_root.join(INTEGRITY_FILENAME);
     let text = match fs::read_to_string(&sidecar_path) {
@@ -277,11 +269,9 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
             }
             .fail();
         };
-        // The sidecar text is attacker-controlled: reject anything but
-        // plain non-empty relative paths before touching the filesystem
-        // (containment — this covers literal `..` components, while
-        // `read_bundle_file`'s unconditional canonicalize covers symlinked
-        // path components).
+        // The sidecar text is attacker-controlled: only plain non-empty relative paths
+        // reach the filesystem here; `read_bundle_file`'s canonicalize
+        // catches symlinked path components.
         if rel.is_empty()
             || Path::new(rel)
                 .components()
@@ -322,8 +312,7 @@ pub fn validate_integrity(argosy_root: &Path) -> Result<()> {
         listed.push(rel);
     }
     listed.sort();
-    // The writer lists `.argosy/**` when it shipped them, so
-    // completeness is checked against whatever is actually on disk.
+    // The sidecar may legitimately omit `.argosy/**`; completeness follows disk contents.
     let actual = walk_copied_files(argosy_root, argosy_root.join(INDEX_DIR).is_dir())?;
     if listed != actual {
         return IntegrityMismatchSnafu {

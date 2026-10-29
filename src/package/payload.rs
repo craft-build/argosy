@@ -1,5 +1,4 @@
-//! Payload assembly: the file walk behind packaging, its filters, and the
-//! integrity sidecar text.
+//! Payload assembly: the file walk behind packaging, its filters, and the sidecar text.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -16,11 +15,11 @@ pub(super) const MEMORY_DIR: &str = "memory";
 /// The derivative index directory.
 pub(super) const INDEX_DIR: &str = ".argosy";
 
-/// The bundle-relative file paths [`package`] copies: every file under the
-/// root except the `memory/` namespace (first-component filter — nested
-/// lookalikes survive) and `.argosy/` unless `include_index`. Hard-errors on
-/// unreadable directories: packaging must never silently drop content the
-/// read-only validator would only have reported.
+/// The bundle-relative file paths [`package`] copies: everything except
+/// `memory/` (first component only, so nested lookalikes survive) and
+/// `.argosy/` unless `include_index`.
+///
+/// Unreadable directories are a hard error, never a silent drop.
 pub(super) fn walk_copied_files(root: &Path, include_index: bool) -> Result<Vec<PathBuf>> {
     let walk = sorted_walk(root, Path::new(""));
     if let Some((rel, source)) = walk.unreadable.into_iter().next() {
@@ -36,10 +35,8 @@ pub(super) fn walk_copied_files(root: &Path, include_index: bool) -> Result<Vec<
         .map(|e| e.rel.clone())
         .filter(|rel| {
             rel.components().next() != Some(Component::Normal(std::ffi::OsStr::new(MEMORY_DIR)))
-                // A root-level sidecar from a previous packaging run is not
-                // content: it is regenerated, so it never enters the payload
-                // (and therefore never the content hash either — that is what
-                // makes `bundle_content_hash` stable across a packaged copy).
+                // A root-level sidecar from a previous run is regenerated
+                // content: excluding it keeps the hash stable across a copy.
                 && rel != Path::new(INTEGRITY_FILENAME)
         })
         .collect();
@@ -54,9 +51,7 @@ pub(super) fn walk_copied_files(root: &Path, include_index: bool) -> Result<Vec<
     Ok(files)
 }
 
-/// Recursively collects every regular file under `root.join(rel)`, appending
-/// bundle-relative paths (used for `.argosy/`, which the bundle walker skips
-/// by design since the index is not bundle content).
+/// Recursively collects every regular file under `root.join(rel)` (used for `.argosy/`).
 pub(super) fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(root)
         .context(IoSnafu {
@@ -75,11 +70,8 @@ pub(super) fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> 
         } else if ty.is_file() || ty.is_symlink() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            // SQLite WAL/SHM sidecars never enter the payload: `package`
-            // checkpoints the live index first, so the main file alone
-            // carries the full state and a torn sidecar copy would be
-            // strictly worse than none (also keeps the content hash stable
-            // across live-write activity).
+            // SQLite WAL/SHM sidecars never enter the payload: the index is
+            // checkpointed first, so the main file alone carries full state.
             if name.ends_with("-wal") || name.ends_with("-shm") {
                 continue;
             }
@@ -89,11 +81,11 @@ pub(super) fn collect_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> 
     Ok(())
 }
 
-/// Reads `root/rel` into bytes, resolving symlinks along the way: a link is
-/// materialized as its target's contents iff the canonical target stays
-/// within the (canonical) bundle root, else packaging refuses. Residual
-/// TOCTOU race between check and read — acceptable against a
-/// caller-controlled workspace; fd-relative reads would close it.
+/// Reads `root/rel`, resolving symlinks: a link is materialized as its
+/// target's contents iff the canonical target stays within the canonical
+/// bundle root, else packaging refuses.
+///
+/// A residual TOCTOU race is accepted against a caller-controlled workspace.
 pub(super) fn read_bundle_file(
     root: &Path,
     canonical_root: &Path,
@@ -101,15 +93,12 @@ pub(super) fn read_bundle_file(
     include_index: bool,
 ) -> Result<Vec<u8>> {
     let path = root.join(rel);
-    // Canonicalize unconditionally and read the *resolved* path: check and
-    // read share one resolution, so a symlink swap afterwards cannot
-    // redirect the read.
+    // Canonicalize once and read the resolved path: a later symlink swap cannot redirect it.
     let target = fs::canonicalize(&path).context(IoSnafu { path: path.clone() })?;
     if !target.starts_with(canonical_root) {
         return SymlinkEscapeSnafu { path: path.clone() }.fail();
     }
-    // If resolution crossed a symlink, the target must not land inside an
-    // excluded namespace: the name-based walk filter cannot see aliases.
+    // A symlinked alias must not land inside an excluded namespace: the walk filter is name-based.
     if target != canonical_root.join(rel)
         && let Some(first) = target
             .strip_prefix(canonical_root)
@@ -131,10 +120,8 @@ pub(super) fn posix(rel: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
 }
 
-/// Reads and hashes every file about to be packaged in one pass, so the
-/// copy loop, the tar appender, and the integrity sidecar share one digest
-/// computation; the manifest is ordered first, remaining paths sorted.
-/// The whole payload is resident in memory — fine at knowledge-base scales.
+/// Reads and hashes every file to be packaged in one pass, manifest first,
+/// remaining paths sorted.
 pub(super) fn collect_payload(
     root: &Path,
     include_index: bool,
@@ -167,10 +154,8 @@ pub(super) fn integrity_text(payload: &[(PathBuf, Vec<u8>, String)]) -> String {
     out
 }
 
-/// A sibling path next to `dest` used for failure-atomic staging: the full
-/// artifact is materialized there first and renamed over `dest` only on
-/// success, so a failed run never leaves a partial bundle or a truncated
-/// archive where a valid one (or nothing) stood.
+/// A sibling path next to `dest` for failure-atomic staging: the artifact is
+/// renamed over `dest` only on success.
 pub(super) fn staging_path(dest: &Path) -> PathBuf {
     let mut name = dest
         .file_name()

@@ -1,7 +1,7 @@
 //! The `argosy` binary: argument parsing + one library call + output
-//! formatting per subcommand. Any real logic here is a bug — it belongs in
-//! the library. Exit codes: `0` success, `1` command failure, `2` usage
-//! error.
+//! formatting per subcommand; real logic belongs in the library.
+//!
+//! Exit codes: `0` success, `1` command failure, `2` usage error.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,13 +19,11 @@ use serde::Serialize;
     about = "Create, validate, package, and query OKF knowledge bundles"
 )]
 struct Cli {
-    /// Emit machine-readable JSON on stdout (default: the configured
-    /// `output.json`).
+    /// Emit machine-readable JSON on stdout (default: the configured `output.json`).
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     json: Option<bool>,
 
-    /// Suppress non-error human output (default: the configured
-    /// `output.quiet`).
+    /// Suppress non-error human output (default: the configured `output.quiet`).
     #[arg(short, long, global = true, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     quiet: Option<bool>,
 
@@ -71,9 +69,8 @@ impl Output {
         }
     }
 
-    /// A safety warning: prints even under `--quiet` and `--json` — stderr
-    /// is not part of the JSON contract, and the safeguard must never be
-    /// silent.
+    /// A safety warning: prints even under `--quiet` and `--json` —
+    /// stderr is not part of the JSON contract.
     fn warn(&self, line: &str) {
         eprintln!("warning: {line}");
     }
@@ -93,8 +90,8 @@ impl Output {
     }
 }
 
-/// The library `Error` type of one subcommand execution; business failures
-/// (non-conformant bundle, import findings) are the returned `ExitCode`.
+/// Runs one subcommand: a library `Error` maps to exit 1, while business
+/// failures (non-conformant bundle, import findings) return the `ExitCode`.
 fn cmd_result(out: &Output, config: &Config, command: &Command) -> Result<ExitCode> {
     match command {
         Command::Init(args) => cmd_init(out, args),
@@ -133,9 +130,9 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// The configured embedding-model cache, when to apply it: an explicitly
-/// set `$ARGOSY_EMBED_CACHE_DIR` (or the legacy `$FASTEMBED_CACHE_DIR`)
-/// always wins — then the library resolves it and `None` is returned.
+/// The configured embedding-model cache; `None` when an env override
+/// (`$ARGOSY_EMBED_CACHE_DIR`, legacy `$FASTEMBED_CACHE_DIR`) is set —
+/// the library resolves those itself.
 pub(super) fn embed_cache_override(config: &Config) -> Option<PathBuf> {
     if std::env::var_os("ARGOSY_EMBED_CACHE_DIR")
         .or_else(|| std::env::var_os("FASTEMBED_CACHE_DIR"))
@@ -147,8 +144,6 @@ pub(super) fn embed_cache_override(config: &Config) -> Option<PathBuf> {
 }
 
 /// The process working directory, mapped to the library's `Io` error.
-/// Project-scoped commands (init/pull/convert/index) resolve their
-/// default targets from it.
 fn current_dir() -> Result<PathBuf> {
     std::env::current_dir().map_err(|source| argosy::error::Error::Io {
         path: ".".into(),

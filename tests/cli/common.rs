@@ -1,5 +1,4 @@
-//! Shared helpers: the compiled binary, fixture copies, and scratch
-//! XDG state homes.
+//! Shared helpers: the compiled binary, fixture copies, and scratch XDG state homes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,8 +33,7 @@ pub(crate) fn copy_dir(source: &Path, dest: &Path) {
 }
 
 /// Copies a fixture into a temp directory without the `.argosy/` cache, so
-/// index tests start from a clean slate and mutating tests never touch the
-/// checked-in fixtures.
+/// tests start from a clean slate and never touch the checked-in fixtures.
 pub(crate) fn fixture_copy(name: &str, scratch: &TempDir) -> PathBuf {
     let dest = scratch.path().join(name);
     copy_dir(&fixture(name), &dest);
@@ -46,17 +44,15 @@ pub(crate) fn fixture_copy(name: &str, scratch: &TempDir) -> PathBuf {
     dest
 }
 
-/// A fresh XDG state home the binary can be pointed at with
-/// `XDG_STATE_HOME` (isolated from the user's real `~/.local/state`).
+/// A fresh XDG state home for `XDG_STATE_HOME`, isolated from the user's `~/.local/state`.
 pub(crate) fn xdg_state_home(scratch: &TempDir) -> PathBuf {
     let home = scratch.path().join("xdg-state-home");
     fs::create_dir_all(&home).unwrap();
     home
 }
 
-/// A project in the standard layout: the `default` bundle holds a copy of
-/// the valid fixture, stored under the state dir (never in the project
-/// tree). Returns `(project cwd, XDG_STATE_HOME to inject)`.
+/// A standard-layout project: the `default` bundle (a valid-fixture copy)
+/// lives under the state dir; returns `(project cwd, XDG_STATE_HOME to inject)`.
 #[cfg(feature = "default-index")] // only the gated index tests build projects
 pub(crate) fn fixture_project(scratch: &TempDir) -> (PathBuf, PathBuf) {
     let project = scratch.path().join("project");
@@ -71,8 +67,7 @@ pub(crate) fn fixture_project(scratch: &TempDir) -> (PathBuf, PathBuf) {
     (project, xdg)
 }
 
-/// Initializes `dir` as a git repo with one commit (for `pull` tests; git
-/// needs no network for local clones).
+/// Initializes `dir` as a git repo with one commit; local clones need no network.
 pub(crate) fn git_commit_all(dir: &Path) {
     for args in [
         vec!["init", "--quiet"],
@@ -96,5 +91,3 @@ pub(crate) fn git_commit_all(dir: &Path) {
         assert!(out.status.success(), "git {args:?} failed");
     }
 }
-
-// -------------------------------------------------------------------- init

@@ -21,16 +21,17 @@ use super::{
 
 impl LocalArgosy {
     /// Opens the bundle rooted at `path` as the local (writable) argosy.
+    ///
     /// Same hard-failure semantics as [`Argosy::open`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self(Argosy::open(path)?))
     }
 
-    /// Creates a new, empty argosy at `path` — the root `argosy.md` manifest
-    /// (version `0.1.0`) plus the four reserved namespace directories — and
-    /// opens it. When `name` is `None`, the directory's basename is used.
-    /// Fails when a manifest already exists, when the name cannot be derived,
-    /// or when it falls outside the URI charset `[A-Za-z0-9._-]`.
+    /// Creates a new, empty argosy at `path` — the root `argosy.md` manifest (version
+    /// `0.1.0`) plus the four reserved namespace directories — and opens it.
+    ///
+    /// Fails when a manifest already exists, when no name is given and none can be derived,
+    /// or when the name falls outside the URI charset `[A-Za-z0-9._-]`.
     pub fn init(
         path: impl AsRef<Path>,
         name: Option<&str>,
@@ -96,9 +97,9 @@ impl LocalArgosy {
     }
 
     /// Resolves `id` against `namespace`, returning the bundle-relative and
-    /// absolute target paths. Refuses custom namespaces, ids outside the
-    /// namespace, and reserved filenames; [`ConceptId`]'s parser already
-    /// rejects `..`, `\`, and `:`, so a resolved path cannot escape the root.
+    /// absolute target paths.
+    ///
+    /// Refuses custom namespaces, ids outside the namespace, and reserved filenames.
     fn resolve_path(&self, namespace: &Namespace, id: &ConceptId) -> Result<(PathBuf, PathBuf)> {
         if let Namespace::Custom(name) = namespace {
             return ValidationSnafu {
@@ -130,9 +131,7 @@ impl LocalArgosy {
             ReservedFilenameSnafu
         );
         let path = self.0.root().join(&rel);
-        // Defensive: verify the joined path still lies under the namespace
-        // directory. Unreachable via ConceptId's parser, but checked
-        // unconditionally in release builds too — never trust a joined path.
+        // Defensive: never trust a joined path, even one the ConceptId parser vouches for.
         ensure!(
             path.starts_with(self.0.root().join(namespace.as_dir_name())),
             ValidationSnafu {
@@ -146,10 +145,10 @@ impl LocalArgosy {
     }
 
     /// Writes `concept` at `id` in `namespace`, creating parent directories
-    /// as needed, and returns the absolute path written. Overwriting an
-    /// existing concept at `id` is allowed — this is the deliberate edit
-    /// path. The concept is validated *before* anything touches disk: the
-    /// library never writes a concept [`Argosy::validate`] would flag.
+    /// as needed, and returns the absolute path written.
+    ///
+    /// Overwriting is the deliberate edit path; the concept is validated *before* anything
+    /// touches disk.
     pub fn write_concept(
         &self,
         namespace: Namespace,
@@ -157,9 +156,7 @@ impl LocalArgosy {
         concept: &Concept,
     ) -> Result<PathBuf> {
         let (rel, path) = self.resolve_path(&namespace, id)?;
-        // Memory is the only namespace whose write surface auto-fills the
-        // OKF `type` instead of rejecting — every other namespace keeps the
-        // strict contract below.
+        // Memory is the only namespace that auto-fills the OKF `type` instead of rejecting.
         let concept = if namespace == Namespace::Memory {
             with_memory_type(concept)?
         } else {
@@ -178,8 +175,9 @@ impl LocalArgosy {
     }
 
     /// Deletes the concept at `id` in `namespace`, pruning now-empty parent
-    /// directories up to the namespace root. Deleting a directory-form
-    /// skill's entry point alone is refused (remove the whole skill
+    /// directories up to the namespace root.
+    ///
+    /// A directory-form skill's entry point alone is refused (remove the whole skill
     /// directory instead); file-form entry points delete normally.
     pub fn delete_concept(&self, namespace: Namespace, id: &ConceptId) -> Result<()> {
         let (rel, path) = self.resolve_path(&namespace, id)?;
@@ -191,9 +189,8 @@ impl LocalArgosy {
             && inner.components().count() == 2
             && is_skill_entry_point(inner)
         {
-            // No argosy write API removes a whole skill directory (delete
-            // is concept-file shaped), so the error must say what to do
-            // out-of-band, not point at an API that does not exist.
+            // No argosy write API removes a whole skill directory, so the error must say what
+            // to do out-of-band.
             let skill_dir = path.parent().unwrap_or(&path);
             return NamespaceContractViolationSnafu {
                 requirement: "SKL-2",
@@ -208,7 +205,6 @@ impl LocalArgosy {
         }
         fs::remove_file(&path).context(IoSnafu { path: path.clone() })?;
 
-        // Prune now-empty parents, stopping at the namespace root.
         let ns_root = self.0.root().join(namespace.as_dir_name());
         let mut dir = path.parent();
         while let Some(d) = dir {
@@ -223,10 +219,10 @@ impl LocalArgosy {
         Ok(())
     }
 
-    /// Writes a concept under `memory/`; see
-    /// [`LocalArgosy::write_concept`]. The MCP layer maps this 1:1. A
-    /// frontmatter `type` that is missing or empty is auto-filled as
-    /// `type: Memory` instead of being rejected — MEM-1 still holds on disk.
+    /// Writes a concept under `memory/`; see [`LocalArgosy::write_concept`].
+    ///
+    /// A missing or empty frontmatter `type` is auto-filled as `type: Memory` — MEM-1 still
+    /// holds on disk.
     pub fn write_memory(&self, id: &ConceptId, concept: &Concept) -> Result<PathBuf> {
         self.write_concept(Namespace::Memory, id, concept)
     }
@@ -259,10 +255,11 @@ impl LocalArgosy {
     }
 
     /// Promotes the `memory/` concept at `source` into a new concept at
-    /// `new_id` under the target namespace. The body is copied verbatim;
-    /// frontmatter carries over with a `sources` entry appended and, for
-    /// styleguide targets, `type: Styleguide Rule` plus a non-empty
-    /// `description` (override first). `new_id` must not exist.
+    /// `new_id` under the target namespace.
+    ///
+    /// The body is copied verbatim; frontmatter carries over with a `sources` entry appended,
+    /// and styleguide targets also set `type: Styleguide Rule` plus a non-empty
+    /// `description`.
     pub fn promote_memory(
         &self,
         source: &ConceptId,
@@ -311,8 +308,7 @@ impl LocalArgosy {
             }
         };
 
-        // No silent overwrites: a collision is an error anywhere promotion
-        // is concerned.
+        // No silent overwrites: a collision is an error.
         let (_, new_path) = self.resolve_path(&target_ns, new_id)?;
         ensure!(
             !new_path.exists(),
@@ -332,8 +328,7 @@ impl LocalArgosy {
                 Value::String(description),
             );
         }
-        // Provenance: append, never replace — entries the source
-        // concept already carries are preserved untouched.
+        // Provenance: append, never replace — existing entries are preserved.
         let provenance = {
             let mut entry = Mapping::new();
             entry.insert(
@@ -344,8 +339,7 @@ impl LocalArgosy {
         };
         match frontmatter.get_mut("sources") {
             Some(Value::Sequence(sources)) => sources.push(provenance),
-            // A hand-edited `sources` scalar must be surfaced, not
-            // silently replaced with a fresh one-element list.
+            // A hand-edited `sources` scalar must be surfaced, not silently replaced.
             Some(_) => {
                 return ValidationSnafu {
                     reason: format!(
@@ -364,8 +358,7 @@ impl LocalArgosy {
         }
 
         let drafted = Concept::new(frontmatter, source_concept.body().to_string())?;
-        // Full write path: reserved-filename, prefix, and namespace-contract
-        // checks all apply to the draft too.
+        // Reserved-filename, prefix, and namespace-contract checks apply to the draft too.
         self.write_concept(target_ns, new_id, &drafted)?;
 
         Ok(Promotion {

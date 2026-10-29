@@ -1,22 +1,5 @@
-//! The global catalog: one read-only, machine- and human-readable index of
-//! every project slot under the user's argosy state dir.
-//!
-//! Argosy state lives outside project trees (`<state>/projects/<slug>/…`;
-//! see [`crate::pull`]), so with many repositories and worktrees it is hard
-//! to see what exists, what an installation holds, and what has gone stale.
-//! [`build`] scans the state dir on demand and returns a [`Catalog`]
-//! describing each slot: its canonical project root (recorded when the slot
-//! was created — see [`crate::pull::record_project_root`]), the local
-//! (writable) bundle and read-only imports, the active global argosies,
-//! per-namespace content counts, semantic-index status, duplicate concept
-//! ids across the slot's active bundles, and whether the original project
-//! directory still exists.
-//!
-//! The catalog is regenerated, never hand-edited: `argosy catalog --write`
-//! materializes [`render_markdown`] at `<state>/README.md`, and the MCP
-//! server serves the same text as the `argosy://catalog` resource. Because
-//! that file lives at the state root — outside every bundle — packaging
-//! never includes it.
+//! The global catalog: a read-only index of every project slot under the user's argosy
+//! state dir, built on demand by [`build`] and regenerated, never hand-edited.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,17 +18,15 @@ use crate::styleguide::StyleguideRule;
 /// The catalog file name under the state root: `<state>/README.md`.
 pub const CATALOG_FILE: &str = "README.md";
 
-/// Tunables for [`build`]: the expected embedding-model identity (so index
-/// status can flag a model mismatch) and the configured index file name.
+/// Tunables for [`build`].
 #[derive(Debug, Clone, Default)]
 pub struct CatalogOptions {
-    /// The model identity the current configuration expects. `None` reports
-    /// a store's recorded model without judging it.
+    /// The model identity the current configuration expects; `None` reports
+    /// the store's recorded model without judging it.
     pub expected_model_id: Option<String>,
     /// The index file name (default: [`pull::INDEX_DB_NAME`]).
     pub index_db_name: Option<String>,
-    /// The chunking budget, so the staleness preview matches what a build
-    /// with this configuration would (re)embed.
+    /// The chunking budget, so the staleness preview matches what a build would (re)embed.
     pub chunk_config: crate::index::ChunkConfig,
 }
 
@@ -81,8 +62,7 @@ pub struct ProjectEntry {
     /// The path-hash suffix of the slug (`1a2b3c4d`), or empty when the slug
     /// does not end in one.
     pub hash: String,
-    /// The canonical project root recorded when the slot was created, if
-    /// any (slots predating root recording have none).
+    /// The canonical project root recorded when the slot was created, if any.
     pub root: Option<PathBuf>,
     /// Whether [`ProjectEntry::root`] still exists on disk; `None` when no
     /// root was recorded.
@@ -120,16 +100,14 @@ pub struct BundleInfo {
     pub argosy_version: String,
     /// Per-namespace content counts for this bundle.
     pub contents: NamespaceCounts,
-    /// Present iff the checkout fails integrity verification: such an
-    /// import is *excluded* from every session (never served) — the
-    /// catalog still lists it, flagged, so the gap is visible.
+    /// Present iff the checkout fails integrity verification and is excluded
+    /// from every session; still listed here, flagged, so the gap is visible.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
 }
 
-/// Per-namespace concept counts. Skills and styleguide rules are counted by
-/// their contract-satisfying entries ([`Skill::list`],
-/// [`StyleguideRule::list`]); documents and memories count concept files.
+/// Per-namespace concept counts; skills and styleguides count only
+/// contract-satisfying entries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct NamespaceCounts {
     /// Concepts under `document/`.
@@ -143,7 +121,7 @@ pub struct NamespaceCounts {
 }
 
 impl NamespaceCounts {
-    /// Merges `other` into `self` (component-wise addition).
+    /// Merges `other` into `self`.
     fn add(&mut self, other: &NamespaceCounts) {
         self.documents += other.documents;
         self.memories += other.memories;
@@ -175,8 +153,7 @@ pub struct IndexStatus {
     /// The model identity the current configuration expects, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_model_id: Option<String>,
-    /// The index database's last-modified time, as seconds since the Unix
-    /// epoch (the closest thing to a "last indexed" time on disk).
+    /// The index database's last-modified time, as seconds since the Unix epoch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_indexed_secs: Option<u64>,
     /// What the next `index build` would change, when it could be computed
@@ -210,8 +187,7 @@ impl IndexStatus {
     }
 }
 
-/// A scanned bundle plus the concept ids it defines, kept during build for
-/// duplicate detection and not serialized.
+/// A scanned bundle plus the concept ids it defines, for duplicate detection.
 struct ScannedBundle {
     info: BundleInfo,
     ids: Vec<ConceptId>,
@@ -223,10 +199,8 @@ impl ScannedBundle {
     }
 }
 
-/// Scans `state_root` and returns the catalog. Read-only: it opens bundles
-/// and (with the `default-index` feature) index databases read-only, and
-/// never writes. A malformed bundle or index is skipped rather than failing
-/// the whole catalog.
+/// Scans `state_root` and returns the catalog; read-only, and a malformed
+/// bundle or index is skipped rather than failing the whole catalog.
 pub fn build(state_root: &Path, options: &CatalogOptions) -> Result<Catalog> {
     let globals = scan_bundles(&state_root.join("global"), None);
 
@@ -250,10 +224,10 @@ fn build_entry(slot: &Path, globals: &[ScannedBundle], options: &CatalogOptions)
     let root_exists = root.as_ref().map(|p| p.is_dir());
     let stale = root_exists == Some(false);
 
-    // With a recorded (canonical) root the slug's hash suffix is checked
-    // against the root's actual path hash, so a project merely *named* like
-    // `…-deadbeef` is not misread as carrying a hash. Without a sidecar the
-    // textual shape is the best available guess.
+    // With a recorded root the slug's suffix is checked against the root's
+    // actual path hash (a slug merely *named* `…-deadbeef` is not misread
+    // as carrying a hash); without a sidecar the textual shape is the best
+    // available guess.
     let hash = match &root {
         Some(root) => {
             let expected = &crate::hash::sha256_hex(root.as_os_str().as_encoded_bytes())[..8];
@@ -269,11 +243,9 @@ fn build_entry(slot: &Path, globals: &[ScannedBundle], options: &CatalogOptions)
     let local_scanned = scan_local(slot);
     let imports = scan_bundles(slot, Some(pull::LOCAL_ARGOSY_NAME));
 
-    // The same bundle can be installed both as a slot import and globally
-    // (e.g. a project pins a global bundle locally). It is one bundle in
-    // two roles, not two shadowing bundles: count it once (imports take
-    // precedence) and never report its own concepts as duplicates. The
-    // `globals` list still shows it for display.
+    // A bundle may be installed both as a slot import and globally: count
+    // it once (imports take precedence) and never report its own concepts
+    // as duplicates, but still list it under `globals`.
     let seen_bundles: Vec<(String, String)> = local_scanned
         .iter()
         .chain(imports.iter())
@@ -284,7 +256,6 @@ fn build_entry(slot: &Path, globals: &[ScannedBundle], options: &CatalogOptions)
         .filter(|g| !seen_bundles.contains(&bundle_key(g)))
         .collect();
 
-    // Contents aggregate every bundle active for the project.
     let mut contents = NamespaceCounts::default();
     for bundle in local_scanned
         .iter()
@@ -318,18 +289,14 @@ fn build_entry(slot: &Path, globals: &[ScannedBundle], options: &CatalogOptions)
     }
 }
 
-/// The bundle-identity key used to detect one bundle installed in two
-/// roles (a slot import and a global checkout): manifest identity is
-/// name plus content version.
+/// The bundle-identity key: manifest name plus content version.
 fn bundle_key(b: &ScannedBundle) -> (String, String) {
     (b.info.name.clone(), b.info.argosy_version.clone())
 }
 
-/// Concept ids shared by more than one bundle, sorted by id. Bundles are
-/// visited in precedence order (local first), so each duplicate's `argosies`
-/// list reads as the precedence chain. Bundles are identified by their root
-/// directory, not manifest name: two distinct checkouts can share a manifest
-/// name and are still separate bundles.
+/// Concept ids shared by more than one bundle, sorted by id; bundles are
+/// identified by root directory, not manifest name, since distinct checkouts
+/// can share a manifest name.
 fn duplicates<'a>(bundles: impl Iterator<Item = &'a ScannedBundle>) -> Vec<DuplicateConcept> {
     let mut seen: Vec<(ConceptId, Vec<(PathBuf, String)>)> = Vec::new();
     for bundle in bundles {
@@ -355,9 +322,8 @@ fn duplicates<'a>(bundles: impl Iterator<Item = &'a ScannedBundle>) -> Vec<Dupli
         .collect()
 }
 
-/// Computes the index status for a slot. The store is opened read-only;
-/// staleness additionally diffs the store against the active bundles and is
-/// only available with the `default-index` feature.
+/// Computes the index status for a slot; read-only, with staleness available
+/// only under the `default-index` feature.
 fn index_status(
     slot: &Path,
     local: &Option<ScannedBundle>,
@@ -397,8 +363,7 @@ fn index_status(
         if let Ok(store) = SqliteVecStore::open_read_only(&db) {
             status.model_id = store.model_id().map(str::to_string);
             // Staleness needs the active bundle set; skip when the local
-            // bundle is missing (a broken slot is still reported, just
-            // without a diff).
+            // bundle is missing (still reported, just without a diff).
             let import_paths: Vec<PathBuf> = imports
                 .iter()
                 .chain(globals.iter())
@@ -424,8 +389,8 @@ fn index_status(
     }
 }
 
-/// The slot directories under `<state>/projects/`, sorted by name. Missing
-/// or unreadable `projects/` is "no projects", not an error.
+/// The slot directories under `<state>/projects/`, sorted by name; a
+/// missing or unreadable `projects/` means "no projects", not an error.
 fn list_slots(state_root: &Path) -> Vec<PathBuf> {
     let dir = state_root.join("projects");
     let Ok(mut entries) = fs::read_dir(&dir).map(|rd| rd.flatten().collect::<Vec<_>>()) else {
@@ -439,10 +404,9 @@ fn list_slots(state_root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The bundle checkouts directly under `dir` (directories holding an
-/// `argosy.md`), sorted by directory name. `exclude` skips one checkout name
-/// (the local `default`, scanned separately with `writable = true`). Missing
-/// or unreadable `dir` means "no bundles"; unopenable checkouts are skipped.
+/// The bundle checkouts directly under `dir` (holding an `argosy.md`),
+/// sorted by name; `exclude` skips one checkout name. Missing or unreadable
+/// `dir` means "no bundles"; unopenable checkouts are skipped.
 fn scan_bundles(dir: &Path, exclude: Option<&str>) -> Vec<ScannedBundle> {
     let Ok(mut entries) = fs::read_dir(dir).map(|rd| rd.flatten().collect::<Vec<_>>()) else {
         return Vec::new();
@@ -511,8 +475,7 @@ fn scan_one(argosy: &Argosy) -> ScannedBundle {
     }
 }
 
-/// Per-namespace counts for one bundle. A listing failure for a namespace
-/// counts as zero rather than failing the catalog.
+/// Per-namespace counts for one bundle; a listing failure counts as zero.
 fn counts(argosy: &Argosy) -> NamespaceCounts {
     NamespaceCounts {
         documents: argosy
@@ -528,9 +491,8 @@ fn counts(argosy: &Argosy) -> NamespaceCounts {
     }
 }
 
-/// Splits a slot slug into its project-name and hash parts. The hash is the
-/// final `-`-delimited component when it is exactly eight hex digits;
-/// otherwise the whole slug is the name and the hash is empty.
+/// Splits a slot slug into name and hash parts: the hash is the final
+/// `-`-delimited component when it is exactly eight hex digits, else empty.
 fn split_slug(slug: &str) -> (&str, &str) {
     match slug.rsplit_once('-') {
         Some((name, hash)) if hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
@@ -540,10 +502,8 @@ fn split_slug(slug: &str) -> (&str, &str) {
     }
 }
 
-/// The part of `path` after the `home` prefix, or `None` when `path` is not
-/// under `home`. On Windows, where paths are case-insensitive, prefix
-/// components are compared case-insensitively (`C:\Users\bob` vs
-/// `c:\users\BOB`); elsewhere the comparison is exact.
+/// The part of `path` after the `home` prefix, or `None` outside it;
+/// compared case-insensitively on Windows, exactly elsewhere.
 fn strip_home_prefix(path: &Path, home: &Path) -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -572,9 +532,8 @@ fn strip_home_prefix(path: &Path, home: &Path) -> Option<PathBuf> {
 /// Rewrites every home-prefixed path in the catalog to `~/…`, so a shared or
 /// pasted catalog does not leak the user's home directory.
 pub fn redact_home(catalog: &mut Catalog, home: &Path) {
-    // Try both the given spelling and its canonical form: recorded roots are
-    // canonicalized (e.g. macOS `/var` -> `/private/var`), while the state
-    // root and config-derived paths may not be.
+    // Try both spellings: recorded roots are canonicalized (macOS `/var` ->
+    // `/private/var`), while other catalog paths may not be.
     let mut homes = vec![home.to_path_buf()];
     if let Ok(canonical) = home.canonicalize()
         && canonical != home
@@ -612,8 +571,7 @@ pub fn redact_home(catalog: &mut Catalog, home: &Path) {
 }
 
 /// Writes [`render_markdown`] to `<state_root>/README.md`, returning the
-/// path written. The file lives outside every bundle, so packaging (which
-/// only ever sees bundle contents) never includes it.
+/// path; the file lives outside every bundle, so packaging never includes it.
 pub fn write(state_root: &Path, catalog: &Catalog) -> Result<PathBuf> {
     let path = state_root.join(CATALOG_FILE);
     fs::create_dir_all(state_root).context(IoSnafu {
@@ -819,8 +777,6 @@ mod tests {
 
     #[test]
     fn a_tampered_import_is_listed_but_flagged_as_not_served() {
-        // The catalog must not present as healthy an import that every
-        // session excludes: it stays listed, flagged INTEGRITY FAILED.
         let scratch = TempDir::new().unwrap();
         let state = scratch.path().join("argosy");
         let project_root = scratch.path().join("myproj");
@@ -829,7 +785,6 @@ mod tests {
         let slot = pull::record_project_root_at(&state, &project_root).unwrap();
         bundle(&slot.join("default"), "myproj", 1, 0);
 
-        // A packaged, stamped import that is tampered with afterwards.
         let source = TempDir::new().unwrap();
         let shared = bundle(source.path(), "shared-knowledge", 1, 0);
         let import = slot.join("shared");
@@ -952,18 +907,13 @@ mod tests {
         fs::create_dir_all(&project_root).unwrap();
         let slot = pull::record_project_root_at(&state, &project_root).unwrap();
         bundle(&slot.join("default"), "pinproj", 0, 0);
-        // Same manifest name and version, two roles: a project-local import
-        // and the global checkout.
         bundle(&slot.join("shared"), "shared", 2, 0);
         bundle(&state.join("global/team"), "shared", 2, 0);
 
         let catalog = build(&state, &options()).unwrap();
         let entry = &catalog.projects[0];
-        // The global is still listed for display…
         assert_eq!(entry.imports.len(), 1);
         assert_eq!(entry.globals.len(), 1);
-        // …but its concepts are counted once and never reported as
-        // duplicates of the import (2 shared documents, not 4).
         assert_eq!(entry.contents.documents, 2);
         assert!(
             entry.duplicate_concepts.is_empty(),
@@ -976,8 +926,6 @@ mod tests {
     fn hash_is_checked_against_the_recorded_root_not_the_slug_text() {
         let scratch = TempDir::new().unwrap();
         let state = scratch.path().join("argosy");
-        // A project legitimately named like `name-hash`: the slug's trailing
-        // hex component is part of the name, not a hash suffix.
         let project_root = scratch.path().join("deadbeef-cafe1234");
         fs::create_dir_all(&project_root).unwrap();
         let slot = pull::record_project_root_at(&state, &project_root).unwrap();
@@ -985,21 +933,15 @@ mod tests {
 
         let catalog = build(&state, &options()).unwrap();
         let entry = &catalog.projects[0];
-        // The slug is `deadbeef-cafe1234-<hash>`; `cafe1234` is part of the
-        // name, so the hash is the root's actual path hash, never
-        // `cafe1234`.
         assert_ne!(entry.hash, "cafe1234");
         assert_eq!(entry.hash.len(), 8);
 
-        // A host-written slot whose sidecar points elsewhere carries the
-        // exact hash of the recorded root, regardless of the slug's shape.
         let other = scratch.path().join("real-project");
         fs::create_dir_all(&other).unwrap();
         let slug = pull::project_slug(&other);
         let manual = state.join("projects").join(&slug);
         fs::create_dir_all(&manual).unwrap();
-        // The sidecar must carry the canonical spelling, as
-        // record_project_root_at would write it.
+        // The sidecar must carry the canonical spelling record_project_root_at would write.
         let canonical_other = other.canonicalize().unwrap();
         fs::write(
             manual.join(pull::SLOT_ROOT_FILE),
@@ -1013,9 +955,8 @@ mod tests {
         assert_eq!(entry.slug, slug);
         assert_eq!(entry.hash, expected);
 
-        // And a host-written slot whose slug simply does not end in the
-        // recorded root's hash reports no hash at all rather than a
-        // guess.
+        // A slug that does not end in the recorded root's hash reports no
+        // hash at all rather than a guess.
         let mismatch = state.join("projects/hexy-deadbeef");
         fs::create_dir_all(&mismatch).unwrap();
         fs::write(
@@ -1046,8 +987,6 @@ mod tests {
 
     #[test]
     fn broken_local_bundle_is_reported_as_missing() {
-        // A corrupt `default` (argosy.md present but unopenable) is skipped
-        // from the catalog rather than failing the whole build.
         let scratch = TempDir::new().unwrap();
         let state = scratch.path().join("argosy");
         let project_root = scratch.path().join("brokenproj");
@@ -1073,9 +1012,6 @@ mod tests {
         symlink(&real_home, &alias).unwrap();
         let project_root = real_home.join("repo/myproj");
         fs::create_dir_all(&project_root).unwrap();
-        // recorded_project_root_at canonicalizes the project root, so the
-        // recorded spelling is the real one while redaction is asked for the
-        // alias — exactly the two-spelling case redact_home must bridge.
         let state = alias.join("state/argosy");
         let slot = pull::record_project_root_at(&state, &project_root).unwrap();
         bundle(&slot.join("default"), "myproj", 1, 0);
@@ -1117,7 +1053,7 @@ mod tests {
         assert!(markdown.contains("documents: 3"), "{markdown}");
         assert!(markdown.contains("skills: 1"), "{markdown}");
         assert!(markdown.contains("- Index: absent"), "{markdown}");
-        // State root is redacted too (no absolute home path leaks).
+        // The state root is redacted too.
         assert!(
             !markdown.contains(&scratch.path().display().to_string()),
             "{markdown}"

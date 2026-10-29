@@ -1,34 +1,7 @@
-//! The optional decision layer: a generic client for a **Jev-compatible**
-//! decision endpoint (`POST /v1/systemone`), which both the self-hosted
-//! [`laya-serve`](https://huggingface.co/convaiinnovations/laya) and the
-//! hosted TypeSafe Jev speak.
+//! The optional decision layer: a client for a Jev-compatible decision
+//! endpoint (`POST /v1/systemone`), off unless configured.
 //!
-//! This is the decision sibling of the embedding layer: a small trait
-//! boundary ([`DecisionProvider`]) with a no-op [`Disabled`] default and one
-//! HTTP implementation ([`JevClient`]). argosy ships no model weights and
-//! takes no vendor dependency — a consumer points [`crate::config::DecisionConfig`]
-//! at an endpoint it runs or subscribes to, or leaves decisions disabled.
-//!
-//! The wire vocabulary is typed (`choice` / `score` / `noul`) and dynamic
-//! (option sets are defined per request), so requests and responses are
-//! carried as JSON. The client exposes the raw per-answer fields faithfully
-//! and normalizes only what every Jev-compatible server shares: the answer
-//! value and, when present, `answer_confidence`. It deliberately does **not**
-//! reinterpret `confidence`: Laya computes it as entropy, Jev as a
-//! max-probability formula, so thresholds are the consumer's to fit per
-//! endpoint.
-//!
-//! Calls are blocking (reqwest's blocking client) and must run off async
-//! workers — argosy's MCP dispatch already routes them through
-//! `spawn_blocking`.
-//!
-//! Requests are kept within a configured input-token estimate
-//! ([`crate::config::DecisionConfig::max_input_tokens`], default 512 — the
-//! smallest context laya's checkpoints read): an over-budget request is
-//! trimmed before sending, longest fields first and marked in place, so a
-//! long question, rule set, or diff hunk neither errors at the endpoint
-//! nor gets silently cut past its questions. See the private `budget`
-//! submodule for the estimate and the trimming rules.
+//! Confidence is never reinterpreted; providers compute it differently.
 
 mod budget;
 
@@ -42,7 +15,7 @@ use crate::config::{DecisionConfig, DecisionProviderConfig};
 use crate::error::{Error, Result};
 
 /// How long a failed endpoint is treated as unreachable before another
-/// network attempt is made. Bounds the cost of a down sidecar on a hot path.
+/// attempt, bounding the cost of a down sidecar.
 const DOWN_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// The `answer_confidence`-style keys a Jev-compatible answer may carry, in
@@ -53,7 +26,6 @@ const CONFIDENCE_KEYS: [&str; 2] = ["answer_confidence", "confidence"];
 const ANSWER_KEYS: [&str; 3] = ["choice", "score", "noul"];
 
 /// One typed question in the Jev `choice` / `score` / `noul` vocabulary.
-/// Serializes to the wire shape (`{"type": "noul", "instructions": ...}`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Question {
@@ -113,7 +85,7 @@ impl Question {
 /// pinning the server-side model/checkpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionRequest {
-    /// The state under evaluation (free-form JSON: text, a record, a diff, …).
+    /// The state under evaluation (free-form JSON).
     pub state: serde_json::Value,
     /// Named questions, in the wire shape.
     pub questions: serde_json::Map<String, serde_json::Value>,
@@ -159,8 +131,7 @@ pub struct Usage {
 }
 
 /// A decision response: one answer object per named question, plus optional
-/// usage and routing metadata. Unknown fields are preserved in the raw answer
-/// values.
+/// usage and routing metadata.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecisionResponse {
     #[serde(default)]
@@ -206,14 +177,16 @@ pub enum ChoiceResolution {
     Selected { label: String, value: String },
     /// The endpoint chose the explicit "none" option.
     None,
-    /// The endpoint returned a label that is not in the option set (a
-    /// protocol surprise the caller should surface, not silently drop).
+    /// The endpoint returned a label that is not in the option set; surface
+    /// it, don't drop it.
     Unknown(String),
 }
 
 /// Maps a single-`choice` answer back onto `labels` (pairs of the label the
-/// model saw and the caller's value). `none_label` is the explicit
-/// "no option applies" label. A missing answer is [`ChoiceResolution::None`].
+/// model saw and the caller's value); `none_label` is the explicit
+/// "no option applies" label.
+///
+/// A missing answer resolves to [`ChoiceResolution::None`].
 pub fn resolve_choice(
     response: &DecisionResponse,
     question: &str,
@@ -235,11 +208,10 @@ pub fn resolve_choice(
     }
 }
 
-/// A decision backend. Implementations are shared and may hold locks, so they
-/// are `Send + Sync`; [`DecisionProvider::decide`] is blocking.
+/// A decision backend; implementations are shared and may hold locks.
 pub trait DecisionProvider: Send + Sync {
-    /// Whether this provider is configured and usable. Cheap and I/O-free
-    /// (it does not probe the network).
+    /// Whether this provider is configured and usable; cheap, never probes
+    /// the network.
     fn is_enabled(&self) -> bool;
 
     /// Runs one decision request. Blocking: call off async workers.
@@ -252,8 +224,8 @@ pub trait DecisionProvider: Send + Sync {
     }
 }
 
-/// The no-op provider: decisions are disabled and every call fails with an
-/// actionable message. The default when `decision.enabled = false`.
+/// The no-op provider used when `decision.enabled = false`; every call fails
+/// with an actionable message.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Disabled;
 
@@ -293,9 +265,8 @@ struct Health {
 }
 
 impl JevClient {
-    /// Builds a client from configuration. Fails when no endpoint can be
-    /// resolved (an enabled `jev` with no explicit `endpoint`) or when the
-    /// HTTP client cannot be constructed.
+    /// Builds a client from configuration, failing when no endpoint can be
+    /// resolved.
     pub fn new(config: &DecisionConfig) -> Result<Self> {
         let endpoint = config
             .endpoint()
@@ -323,10 +294,8 @@ impl JevClient {
         })
     }
 
-    /// The request as it will be sent: the configured model applied when
-    /// the caller left it open, then fitted to the input-token budget so
-    /// the endpoint's context window is never overflowed (longest fields
-    /// trimmed first, each cut marked in place).
+    /// The request as it will be sent: the configured model applied when the
+    /// caller left it open, then fitted to the input-token budget.
     fn prepared(&self, request: &DecisionRequest) -> DecisionRequest {
         let mut owned = request.clone();
         if owned.model.is_none() {
@@ -392,8 +361,8 @@ impl DecisionProvider for JevClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
-            // Application errors (bad request, unauthorized, too many options)
-            // are the caller's to fix; never cooldown the endpoint for them.
+            // Application errors are the caller's to fix; only server errors
+            // cool the endpoint down.
             if status.is_server_error() {
                 self.mark_down();
             }
@@ -444,7 +413,7 @@ impl DecisionProvider for JevClient {
 }
 
 /// Builds the configured provider: [`Disabled`] when decisions are off, a
-/// [`JevClient`] otherwise. The returned box is what consumers hold.
+/// [`JevClient`] otherwise.
 pub fn provider_from_config(config: &DecisionConfig) -> Result<Box<dyn DecisionProvider>> {
     if !config.enabled {
         return Ok(Box::new(Disabled));
@@ -580,20 +549,17 @@ mod tests {
         };
         let client = JevClient::new(&config).unwrap();
 
-        // Within budget: only the model default is applied.
         let small = DecisionRequest::new(serde_json::json!({"question": "what is a bundle?"}));
         let prepared = client.prepared(&small);
         assert_eq!(prepared.model.as_deref(), Some("english"));
         assert_eq!(prepared.state, small.state);
 
-        // An explicit request-side model wins over the configured one.
         let pinned = small.clone().with_model("typed-decisions");
         assert_eq!(
             client.prepared(&pinned).model.as_deref(),
             Some("typed-decisions")
         );
 
-        // Over budget: the bulk field is trimmed and marked in place.
         let large = DecisionRequest::new(serde_json::json!({
             "code_under_review": "let x = 1;\n".repeat(500),
         }));

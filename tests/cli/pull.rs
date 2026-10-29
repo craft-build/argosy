@@ -31,7 +31,6 @@ fn pull_clones_a_remote_bundle_into_the_project() {
     assert!(store.join("company-rules/argosy.md").is_file());
     assert!(!project.join(".argosy").exists(), "tree stays argosy-free");
 
-    // A checkout is never overwritten.
     argosy_bin()
         .args(["pull", repo.to_str().unwrap(), "company-rules"])
         .current_dir(&project)
@@ -85,6 +84,4 @@ fn pull_global_installs_into_the_user_store() {
     );
 }
 
-// ------------------------------------------------------------------- index
-// All index tests are gated: without the `default-index`
-// feature the binary refuses the subcommand entirely.
+// All index tests are gated: without `default-index` the binary refuses the subcommand.

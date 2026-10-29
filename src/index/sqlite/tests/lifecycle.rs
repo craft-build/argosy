@@ -24,8 +24,7 @@ fn open_read_only_succeeds_where_open_fails_on_a_readonly_database() {
     let (dir, store) = open_in_tmp();
     let db = dir.path().join(".argosy/index.db");
     drop(store);
-    // A checkout/artifact with locked permissions (the `index
-    // status` guarantee: read-only really means read-only).
+    // Locked-permissions artifact: read-only really means read-only (the `index status` guarantee).
     let mut perms = std::fs::metadata(&db).unwrap().permissions();
     perms.set_mode(0o444);
     std::fs::set_permissions(&db, perms).unwrap();
@@ -55,10 +54,7 @@ fn checkpoint_wal_fails_when_a_reader_reaches_into_the_wal() {
     let db = dir.path().join(".argosy/index.db");
     store.set_model_id("mock-embedder@1").unwrap();
 
-    // A reader pins an early WAL snapshot: the checkpoint can move
-    // frames but cannot fully reset the WAL past this read-mark, so the
-    // truncate must be reported incomplete rather than packaging a copy
-    // that misses the second commit.
+    // A reader pins an early WAL snapshot, so the truncate must be reported incomplete.
     let mut reader = Connection::open(&db).unwrap();
     let tx = reader.transaction().unwrap();
     let _: Option<String> = tx
@@ -74,7 +70,6 @@ fn checkpoint_wal_fails_when_a_reader_reaches_into_the_wal() {
     drop(tx);
     drop(reader);
 
-    // Once the reader is gone, the same checkpoint completes.
     checkpoint_wal(&db).unwrap();
 }
 
@@ -125,8 +120,7 @@ fn an_older_schema_is_cleared_and_rebuilt_on_writable_open() {
         "got {err:#}"
     );
 
-    // The writable open migrates by dropping the stale layout; the next
-    // reconcile rebuilds (the index is a derived artifact, IDX-1).
+    // The writable open drops the stale layout (IDX-1: the index is a derived artifact).
     let store = SqliteVecStore::open(&db).unwrap();
     assert_eq!(store.model_id(), None, "the stale identity is released");
     assert_eq!(store.dimensions, None);
@@ -150,8 +144,7 @@ fn an_older_schema_is_cleared_and_rebuilt_on_writable_open() {
             .all(|c| columns.iter().any(|found| found == c)),
         "the v2 columns exist: {columns:?}"
     );
-    // v3 adds the lexical leg: the FTS index (and its sync triggers) are
-    // recreated on migration, empty like everything else.
+    // v3's lexical leg: the FTS index and its triggers are recreated, empty.
     let fts_objects: Vec<String> = store
         .conn
         .prepare(

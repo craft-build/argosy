@@ -5,8 +5,7 @@ use super::*;
 #[test]
 fn search_k_defaults_to_eight_and_every_filter_field_maps() {
     let mut rig = rig();
-    // The index holds 8 units (3 documents + 2 skills + 1 memory + 1 rule
-    // local, 1 skill imported); a ninth makes the default observable.
+    // The fixture index holds 8 units; a ninth makes the default k=8 observable.
     let ninth: Concept = ("---\n\
          type: Reference\n\
          description: Settlement report layout.\n\
@@ -26,8 +25,7 @@ fn search_k_defaults_to_eight_and_every_filter_field_maps() {
             &ninth,
         )
         .unwrap();
-    // A fresh state over the same (now nine-unit) roots, so its factory
-    // reconciles a fresh index over the new unit count.
+    // A fresh state so its factory reconciles an index over the new unit count.
     let mut state = McpState::new(factory(
         rig.state
             .session(project())
@@ -236,8 +234,7 @@ fn search_rules_hits_carry_good_and_bad_sections() {
     assert_eq!(hit.good.as_deref(), Some("let retry_count = 0;"));
     assert_eq!(hit.bad.as_deref(), Some("let retryCount = 0;"));
 
-    // Plain `search` over the same rule does not enrich — the examples
-    // are the review-flow (`search_rules`) contract.
+    // Plain `search` does not enrich — the examples are the `search_rules` contract.
     let plain = rig
         .state
         .search(SearchParams {
@@ -278,9 +275,7 @@ fn read_defaults_to_local_and_reads_imported_by_name() {
     assert_eq!(local.uri, "argosy://acme-billing/memory/gotchas");
     assert!(local.content.contains("# Gotchas"));
 
-    // The gap this tool closes: reading an imported argosy's concept
-    // through the tool surface (resources can only serve the process
-    // working directory's project).
+    // Reads can reach imported argosys; resources only serve the cwd's project.
     let imported = rig
         .state
         .read(ReadParams {
@@ -351,9 +346,7 @@ fn search_rules_hits_only_styleguide_and_facets_apply() {
 
 #[test]
 fn hits_carry_kind_trust_and_source_commit() {
-    // Without configured trust, an import's `verified: machine-confirmed`
-    // self-claim must not relay: the hit reads kind=imported,
-    // trust=unverified.
+    // Without a configured cap, an import's `verified` self-claim must not relay.
     let mut rig = rig();
     let report = rig
         .state
@@ -392,10 +385,7 @@ fn hits_carry_kind_trust_and_source_commit() {
 
 #[test]
 fn imported_hit_trust_is_capped_not_claimed() {
-    // The same fixture under a configured cap of machine-confirmed: the
-    // import's claim (machine-confirmed) stands at the cap, but a
-    // human-reviewed claim would read machine-confirmed — the cap is a
-    // ceiling, not a grant.
+    // The cap is a ceiling, not a grant — claims at or below it stand; higher ones are capped.
     let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
         [(
             "acme-shared".to_string(),
@@ -448,8 +438,7 @@ fn local_hits_relay_their_own_claim_verbatim() {
             &claimed,
         )
         .unwrap();
-    // A fresh state over the same (now larger) local root, so its factory
-    // reconciles an index that includes the written concept.
+    // A fresh state so its factory reconciles an index including the write.
     let mut state = McpState::new(factory(
         rig.state
             .session(project())
@@ -534,9 +523,7 @@ fn imported_reads_arrive_delimiter_wrapped() {
 
 #[test]
 fn search_rules_wraps_imported_examples_in_untrusted_delimiters() {
-    // A bespoke import carrying a rule with Good/Bad sections: the review
-    // flow hands those excerpts to the reviewer prompt, so they get the
-    // same delimiters full bodies do.
+    // Good/Bad excerpts reach the reviewer prompt, so they get full-body delimiters too.
     let imported = tempfile::tempdir().unwrap();
     let book = LocalArgosy::init(imported.path(), Some("acme-shared"), None).unwrap();
     let rule: Concept = ("---\n\
@@ -772,9 +759,8 @@ fn read_rejects_invalid_line_ranges_with_actionable_errors() {
 
 #[test]
 fn a_long_passage_is_capped_with_an_expansion_hint() {
-    // A single passage can approach the chunk budget (~2k chars is possible
-    // with long words); the wire shape caps it and points at the ranged
-    // read rather than shipping an unbounded payload.
+    // The wire shape caps a passage and points at the ranged read rather than shipping an
+    // unbounded payload.
     let capped = crate::mcp::session::cap_chars(
         &"x".repeat(crate::mcp::session::MAX_PASSAGE_CHARS + 10),
         crate::mcp::session::MAX_PASSAGE_CHARS,

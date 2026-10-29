@@ -1,6 +1,5 @@
-//! The `VectorStore` implementation: upserts, deletes, filtered k-NN
-//! search over sqlite-vec (the vector leg), and BM25 search over an FTS5
-//! index (the lexical leg).
+//! The `VectorStore` implementation: upserts, deletes, and the sqlite-vec
+//! k-NN and FTS5 BM25 retrieval legs.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,12 +39,9 @@ impl VectorStore for SqliteVecStore {
         if units.is_empty() {
             return Ok(());
         }
-        // Dimension safety: the vec0 table's width is fixed at creation
-        // (first write, or re-established by `clear`); anything of a
-        // different length is an error, never a silent truncation. A
-        // zero-dimension store is the lexical-only index
-        // (`LexicalOnlyProvider`): units are stored for BM25 and lookup
-        // with no vec0 table at all.
+        // vec0's width is fixed at creation: a mismatched vector length is
+        // an error, never a silent truncation. Zero dimensions means the
+        // lexical-only index (`LexicalOnlyProvider`) — no vec0 table.
         let dims = self.dimensions.unwrap_or(units[0].vector.len());
         for unit in units {
             if unit.vector.len() != dims {
@@ -62,9 +58,8 @@ impl VectorStore for SqliteVecStore {
         let tx = self.conn.transaction().context(SqliteSnafu {
             path: self.path.clone(),
         })?;
-        // Stamp the store's dimensionality inside the batch transaction, so a
-        // rolled-back insert never leaves `meta.dimensions` against an empty
-        // store.
+        // Stamp dimensions inside the transaction so a rolled-back insert
+        // never leaves them set against an empty store.
         if self.dimensions.is_none() {
             tx.execute(
                 "UPDATE meta SET dimensions = ?1, updated_at = datetime('now') WHERE id = 1",
@@ -78,9 +73,8 @@ impl VectorStore for SqliteVecStore {
             }
         }
         {
-            // A zero-dimension (lexical-only) store has no vec0 table: the
-            // two vector statements are not even prepared there, since
-            // preparing against a nonexistent table is itself an error.
+            // The lexical-only store has no vec0 table: preparing against a
+            // nonexistent table is itself an error.
             let mut delete_vec = (dims > 0)
                 .then(|| {
                     tx.prepare_cached(
@@ -121,10 +115,9 @@ impl VectorStore for SqliteVecStore {
                         })
                 })
                 .transpose()?;
-            // vec0 has no UPDATE: re-upserting is delete-then-insert of the
-            // concept's units and vec rows. The delete runs once per
-            // CONCEPT, not per unit — a batch may hold several chunks, and
-            // deleting per unit would wipe chunks inserted earlier here.
+            // vec0 has no UPDATE: re-upserting is delete-then-insert. The
+            // delete runs once per CONCEPT — per unit it would wipe chunks
+            // inserted earlier in this batch.
             let mut deleted: HashSet<(&str, &str, &str)> = HashSet::new();
             for unit in units {
                 let namespace = unit.concept.namespace.as_dir_name();
@@ -189,11 +182,9 @@ impl VectorStore for SqliteVecStore {
         let namespace = concept.namespace.as_dir_name();
         let concept_id = concept.id.as_str();
         let key: &[&dyn ToSql] = &[&concept.argosy, &namespace, &concept_id];
-        // One transaction: a partially applied pair would leave units rows
-        // whose vectors are gone — `unit_hashes` would still report such a
-        // concept while search can never return it (silently unsearchable).
-        // A zero-dimension (lexical-only) store has no vec0 table; only
-        // the units row (and its FTS shadow) needs deleting.
+        // One transaction: a partially applied delete would leave the
+        // concept present to `unit_hashes` yet silently unsearchable. A
+        // lexical-only store has no vec0 rows to delete.
         let dims = self.dimensions.unwrap_or_default();
         let tx = self.conn.transaction().context(SqliteSnafu {
             path: self.path.clone(),
@@ -225,8 +216,7 @@ impl VectorStore for SqliteVecStore {
     }
 
     fn unit_hashes(&self) -> Result<HashMap<QualifiedConceptId, String>> {
-        // One concept may hold several chunk rows (same hash each); the map
-        // keeps one entry per concept — dedup by construction.
+        // One map entry per concept: all its chunk rows carry the same hash.
         let mut stmt = self
             .conn
             .prepare(
@@ -260,11 +250,10 @@ impl VectorStore for SqliteVecStore {
     }
 
     fn clear(&mut self) -> Result<()> {
-        // Drop the data tables but release BOTH the identity and the
-        // dimensionality: the next upsert re-establishes them in-batch, so
-        // a width-changing model upgrade rebuilds via the ordinary reconcile
-        // path. One transaction — a partial clear would leave `meta`
-        // claiming hashes while the data is gone, silently emptying search.
+        // Release identity and dimensions too: the next upsert
+        // re-establishes them in-batch, so a width-changing model rebuilds
+        // via ordinary reconcile. One transaction — a partial clear would
+        // silently empty search.
         let tx = self.conn.transaction().context(SqliteSnafu {
             path: self.path.clone(),
         })?;
@@ -290,8 +279,7 @@ impl VectorStore for SqliteVecStore {
             return Ok(Vec::new());
         }
         let dims = self.dimensions.expect("dimensions checked above");
-        // A lexical-only store (zero dimensions, `LexicalOnlyProvider`)
-        // has no vec0 table and no vector leg; the lexical leg owns the
+        // A lexical-only store has no vector leg; the lexical leg owns the
         // query.
         if dims == 0 {
             return Ok(Vec::new());
@@ -307,14 +295,10 @@ impl VectorStore for SqliteVecStore {
         }
         self.ensure_vec_table_read()?;
 
-        // Filtered queries rank the WHOLE corpus first: vec0 applies
-        // metadata filters after its top-k truncation, so a small k would
-        // drop every matching concept whenever the k nearest are
-        // non-matching (empty `search_rules --language python` on a mixed
-        // corpus). Fetching k = row count makes filtered search exact —
-        // vec0 brute-forces all rows for any k, so this costs nothing
-        // asymptotically — and the caller's k is applied by truncating
-        // the fully ranked, fully filtered list below.
+        // vec0 applies filters after its top-k truncation, so filtered
+        // queries must rank the whole corpus: fetch k = row count (vec0
+        // brute-forces all rows anyway), then apply the caller's k to the
+        // fully filtered ranking below.
         let sql_k: i64 = if filter_is_active(filter) {
             self.conn
                 .query_row("SELECT COUNT(*) FROM units", [], |row| row.get(0))
@@ -325,10 +309,8 @@ impl VectorStore for SqliteVecStore {
             k as i64
         };
 
-        // Bound-parameter SQL: every user-influenced filter value travels as
-        // a parameter, never string-interpolated. Only the number of
-        // placeholders (from counts) shapes the text. Score = -distance:
-        // descending order is descending similarity (module docs).
+        // Only placeholder counts shape the SQL text; every user value
+        // stays a bound parameter.
         let mut sql = format!(
             "SELECT {UNIT_COLUMNS}, v.distance AS leg_score
              FROM unit_vectors AS v
@@ -342,10 +324,7 @@ impl VectorStore for SqliteVecStore {
         let mut hits = self
             .query_hits(&sql, &values)?
             .into_iter()
-            // vec0's KNN constraint returns at most sql_k rows; sort here
-            // so descending-score order does not depend on iteration
-            // order, then apply the caller's k to the fully filtered
-            // ranking.
+            // Sort so the ranking never depends on row iteration order.
             .collect::<Result<Vec<_>>>()?;
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(k);
@@ -356,17 +335,13 @@ impl VectorStore for SqliteVecStore {
         if k == 0 {
             return Ok(Vec::new());
         }
-        // A query with no indexable token (empty, punctuation-only) cannot
-        // rank lexically: the expression stays unset and the vector leg
-        // owns the query alone.
+        // No indexable token: the vector leg owns the query alone.
         let Some(match_expr) = fts_match_expr(text) else {
             return Ok(Vec::new());
         };
-        // Score = -bm25: lower BM25 ranks better, so negating keeps the
-        // both-legs convention "higher score is a better hit" true. The
-        // active filters constrain the FTS5 ranking itself (WHERE before
-        // ORDER BY/LIMIT), so the lexical leg honors the same
-        // filter-then-truncate contract as the vector leg.
+        // Score = -bm25. Filters constrain the FTS5 ranking itself (WHERE
+        // before ORDER BY/LIMIT), so this leg's k is already
+        // filter-then-truncate, unlike the vector leg.
         let mut sql = format!(
             "SELECT {UNIT_COLUMNS}, bm25(unit_fts) AS leg_score
              FROM unit_fts
@@ -387,10 +362,8 @@ impl VectorStore for SqliteVecStore {
 }
 
 impl SqliteVecStore {
-    /// Runs one retrieval leg's query and decodes every row; the score
-    /// column is expected as `leg_score` at index 13 (see
-    /// [`UNIT_COLUMNS`]). Hits arrive roughly ranked; each leg sorts or
-    /// truncates as its engine requires.
+    /// Runs one retrieval leg's query; the score column must be `leg_score`
+    /// at index 13 (see [`UNIT_COLUMNS`]).
     fn query_hits(
         &self,
         sql: &str,
@@ -412,16 +385,15 @@ impl SqliteVecStore {
     }
 }
 
-/// The `units` columns both retrieval legs SELECT, in the fixed order
-/// [`decode_unit_row`] reads them. Each leg appends one scalar score
-/// column aliased `leg_score` at index 13 — `-distance` for the vector
-/// leg, `-bm25` for the lexical leg.
+/// The `units` columns both legs SELECT, in the fixed order
+/// [`decode_unit_row`] reads them, followed by one score column aliased
+/// `leg_score` at index 13.
 const UNIT_COLUMNS: &str = "u.argosy, u.namespace, u.concept_id, u.concept_type,
        u.description, u.tags, u.language, u.category, u.chunk_ordinal,
        u.heading_path, u.start_line, u.end_line, u.passage";
 
-/// One `units` row plus its leg score, mid-decode (between rusqlite's
-/// strict `rusqlite::Result` and argosy's fallible key/JSON decoding).
+/// One `units` row plus its leg score, mid-decode between rusqlite's
+/// `Result` and argosy's fallible key/tag decoding.
 struct RawHit {
     argosy: String,
     namespace: String,
@@ -460,10 +432,9 @@ fn decode_unit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHit> {
 }
 
 impl RawHit {
-    /// Converts a decoded row into a [`SearchHit`], scoring it as the
-    /// leg already arranged: `leg_score` is negated here so both engines'
-    /// "lower raw value is better" metrics (distance, bm25) share the
-    /// store's higher-is-better convention.
+    /// Converts a decoded row into a [`SearchHit`]; negates `leg_score` so
+    /// both engines' lower-is-better metrics share the store's
+    /// higher-is-better convention.
     fn into_hit(self) -> Result<SearchHit> {
         let tags: Vec<String> = serde_json::from_str(&self.tags).map_err(|e| -> Error {
             IndexSnafu {
@@ -490,20 +461,16 @@ impl RawHit {
     }
 }
 
-/// Appends bound-parameter SQL for every active filter field, pushing the
-/// values; shared by both retrieval legs so a filter constrains exactly
-/// the same rows in each. Only the number of placeholders (from counts)
-/// shapes the text — every user-influenced value travels as a parameter,
-/// never string-interpolated.
+/// Appends bound-parameter SQL for every active filter, shared by both
+/// legs so each constrains the same rows.
 fn push_filter_sql(sql: &mut String, values: &mut Vec<rusqlite::types::Value>, filter: &Filter) {
     let push_in_list = |sql: &mut String,
                         values: &mut Vec<rusqlite::types::Value>,
                         column: &str,
                         entries: &[String]| {
         if entries.is_empty() {
-            // An empty allow-list matches NOTHING (the doc-06
-            // `filter_matches` reference semantics) — never emit `IN ()`,
-            // which is a SQLite syntax error.
+            // An empty allow-list matches nothing; `IN ()` is a SQLite
+            // syntax error.
             sql.push_str(" AND 1 = 0");
         } else {
             sql.push_str(&format!(
@@ -548,23 +515,16 @@ fn push_filter_sql(sql: &mut String, values: &mut Vec<rusqlite::types::Value>, f
     }
 }
 
-/// The most terms ever OR-ed into one FTS5 MATCH expression: past this a
-/// pathological query costs more to plan than it can ever return.
+/// The most terms OR-ed into one FTS5 MATCH; past this a query costs more
+/// to plan than it can ever return.
 const MAX_FTS_TERMS: usize = 32;
 
-/// Builds an FTS5 MATCH expression from free text: every maximal
-/// alphanumeric run becomes one quoted term, and the terms are OR-ed.
+/// Builds an FTS5 MATCH expression: every maximal alphanumeric run becomes
+/// one quoted term, OR-ed together.
 ///
-/// Quoting disables every MATCH operator (`AND`, `OR`, `NOT`, `NEAR`,
-/// prefixes, column filters, leading `-`), so arbitrary — adversarial —
-/// query text can never be parsed as FTS syntax; alphanumeric runs also
-/// cannot contain the quote character, so no escaping is needed. OR
-/// semantics maximize recall (a document matching any query term ranks),
-/// with BM25 weighting toward rarer and more-matched terms — the lexical
-/// leg of the reciprocal-rank fusion, where only the ordering matters.
-///
-/// Returns `None` when the text holds no indexable term (empty or
-/// punctuation-only queries), leaving the vector leg to own the query.
+/// Quoting keeps arbitrary — adversarial — query text from parsing as FTS
+/// syntax. Returns `None` when no term is indexable, leaving the query to
+/// the vector leg.
 fn fts_match_expr(text: &str) -> Option<String> {
     let mut terms = 0usize;
     let mut expr = String::new();

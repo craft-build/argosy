@@ -1,5 +1,4 @@
-//! The `inspect` tool: a quick project health check (TODO/FIXME/HACK/XXX
-//! scan plus `git status`), ported from Craft's `tools/inspect.rs`.
+//! The `inspect` tool: a quick project health check (TODO/FIXME/HACK/XXX scan plus `git status`).
 
 #[cfg(feature = "mcp")]
 use rmcp::schemars;
@@ -150,10 +149,8 @@ fn inspect_git_status(scope_path: &str) -> Result<String> {
         path
     };
 
-    // Resolve the actual worktree root first: the scope can then be passed
-    // as a pathspec (status from a subdirectory of the repo would otherwise
-    // report the whole tree, ignoring the scope), and "not a repo" stays
-    // distinguishable from other git failures.
+    // Resolve the worktree root first so the scope can be passed as a
+    // pathspec (status from a subdirectory would report the whole tree).
     let toplevel = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(repo_dir)
@@ -163,8 +160,7 @@ fn inspect_git_status(scope_path: &str) -> Result<String> {
         return Ok("git_status: (not a git repo)\n".to_string());
     }
     let root = String::from_utf8_lossy(&toplevel.stdout).trim().to_string();
-    // Canonicalize so the strip works even when the scope reached the repo
-    // through a symlinked path (e.g. /tmp on macOS).
+    // Canonicalize so the strip works through symlinked paths (e.g. /tmp on macOS).
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let rel = canonical
         .strip_prefix(&root)
@@ -282,8 +278,7 @@ mod tests {
         );
     }
 
-    /// The scope is honored as a pathspec: status for one file does not
-    /// report the whole repository.
+    /// Status for one file must not report the whole repository.
     #[test]
     fn git_status_scopes_to_the_pathspec() {
         let dir = tempfile::tempdir().unwrap();

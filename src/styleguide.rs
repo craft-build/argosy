@@ -1,8 +1,8 @@
 //! The typed model and namespace contract for `styleguide/` rules: ordinary
 //! concepts retrieved by embedding similarity and filtered by
-//! `language`/`category`. [`StyleguideRule::list`] is tolerant — only
-//! hard-contract concepts become rules — while [`validate`] surfaces
-//! violations, warning on missing facets.
+//! `language`/`category`.
+//!
+//! [`StyleguideRule::list`] is tolerant; [`validate`] surfaces violations.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -14,10 +14,9 @@ use crate::error::{Error, Result};
 /// The `type` every styleguide rule concept must carry.
 pub(crate) const TYPE: &str = "Styleguide Rule";
 
-/// A styleguide rule: an owning typed view over one `styleguide/` concept.
-/// Owning the [`ConceptId`] and [`Concept`] keeps rules free of lifetimes so
-/// [`StyleguideRule::filter`] can consume and return them and query layers
-/// can hold them in arbitrary collections; accessors borrow per call.
+/// An owning typed view over one `styleguide/` concept.
+///
+/// Owning the [`ConceptId`] and [`Concept`] frees [`StyleguideRule::filter`] from lifetimes.
 #[derive(Debug, Clone)]
 pub struct StyleguideRule {
     id: ConceptId,
@@ -26,10 +25,11 @@ pub struct StyleguideRule {
 
 impl StyleguideRule {
     /// Lists every concept under `styleguide/` satisfying the hard contract,
-    /// sorted by concept id; subdirectories are followed recursively.
-    /// Tolerant like [`crate::skill::Skill::list`]: failing or unparseable
-    /// concepts are skipped (validation reports them). Absent namespace
-    /// yields an empty vec; unreadable directories are hard errors.
+    /// sorted by concept id.
+    ///
+    /// Tolerant: failing or unparseable concepts are skipped and an absent
+    /// namespace yields an empty vec, but unreadable directories are hard
+    /// errors.
     pub fn list(argosy: &Argosy) -> Result<Vec<StyleguideRule>> {
         let Some(dir) = argosy.namespace_dir(&Namespace::Styleguide) else {
             return Ok(Vec::new());
@@ -70,9 +70,9 @@ impl StyleguideRule {
     }
 
     /// Narrows `rules` by exact match on the language/category facets.
-    /// `None` means
-    /// "no constraint"; a rule lacking the requested facet never matches a
-    /// `Some(_)` filter.
+    ///
+    /// `None` means "no constraint"; a rule lacking the requested facet
+    /// never matches a `Some(_)` filter.
     pub fn filter(
         rules: Vec<StyleguideRule>,
         language: Option<&str>,
@@ -90,9 +90,8 @@ impl StyleguideRule {
             && concept.description().is_some_and(|d| !d.trim().is_empty())
     }
 
-    /// A rule view over an already-read concept, without re-walking the
-    /// namespace (the search-enrichment path). Section extraction works on
-    /// any concept; the hard contract is not re-checked here.
+    /// A rule view over an already-read concept; the hard contract is not
+    /// re-checked here.
     pub fn from_parts(id: ConceptId, concept: Concept) -> Self {
         Self { id, concept }
     }
@@ -107,13 +106,12 @@ impl StyleguideRule {
         &self.concept
     }
 
-    /// The language this rule applies to (`rust`, `python`,
-    /// `general`,...).
+    /// The language this rule applies to.
     pub fn language(&self) -> Option<&str> {
         self.concept.get_str("language")
     }
 
-    /// The rule category (`naming`, `error-handling`,...).
+    /// The rule category.
     pub fn category(&self) -> Option<&str> {
         self.concept.get_str("category")
     }
@@ -123,8 +121,7 @@ impl StyleguideRule {
         self.concept.get_str("rule_id")
     }
 
-    /// The producer's priority (`error`/`warn`/`info` by convention;
-    /// the value is not validated).
+    /// The producer's priority (`error`/`warn`/`info` by convention, not validated).
     pub fn priority(&self) -> Option<&str> {
         self.concept.get_str("priority")
     }
@@ -134,22 +131,21 @@ impl StyleguideRule {
         self.concept.get_str("pattern")
     }
 
-    /// The body section under a `## Good` heading, trimmed. `None`
-    /// when the heading is absent.
+    /// The body section under a `## Good` heading, trimmed; `None` when absent.
     pub fn good_examples(&self) -> Option<&str> {
         self.section("Good")
     }
 
-    /// The body section under a `## Bad` heading, trimmed. `None`
-    /// when the heading is absent.
+    /// The body section under a `## Bad` heading, trimmed; `None` when absent.
     pub fn bad_examples(&self) -> Option<&str> {
         self.section("Bad")
     }
 
     /// Extracts the text between a `## <name>` heading and the next heading
-    /// of any level (or end of body), trimmed. Headings inside fenced code
-    /// blocks don't count (`#`-starting comment lines are idiomatic in
-    /// example code); a present-but-empty section yields `None`.
+    /// of any level (or end of body), trimmed.
+    ///
+    /// Headings inside fenced code blocks don't count; a present-but-empty
+    /// section yields `None`.
     fn section(&self, name: &str) -> Option<&str> {
         let body = self.concept.body();
         let mut started: Option<usize> = None;
@@ -187,8 +183,7 @@ impl StyleguideRule {
 }
 
 /// True iff `line` is exactly the level-2 ATX heading `## <name>`, tolerating
-/// a CommonMark closing sequence (`## Good ##`); `## Gooder` does not match
-/// `Good`.
+/// a CommonMark closing sequence (`## Good ##`).
 fn is_target_heading(line: &str, name: &str) -> bool {
     let Some(rest) = line.strip_prefix("## ") else {
         return false;
@@ -206,22 +201,20 @@ fn is_target_heading(line: &str, name: &str) -> bool {
 }
 
 /// True iff `line` is an ATX heading of any level: leading `#`s followed by a
-/// space or end of line (so `#hashtag` and `#5 items` are prose, not headings).
+/// space or end of line (so `#hashtag` is prose, not a heading).
 fn is_any_heading(line: &str) -> bool {
     let hashes = line.bytes().take_while(|b| *b == b'#').count();
     hashes > 0 && (line.len() == hashes || line.as_bytes()[hashes] == b' ')
 }
 
 /// Validates the `styleguide/` namespace contract of the bundle at `root`.
-/// Absent `styleguide/` is fine. OKF conformance is enforced generically by
-/// [`Argosy::validate`] and is not duplicated here: unparseable or untyped
-/// concepts are skipped, so the type check fires only on a present-but-wrong
-/// `type`. Unreadable directories are the structural layer's findings.
+///
+/// Unparseable and untyped concepts are the generic pass's findings;
+/// unreadable directories are the structural layer's.
 pub(crate) fn validate(root: &Path) -> Vec<Finding> {
     let ns_dir = root.join("styleguide");
-    // Only a real directory counts — a symlinked namespace must read as
-    // absent here exactly as it does in listing, or validation would
-    // report on files outside the bundle.
+    // Only a real directory counts: a symlinked namespace must read as
+    // absent, or validation would report on files outside the bundle.
     if !is_real_dir(&ns_dir) {
         return Vec::new();
     }
@@ -231,8 +224,8 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         if entry.is_dir || entry.rel.extension() != Some(OsStr::new("md")) {
             continue;
         }
-        // Symlinked concepts are the structural layer's finding; running
-        // contract checks on them would read through the link.
+        // Symlinked concepts are the structural layer's finding; checking
+        // them would read through the link.
         if entry.is_symlink {
             continue;
         }
@@ -243,9 +236,8 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         let Ok(concept) = Concept::from_file(root.join(&entry.rel)) else {
             continue;
         };
-        // An untyped concept — including a present-but-empty `type` — is
-        // wholly the generic pass's finding; running rule-contract
-        // checks on it would only double-report one root cause.
+        // An untyped concept is wholly the generic pass's finding;
+        // contract checks would only double-report one root cause.
         let Some(ty) = concept.concept_type() else {
             continue;
         };
@@ -296,8 +288,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
 }
 
 impl Argosy {
-    /// Validates only the `styleguide/` namespace contract, for
-    /// callers that want a single namespace rather than the full
+    /// Validates only the `styleguide/` namespace, not the full
     /// [`Argosy::validate`] report.
     pub fn validate_styleguide(&self) -> Vec<Finding> {
         validate(self.root())
@@ -349,11 +340,9 @@ mod tests {
     fn list_tolerates_malformed_concepts() {
         let argosy = Argosy::open(fixture("rule-malformed")).unwrap();
         let rules = StyleguideRule::list(&argosy).unwrap();
-        // The malformed concept is skipped, not an Err for the whole list.
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id().as_str(), "styleguide/good");
-        //...and validation is where the breakage is surfaced (from the
-        // generic concept pass).
+        // Validation is where the breakage is surfaced (the generic pass).
         let report = Argosy::validate(fixture("rule-malformed"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
         assert_eq!(ids, vec![Some("STG-1")]);
@@ -407,13 +396,10 @@ mod tests {
             id: ConceptId::from_str("styleguide/x").unwrap(),
             concept,
         };
-        // ATX closing sequence tolerated; tilde fence contents don't terminate.
         assert_eq!(
             rule.good_examples(),
             Some("ok();\n\n~~~\n## Bad\nfence content, not a heading\n~~~")
         );
-        // Neither the 4-space-indented code line nor `#5`/`#hashtag` prose
-        // counts as a heading, so the section runs to `## Notes`.
         assert_eq!(
             rule.bad_examples(),
             Some("## Good\n#5 indented-code and hashtag lines are prose\nbad();")
@@ -492,15 +478,14 @@ mod tests {
     fn stg2_rule_with_wrong_type_is_an_error() {
         let findings = validate(&fixture("rule-wrong-type"));
         assert_eq!(error_ids(&findings), vec![Some("STG-2")]);
-        //...and the wrongly-typed concept never becomes a listed rule.
+        // The wrongly-typed concept never becomes a listed rule.
         let argosy = Argosy::open(fixture("rule-wrong-type")).unwrap();
         assert!(StyleguideRule::list(&argosy).unwrap().is_empty());
     }
 
     #[test]
     fn stg1_untyped_rule_is_the_generic_passes_job_not_stg2s() {
-        // `validate` here knows nothing of `type` absence — that is the
-        // structural layer's. The composed report must not double up.
+        // The composed report must not double up.
         assert!(validate(&fixture("rule-untyped")).is_empty());
         let report = Argosy::validate(fixture("rule-untyped"));
         let ids: Vec<_> = report.errors().map(|f| f.id).collect();
@@ -544,7 +529,6 @@ mod tests {
         assert_eq!(validate(root), vec![]);
         let report = Argosy::validate(root);
         let errors: Vec<_> = report.errors().collect();
-        // The generic pass's untyped finding only — no type check on top.
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].id, Some("STG-1"));
     }
@@ -555,9 +539,8 @@ mod tests {
         assert!(argosy.validate_styleguide().is_empty());
     }
 
-    /// Symlinked rule files are skipped: listing must not read through a
-    /// symlink into content outside the bundle, and the namespace
-    /// validator stays out of it (the structural layer owns the finding).
+    /// Symlinked rule files are skipped: reading through a link would reach
+    /// content outside the bundle.
     #[cfg(unix)]
     #[test]
     fn list_skips_symlinked_rule_files() {
@@ -588,9 +571,7 @@ mod tests {
         let rules = StyleguideRule::list(&argosy).unwrap();
         let ids: Vec<_> = rules.iter().map(|r| r.id().as_str()).collect();
         assert_eq!(ids, vec!["styleguide/good"]);
-        // The namespace validator stays out of symlink reporting (the
-        // structural layer owns the finding); the unfaceted `good.md`
-        // warning is unrelated and still fine.
+        // The symlink finding belongs to the structural layer, not this pass.
         assert!(
             argosy
                 .validate_styleguide()

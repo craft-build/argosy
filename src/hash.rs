@@ -1,8 +1,6 @@
-//! Content hashing shared by the index and packaging. **Not a security
-//! boundary**: the digests are content addresses for staleness/change
-//! detection and distribution integrity, never authentication. Backed by
-//! the `sha2` crate (packaging already depended on it); the index's former
-//! hand-rolled implementation was removed in its favor.
+//! SHA-256 content hashes for staleness detection and packaging.
+//!
+//! Not a security boundary.
 
 use sha2::{Digest, Sha256};
 
@@ -13,8 +11,7 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex(&hasher.finalize())
 }
 
-/// Lowercase hex of raw digest bytes (for callers that stream updates
-/// into the hasher themselves, e.g. `bundle_content_hash`).
+/// Lowercase hex of raw digest bytes, for callers that stream updates into the hasher themselves.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -43,8 +40,7 @@ mod tests {
                 b"The quick brown fox jumps over the lazy dog",
                 "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
             ),
-            // 56 bytes: the padding spills into a second block — the
-            // boundary case the hand-rolled version was pinned against.
+            // 56 bytes: the first input whose padding spills into a second block.
             (
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
                 "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",

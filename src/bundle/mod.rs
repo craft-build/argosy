@@ -1,8 +1,7 @@
 //! Opening and structural validation of an argosy bundle.
 //!
-//! [`Argosy::open`] errors only on hard failures (no readable root, no
-//! parseable `Argosy Manifest`). [`Argosy::validate`] reports every issue
-//! as [`Finding`]s instead of rejecting over tolerable ones.
+//! [`Argosy::open`] errors only on hard failures; [`Argosy::validate`]
+//! reports every issue as a [`Finding`] instead of rejecting.
 
 mod argosy;
 mod manifest;

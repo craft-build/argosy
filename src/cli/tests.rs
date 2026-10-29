@@ -74,7 +74,6 @@ fn unscoped_query_leaves_every_filter_field_none() {
     let q = parse_query(&["argosy", "index", "query", "anything"]);
     assert_eq!(q.k, None, "no flag: default comes from the configuration");
     let filter = build_filter(&q);
-    // 1:1 flag mapping: no flags means no constraints anywhere.
     assert!(filter.namespaces.is_none());
     assert!(filter.argosies.is_none());
     assert!(filter.concept_types.is_none());
@@ -94,8 +93,7 @@ mod mcp_parse_tests {
             panic!("expected mcp argv");
         };
 
-        // The HTTP transport was removed (unauthenticated network exposure
-        // of destructive tools): neither flag may parse at all.
+        // No HTTP transport: unauthenticated exposure of destructive tools.
         for flag in ["--transport", "--bind"] {
             assert!(
                 Cli::try_parse_from(["argosy", "mcp", flag, "x"]).is_err(),
@@ -106,8 +104,7 @@ mod mcp_parse_tests {
 
     #[test]
     fn mcp_takes_no_argosy_selection_flags() {
-        // Membership comes from `.argosy/` + global-store discovery, not from
-        // a hand-maintained flag list: neither flag may parse at all.
+        // Membership comes from discovery (`.argosy/` + global store), not flags.
         for flag in ["--project-root", "--import"] {
             assert!(
                 Cli::try_parse_from(["argosy", "mcp", flag, "x"]).is_err(),
@@ -161,8 +158,7 @@ mod agent_parse_tests {
 
     #[test]
     fn agent_reviewer_rejects_misspelled_harnesses() {
-        // clap's default kebab-casing would spell OpenCode `open-code`;
-        // the explicit value names keep the documented spellings only.
+        // clap's default kebab-casing would spell OpenCode `open-code`.
         for bad in ["cursor", "open-code", "kiro", "claude-code"] {
             assert!(
                 Cli::try_parse_from(["argosy", "agent", "reviewer", bad]).is_err(),

@@ -56,15 +56,13 @@ struct Rig {
     state: McpState<MockEmbedder, MemStore>,
 }
 
-/// A session factory over fixed roots — the unit-test double of the CLI's
-/// open-on-demand factory: every cwd maps to the same fixture session,
-/// freshly opened and reconciled on first use (then cached).
+/// A session factory over fixed roots: every cwd maps to the same fixture session, freshly
+/// opened and cached on first use.
 fn factory(local: PathBuf, imported: Vec<PathBuf>) -> SessionFactory<MockEmbedder, MemStore> {
     factory_with_trust(local, imported, crate::trust::TrustPolicy::new())
 }
 
-/// [`factory`] with an explicit provenance trust policy (the CLI derives
-/// one from user configuration; tests inject it directly).
+/// [`factory`] with an explicit provenance trust policy.
 fn factory_with_trust(
     local: PathBuf,
     imported: Vec<PathBuf>,
@@ -82,8 +80,7 @@ fn rig() -> Rig {
     rig_with_trust(crate::trust::TrustPolicy::new())
 }
 
-/// [`rig`] granting `acme-shared` a configured trust cap — the tier the
-/// fixture's imported skill *claims* in `verified` frontmatter.
+/// [`rig`] granting `acme-shared` a configured trust cap — the tier its fixture skill claims.
 fn rig_with_trust(trust: crate::trust::TrustPolicy) -> Rig {
     let local = fixture_copy("valid-acme-billing");
     let imported = import_fixture();
@@ -99,8 +96,7 @@ fn rig_with_trust(trust: crate::trust::TrustPolicy) -> Rig {
     }
 }
 
-/// The cwd every rig test passes: the factory ignores it (any root maps
-/// to the fixture session), so a constant stands in for a real project.
+/// The cwd every rig test passes — the factory ignores it, so a constant stands in.
 fn project() -> PathBuf {
     PathBuf::from("/project")
 }

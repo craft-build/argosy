@@ -13,7 +13,6 @@ fn import_honors_craft_metadata_block_and_nested_examples() {
     assert_eq!(report.written, 3);
     assert!(report.findings.is_empty(), "{:?}", report.findings);
 
-    // File-level metadata facets place the rule and land in frontmatter.
     let path = local
         .root()
         .join("styleguide/rust/naming/SNAKE-CASE-VARS.md");
@@ -26,13 +25,11 @@ fn import_honors_craft_metadata_block_and_nested_examples() {
     assert_eq!(concept.get_str("priority"), Some("warn"));
     assert_eq!(concept.get_str("pattern"), Some("^[a-z][a-z0-9_]*$"));
     assert_eq!(concept.tags(), vec!["naming", "convention"]);
-    // Nested examples become the body sections.
     assert!(concept.body().contains("## Good"));
     assert!(concept.body().contains("- let my_variable = 5;"));
     assert!(concept.body().contains("## Bad"));
     assert!(concept.body().contains("- let MyVariable = 5;"));
 
-    // A rule's own facets override the file's metadata defaults.
     let path = local
         .root()
         .join("styleguide/rust-2021/style/OVERRIDE-EXPLICIT-FACETS.md");
@@ -41,7 +38,6 @@ fn import_honors_craft_metadata_block_and_nested_examples() {
     assert_eq!(concept.get_str("language"), Some("rust-2021"));
     assert_eq!(concept.get_str("category"), Some("style"));
 
-    // `hint` is valid schema vocabulary and passes through untouched.
     let path = local
         .root()
         .join("styleguide/rust/naming/HINT-PRIORITY-KEPT.md");
@@ -82,7 +78,6 @@ fn import_reports_malformed_metadata_without_aborting() {
             .any(|m| m.contains("`metadata.language` must be a string")),
         "{messages:?}"
     );
-    // The rules still landed, just without the broken file-level facets.
     assert!(
         local
             .root()
@@ -142,8 +137,7 @@ fn import_converts_craft_rulesets_into_styleguide_concepts() {
     assert!(body.contains("## Bad"));
     assert!(body.contains("let value = maybe.unwrap();"));
 
-    // Missing facets fall back to general/misc; single-string examples
-    // stay unbulleted.
+    // Missing facets fall back to general/misc; single-string examples stay unbulleted.
     let minimal = local.root().join("styleguide/general/misc/minimal-rule.md");
     let concept = Concept::from_file(&minimal).unwrap();
     assert_eq!(
@@ -157,7 +151,6 @@ fn import_converts_craft_rulesets_into_styleguide_concepts() {
     let concept = Concept::from_file(&eval).unwrap();
     assert!(concept.body().contains("- eval(text)"));
 
-    // The import produced conformant rules end to end.
     assert_eq!(error_findings(&local).len(), 0);
 }
 
@@ -229,8 +222,7 @@ fn import_records_unreadable_files_as_findings() {
     )
     .unwrap();
     if fs::read_to_string(yaml_dir.join("locked.yaml")).is_ok() {
-        // Running as root: permission bits don't gate reads, so the
-        // unreadable-file path cannot be exercised in this environment.
+        // Running as root: permission bits don't gate reads, so this path can't be exercised.
         return;
     }
     write(&yaml_dir, "python.yml", MAPPING_RULES);

@@ -21,8 +21,7 @@ pub(super) fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
     let (path, dir_name) = if default_project_path {
         let cwd = current_dir()?;
         let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
-        // Record the slot's canonical project root so the catalog can map it
-        // back and flag stale slots.
+        // The catalog maps this root record back to the slot to flag stale ones.
         argosy::pull::record_project_root(&cwd)?;
         (
             argosy::pull::project_argosy_dir(&cwd)?.join(argosy::pull::LOCAL_ARGOSY_NAME),
@@ -68,8 +67,7 @@ pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result
     };
     let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
     let dest = root.join(&args.name);
-    // A present sidecar on an accepted clone has passed verification
-    // (clone_as_checkout refuses mismatches); report which is which.
+    // Any sidecar on an accepted clone passed verification (clone_as_checkout refuses mismatches).
     let integrity = argosy::pull::integrity_status(&dest);
     if out.json {
         out.json(&serde_json::json!({
@@ -95,9 +93,9 @@ pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode
     let report = match args.namespace {
         None => Argosy::validate(&args.path),
         Some(Ns::Skill) => {
-            // The namespace contracts are defined over an open argosy; a
-            // path that cannot open is a command-level failure here (the
-            // unscoped validator is the one that accepts broken fixtures).
+            // Scoped validation needs an open argosy: a path that cannot
+            // open fails here (the unscoped validator accepts broken
+            // fixtures).
             let argosy = Argosy::open(&args.path)?;
             ValidationReport::from_findings(argosy.validate_skills())
         }
@@ -108,10 +106,9 @@ pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode
         Some(ns @ (Ns::Document | Ns::Memory)) => {
             let full = Argosy::validate(&args.path);
             let dir = Namespace::from(ns).as_dir_name().to_string();
-            // Bundle-level findings (no path — manifest missing, root
-            // problems) always survive the namespace filter: a bundle
-            // with no `argosy.md` must never validate "OK" under any
-            // scope. Path findings stay scoped to the namespace.
+            // Bundle-level findings (no path) always survive the namespace
+            // filter: a bundle with no `argosy.md` must never validate "OK"
+            // under any scope.
             let findings = full
                 .findings()
                 .iter()
@@ -132,8 +129,7 @@ pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode
     } else if !conformant {
         print!("{report}");
     } else {
-        // Conformant bundles always open (manifest errors are error
-        // findings); fall back to a bare OK should open ever disagree.
+        // Conformant bundles always open; fall back to a bare OK should open ever disagree.
         match Argosy::open(&args.path) {
             Ok(argosy) => {
                 let manifest = argosy.manifest();
@@ -154,8 +150,7 @@ pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode
 }
 
 pub(super) fn cmd_package(out: &Output, config: &Config, args: &PackageArgs) -> Result<ExitCode> {
-    // Gate packaging on validation (DIST-1's "only conformant bundles ship"
-    // spirit): a broken bundle fails with its validation errors on stderr.
+    // Gate packaging on validation: a broken bundle fails with its validation errors on stderr.
     let report = Argosy::validate(&args.source);
     if !report.is_conformant() {
         if out.json {
@@ -191,10 +186,7 @@ pub(super) fn cmd_package(out: &Output, config: &Config, args: &PackageArgs) -> 
 pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> Result<ExitCode> {
     match &args.format {
         ConvertFormat::Styleguide(imp) => {
-            // Implicit target is the current project's `default` argosy
-            // under the user state dir, the same path `argosy init`
-            // creates when none is given; a missing one is a setup
-            // problem worth naming, not a bare I/O error on a hashed path.
+            // A missing implicit target is a setup problem worth naming, not a bare I/O error.
             let argosy_path = match &imp.argosy_path {
                 Some(path) => path.clone(),
                 None => {
@@ -216,8 +208,7 @@ pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> 
             let report: ImportReport =
                 argosy::package::import_styleguide_yaml(&local, &imp.yaml_dir)?;
             // An existing directory with no YAML files is almost always a
-            // wrong path spelling — a silent "written: 0" success is how
-            // imports get pointed at nothing.
+            // wrong path spelling; warn rather than a silent "written: 0".
             if report.yaml_files_seen == 0 && report.findings.is_empty() {
                 out.warn(&format!(
                     "no .yaml or .yml files found in {} — nothing imported (check the path)",
@@ -242,11 +233,9 @@ pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> 
                     );
                 }
             }
-            // An import is a bulk write, and the index reconciles on every
-            // write: without this, freshly imported rules stay invisible to
-            // search until a manual `index build` or the next MCP start.
-            // A failed reconcile degrades retrieval without undoing the
-            // import.
+            // Without this, imported rules stay invisible to search until
+            // a manual `index build` or the next MCP start; a failed
+            // reconcile degrades retrieval without undoing the import.
             if report.written > 0 && report.findings.is_empty() {
                 #[cfg(feature = "default-index")]
                 match reconcile_index_after_import(config) {
@@ -269,9 +258,8 @@ pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> 
     }
 }
 
-/// Builds and prints (or writes) the global catalog. Read-only: the scan
-/// opens bundles and index databases read-only; only `--write` touches disk,
-/// and only the catalog file at the state root.
+/// Builds and prints (or writes) the global catalog; the scan is
+/// read-only and only `--write` touches disk (the catalog file).
 pub(super) fn cmd_catalog(out: &Output, config: &Config, args: &CatalogArgs) -> Result<ExitCode> {
     use argosy::catalog::{CatalogOptions, redact_home, render_markdown, write};
 
@@ -299,11 +287,10 @@ pub(super) fn cmd_catalog(out: &Output, config: &Config, args: &CatalogArgs) -> 
     Ok(ExitCode::SUCCESS)
 }
 
-/// Reconciles the project's index after `convert styleguide` wrote rules
-/// into one of its argosys. `Ok(None)` — still without loading the model —
-/// when no index db exists yet: a later `index build` starts fresh and sees
-/// the imported rules, and creating one here would force a ~90 MB model
-/// download as a side effect of a convert.
+/// Reconciles the project's index after `convert styleguide` wrote rules.
+///
+/// `Ok(None)` when no index db exists yet, so the convert never forces a
+/// ~90 MB model download; a later `index build` sees the imported rules.
 #[cfg(feature = "default-index")]
 fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index::IndexReport>> {
     use argosy::context::ProjectContext;
@@ -315,9 +302,8 @@ fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index:
     if !db.is_file() {
         return Ok(None);
     }
-    // Same UX as `index build`: say so on stderr so the pause while the
-    // embedding model loads never reads as a hang. The lexical mode
-    // loads nothing and says nothing.
+    // Announce on stderr so the model-load pause never reads as a hang;
+    // lexical mode loads nothing and says nothing.
     let provider = runtime_provider(config)?;
     if provider.loads_model() {
         eprintln!("argosy: loading embedding model (first run downloads ~90 MB)…");
@@ -331,9 +317,7 @@ fn reconcile_index_after_import(config: &Config) -> Result<Option<argosy::index:
 pub(super) fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
     match &args.verb {
         AgentVerb::Reviewer(reviewer) => {
-            // The project root is the working directory — the same scope
-            // the index and mcp verbs use. Agent definitions are harness
-            // config, so no argosy needs to exist here.
+            // Agent definitions are harness config, so no argosy needs to exist here.
             let root = current_dir()?;
             let report = argosy::setup_reviewer(reviewer.harness.into(), &root, reviewer.force)?;
             if out.json {
@@ -349,9 +333,8 @@ pub(super) fn cmd_agent(out: &Output, args: &AgentArgs) -> Result<ExitCode> {
                     report.harness,
                     report.path.display()
                 ));
-                // The reviewer grounds findings in rules through the argosy
-                // MCP server; without it, it degrades to ungrounded review
-                // (the prompt says so) — a hint, not a warning.
+                // Without the MCP server the reviewer degrades to
+                // ungrounded review — a hint, not a warning.
                 out.note(
                     "note: the reviewer grounds findings in styleguide rules via the argosy \
                      MCP server (`argosy mcp` on stdio) — register it with the harness to \
@@ -411,9 +394,8 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
     use argosy::index::sqlite::SqliteVecStore;
     use argosy::index::{Index, VectorStore, staleness_report};
 
-    // The project root is the working directory: discovery walks the
-    // project's argosy store under the user state dir plus the global
-    // store, all keyed by that root.
+    // Discovery walks the project's argosy store under the user state dir
+    // plus the global store, all keyed by the project root.
     let root = current_dir()?;
     let db = argosy::pull::project_argosy_dir(&root)?.join(config.index_db_name());
 
@@ -432,14 +414,11 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            // `status` is a read-only verb: it must work on a read-only
-            // index and must never write (no directory creation, no pragma,
-            // no DDL).
+            // `status` must work on a read-only index and never write.
             let store = SqliteVecStore::open_read_only(&db)?;
-            // The identity the CURRENT mode's next build would record:
-            // hybrid names the resolved model, lexical names the
-            // zero-model embedder — either way a mismatch is the usual
-            // full-rebuild signal, not a silent half-mode index.
+            // The model identity the current mode's next build would
+            // record; a mismatch is the usual full-rebuild signal, not a
+            // silent half-mode index.
             let expected_model = match config.index.search_mode {
                 argosy::config::SearchModeConfig::Hybrid => model_spec(config)?.model_id(),
                 argosy::config::SearchModeConfig::Lexical => {
@@ -448,8 +427,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             };
             let stale = staleness_report(&context, &store, &expected_model, config.chunk_config())?;
 
-            // Concept counts per argosy/namespace, derived from
-            // `unit_hashes` keys: one entry per concept (a concept may hold
+            // `unit_hashes` yields one key per concept (concepts hold
             // several passages; `index build`'s report counts those).
             let mut units: Vec<(&str, &str, usize)> = Vec::new();
             let hashes = store.unit_hashes()?;
@@ -513,10 +491,8 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
         IndexVerb::Build => {
             let context = ProjectContext::open_project(&root)?;
             let store = SqliteVecStore::open(&db)?;
-            // Loading the model takes a moment (and a ~90 MB download on a
-            // cold cache), so the pause is announced on stderr before it
-            // happens — never on stdout, the machine-readable channel,
-            // and not at all in lexical mode, which loads nothing.
+            // Announce the pause on stderr — never stdout, the
+            // machine-readable channel — and not in lexical mode.
             let provider = runtime_provider(config)?;
             note_model_load(out, &provider);
             let mut index = Index::new(provider, store).with_chunk_config(config.chunk_config());
@@ -537,8 +513,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                     report.model_id
                 ));
             }
-            // Invisible-Unicode flags: poisoning payloads stripped from the
-            // indexed text, concept by concept. Loud by design.
+            // Invisible-Unicode flags stripped from indexed text — loud by design.
             for warning in &report.warnings {
                 out.warn(warning);
             }
@@ -556,10 +531,7 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            // `query` is a read-only verb like `status`: it searches the
-            // index as built (the query text is embedded in-process — or
-            // not at all in lexical mode — never in the store) and must
-            // work on a read-only index.
+            // Read-only like `status`: the query text embeds in-process, never in the store.
             let store = SqliteVecStore::open_read_only(&db)?;
             let provider = runtime_provider(config)?;
             note_model_load(out, &provider);
@@ -621,22 +593,18 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     let embed_cache = embed_cache_override(config);
     let spec = model_spec(config)?;
     let chunk_config = config.chunk_config();
-    // The search mode is fixed for the serving process: hybrid sessions
-    // lazily load the configured model, lexical sessions never load one.
+    // Search mode is fixed for the process; hybrid loads lazily, lexical never.
     let search_mode = config.index.search_mode;
-    // Trust tiers come from local configuration, never a book's
-    // self-claim: imports are capped per the `trust` section (SEC-2).
+    // Trust tiers come from local configuration, never a book's self-claim (SEC-2).
     let trust = config.trust_policy();
-    // No project is opened at startup: the server runs from any directory,
-    // and every tool call names its project (`cwd`). Projects open lazily
-    // through this factory and are cached under a TTL/LRU bound.
-    // stdout is the stdio protocol channel: every diagnostic is stderr.
+    // Projects open lazily through this factory (each tool call names its
+    // project via `cwd`); stdout is the stdio protocol channel: every
+    // diagnostic is stderr.
     let factory: SessionFactory<RuntimeProvider, SqliteVecStore> = Arc::new(move |root| {
         let context = ProjectContext::open_project(root)?;
         let store = SqliteVecStore::open(argosy::pull::project_argosy_dir(root)?.join(&db_name))?;
-        // The lazy provider keeps the open instant and offline-tolerant:
-        // the model (and its ~90 MB first-run download) loads only when
-        // something actually needs embedding — and never in lexical mode.
+        // The lazy provider keeps the open instant: the model loads only
+        // when something actually needs embedding.
         let provider = match search_mode {
             argosy::config::SearchModeConfig::Hybrid => RuntimeProvider::Hybrid(Box::new(
                 argosy::index::tract::LazyTractProvider::new(spec, embed_cache.clone())?,
@@ -646,10 +614,9 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
             }
         };
         let mut index = Index::new(provider, store).with_chunk_config(chunk_config);
-        // A failed reconcile degrades retrieval, it must not fail the open
-        // (spec §11: an out-of-date index degrades search quality, never
-        // correctness) — warn on stderr and serve the session anyway;
-        // mutating tools re-attempt reconciliation on every write.
+        // A failed reconcile must not fail the open — it degrades search
+        // quality, never correctness; mutating tools re-attempt on every
+        // write.
         match index.reconcile(&context) {
             Ok(report) => eprintln!(
                 "argosy mcp: {}: index reconciled ({} upserted, {} removed, {} unchanged)",
@@ -671,8 +638,8 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     #[allow(unused_mut)]
     let mut state = McpState::new(factory)
         .with_session_limits(config.session.project_ttl(), config.session.project_max);
-    // The decision endpoint is process-global (one user, one endpoint) and
-    // shared by every session; disabled unless configured.
+    // The decision endpoint is process-global and shared by every session;
+    // disabled unless configured.
     #[cfg(feature = "decision")]
     {
         let provider = argosy::decision::provider_from_config(&config.decision)?;
@@ -684,8 +651,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
             );
         }
     }
-    // Code tools are confined to the workspace the server was spawned in
-    // unless the user config opts out (code_tools.allow_external_paths).
+    // Code tools are confined to the spawn workspace unless the user opts out.
     #[cfg(feature = "code-tools")]
     let code = {
         #[allow(unused_mut)]
@@ -717,8 +683,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
                     .map_err(|e| Error::Transport {
                         reason: format!("MCP stdio handshake failed: {e}"),
                     })?;
-            // `cancel()` would shut the server down immediately; wait for
-            // the natural end (stdin EOF / client disconnect) instead.
+            // `cancel()` would shut the server down immediately; wait for the natural end.
             service.waiting().await.map_err(|e| Error::Transport {
                 reason: format!("MCP server task failed: {e}"),
             })?;
@@ -750,9 +715,7 @@ pub(super) fn build_filter(q: &QueryArgs) -> Filter {
     }
 }
 
-/// Resolves the configured embedding model, erroring with the known names
-/// on a typo (validation also catches this at load time — this is the
-/// same check for non-configured invocations of the default).
+/// Resolves the configured embedding model, erroring with the known names on a typo.
 #[cfg(feature = "default-index")]
 fn model_spec(config: &Config) -> Result<argosy::index::tract::ModelSpec> {
     let name = config.model_name();
@@ -770,14 +733,11 @@ fn model_spec(config: &Config) -> Result<argosy::index::tract::ModelSpec> {
     })
 }
 
-/// The user-configured search mode as ONE concrete provider type, so every
-/// index construction site (build, query, mcp session factory, the
-/// post-convert reconcile) names a single `Index<RuntimeProvider, _>`:
-/// hybrid resolves the real (lazily loaded) model, lexical resolves the
-/// zero-model embedder — which never downloads anything. The model
-/// provider is boxed: it embeds a loaded-model cache and dwarfs the
-/// zero-dimension variant, and every dispatch passes the enum by
-/// reference.
+/// The configured search mode as one concrete provider type, so every
+/// index construction site names a single `Index<RuntimeProvider, _>`.
+///
+/// Hybrid resolves the lazily loaded real model (boxed for size); lexical
+/// resolves the zero-model embedder, which never downloads anything.
 #[cfg(feature = "default-index")]
 enum RuntimeProvider {
     Hybrid(Box<argosy::index::tract::LazyTractProvider>),
@@ -786,9 +746,7 @@ enum RuntimeProvider {
 
 #[cfg(feature = "default-index")]
 impl RuntimeProvider {
-    /// True when the next reconcile/search may load (and on a cold cache,
-    /// download) the ~90 MB embedding model — the signal for the CLI's
-    /// loading note.
+    /// True when the next reconcile/search may load or download the ~90 MB embedding model.
     fn loads_model(&self) -> bool {
         matches!(self, Self::Hybrid(_))
     }
@@ -825,10 +783,8 @@ impl argosy::index::EmbeddingProvider for RuntimeProvider {
     }
 }
 
-/// Builds the configured provider for one command invocation. Hybrid
-/// keeps the load lazy — identity and width are static, and the model
-/// (with its first-run ~90 MB download) materializes only when an embed
-/// actually happens; lexical never materializes anything.
+/// Builds the configured provider for one invocation; hybrid stays lazy
+/// (the ~90 MB model loads on first embed), lexical loads nothing.
 #[cfg(feature = "default-index")]
 fn runtime_provider(config: &Config) -> Result<RuntimeProvider> {
     Ok(match config.index.search_mode {
@@ -844,8 +800,7 @@ fn runtime_provider(config: &Config) -> Result<RuntimeProvider> {
     })
 }
 
-/// Gated loading note: says so on stderr before the pause that could
-/// otherwise read as a hang — only for modes that actually load.
+/// Announces the model-load pause on stderr so it never reads as a hang.
 #[cfg(feature = "default-index")]
 fn note_model_load(out: &Output, provider: &RuntimeProvider) {
     if provider.loads_model() && !out.quiet {

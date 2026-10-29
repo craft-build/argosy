@@ -82,9 +82,7 @@ fn a_cwd_without_an_argosy_errors_and_is_not_cached() {
         "unexpected error: {err}"
     );
 
-    // `argosy init` after the failure: the next call sees it (the
-    // failure was not cached) — the bundle lands in the project's slot
-    // under the state dir, not the project tree.
+    // The bundle lands in the project's slot under the state dir, not the project tree.
     let local = LocalArgosy::init(
         crate::pull::project_argosy_dir_at(&state_root, &empty_root)
             .join(crate::pull::LOCAL_ARGOSY_NAME),
@@ -174,7 +172,6 @@ fn the_project_session_cap_evicts_the_least_recently_used_root() {
         .unwrap();
     assert_eq!(seen.load(Ordering::SeqCst), 3, "three opens, no reopens");
 
-    // The kept root is served from cache; the evicted root reopens.
     state
         .list_skills(ListSkillsParams { cwd: first.clone() })
         .unwrap();

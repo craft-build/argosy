@@ -32,9 +32,8 @@ fn write(root: &Path, rel: &str, text: &str) {
     fs::write(path, text).unwrap();
 }
 
-/// The full fixture from the doc-08 success criteria: every reserved
-/// namespace, a custom one, a `.argosy/` index, and a nested
-/// `document/memory-notes/` that must NOT be caught by the exclusion.
+/// A fixture with every reserved namespace, a custom one, a `.argosy/` index,
+/// and a nested `document/memory-notes/` the exclusion must not catch.
 fn fixture_argosy(dir: &TempDir) -> PathBuf {
     let root = dir.path().join("fixture");
     write(&root, "argosy.md", MANIFEST);
@@ -94,9 +93,8 @@ rules:
       - \"eval(text)\"
 ";
 
-// The Craft schema shape (styleguide-schema.json): facets live in the
-// file-level `metadata:` block, examples nest under `examples:`, and
-// `priority` may be `warning`/`hint`.
+// The Craft schema shape: file-level `metadata:` facets, nested `examples:`,
+// and `warning`/`hint` as valid `priority` values.
 const CRAFT_SCHEMA_RULES: &str = "\
 metadata:
   name: \"Rust Naming Conventions\"

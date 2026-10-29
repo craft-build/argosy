@@ -1,5 +1,4 @@
-//! Test-only helpers shared across modules' unit tests: fixture copying
-//! into fresh tempdirs so tests never mutate `tests/fixtures/`.
+//! Test-only helpers shared across modules' unit tests.
 
 use std::fs;
 use std::path::Path;
@@ -19,8 +18,7 @@ fn copy_dir_all(src: &Path, dst: &Path) {
     }
 }
 
-/// Copies a shared fixture into a fresh tempdir — tests must never
-/// mutate `tests/fixtures/` directly.
+/// Copies a fixture into a fresh tempdir so tests never mutate `tests/fixtures/` directly.
 pub(crate) fn fixture_copy(name: &str) -> TempDir {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")

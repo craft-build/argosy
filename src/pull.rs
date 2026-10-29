@@ -1,16 +1,8 @@
-//! Pulling external argosies into a project or the global store. Argosy
-//! data never lives in the project tree — agents working the tree would
-//! just read the markdown directly, bypassing the argosy MCP tools — so
-//! everything lives under the user's argosy state dir
-//! ([`state_dir`]: `$XDG_STATE_HOME/argosy`, `~/.local/state/argosy`):
+//! Pulling external argosies into a project or the global store.
 //!
-//! - user-wide checkouts at `<state>/global/<name>/`,
-//! - a project's checkouts at `<state>/projects/<slug>/<name>/`, with the
-//!   local (writable) bundle at `<state>/projects/<slug>/default/` and the
-//!   derived index at `<state>/projects/<slug>/index.db`.
-//!
-//! `<slug>` is [`project_slug`]: the project root's directory name plus a
-//! short hash of its absolute path, so same-named projects never collide.
+//! Argosy data lives under the user's state dir ([`state_dir`]), never in
+//! the project tree: agents working the tree would just read the markdown
+//! directly, bypassing the argosy MCP tools.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,38 +13,29 @@ use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use crate::bundle::Argosy;
 use crate::error::{IoSnafu, NotAnArgosySnafu, Result, ValidationSnafu};
 
-/// The checkout name of a project's local (writable) bundle:
-/// `<state>/projects/<slug>/default`.
+/// The checkout name of a project's local (writable) bundle: `<state>/projects/<slug>/default`.
 pub const LOCAL_ARGOSY_NAME: &str = "default";
 
-/// The derived index file inside a project's state directory:
-/// `<state>/projects/<slug>/index.db`.
+/// The derived index file inside a project's state directory: `<state>/projects/<slug>/index.db`.
 pub const INDEX_DB_NAME: &str = "index.db";
 
-/// The file inside a project's state-dir slot recording the canonical
-/// project root the slot was created for (`argosy init` / a project-scoped
-/// `argosy pull`). The slug only carries the root's basename and a path
-/// hash, so this sidecar is what lets the catalog map a slot back to its
-/// project and flag slots whose project directory no longer exists.
+/// The sidecar in a project's state-dir slot recording its canonical project
+/// root, so the catalog can map slots back to projects and flag stale ones.
 pub const SLOT_ROOT_FILE: &str = ".project-root";
 
-/// The sibling stamp `argosy pull` records beside every checkout
-/// (`<checkout>.import-integrity`): the SHA-256 of the sidecar it verified,
-/// or `absent` when the book shipped none. It lives in importer-controlled
-/// state *outside* the cloned tree, so tampering with the checkout —
-/// including deleting the sidecar (making the book look never-packaged) or
-/// rewriting it to match injected content — is caught at the next open.
+/// The sibling stamp `argosy pull` records beside every checkout: the SHA-256
+/// of the sidecar it verified, or `absent` when the book shipped none.
+///
+/// It lives outside the cloned tree, so tampering with the checkout — the
+/// sidecar rewritten or deleted included — is caught at the next open.
 pub const IMPORT_INTEGRITY_SUFFIX: &str = ".import-integrity";
 
 /// The stamp body for a checkout that shipped no integrity sidecar.
 const STAMP_NO_SIDECAR: &str = "absent";
 
-/// The user's argosy state root: `$XDG_STATE_HOME/argosy` (falling back
-/// to `~/.local/state/argosy`, and on Windows — where neither
-/// `$XDG_STATE_HOME` nor `$HOME` is set by default — to
-/// `%USERPROFILE%\AppData\Local\argosy`). Every argosy path — global
-/// checkouts, project checkouts, indexes — derives from here, keeping
-/// argosy data out of the project tree entirely.
+/// The user's argosy state root that every argosy path derives from:
+/// `$XDG_STATE_HOME/argosy`, `~/.local/state/argosy`, or on Windows
+/// `%USERPROFILE%\AppData\Local\argosy`.
 pub fn state_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -70,7 +53,7 @@ pub fn state_dir() -> Result<PathBuf> {
 }
 
 /// The per-user state base under `home`: `~/.local/state` on Unix,
-/// `<home>\AppData\Local` on Windows (which has no POSIX home layout).
+/// `<home>\AppData\Local` on Windows.
 fn home_state_base(home: PathBuf) -> PathBuf {
     if cfg!(windows) {
         home.join("AppData").join("Local")
@@ -79,17 +62,16 @@ fn home_state_base(home: PathBuf) -> PathBuf {
     }
 }
 
-/// The directory holding argosies installed for the user, shared by every
-/// project: `<state>/global`.
+/// The directory of user-installed argosies shared by every project: `<state>/global`.
 pub fn global_argosy_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("global"))
 }
 
-/// The state-dir slug of a project root: its final directory component
-/// plus the first 8 hex digits of the SHA-256 of its absolute path (e.g.
-/// `craft-1a2b3c4d`), so two same-named projects never share storage.
-/// The root is canonicalized first, so different spellings of one
-/// directory (symlinked or not) map to one slug.
+/// The state-dir slug of a project root: its final directory component plus
+/// the first 8 hex digits of the SHA-256 of its absolute path, so
+/// same-named projects never share storage.
+///
+/// The root is canonicalized first, so different spellings map to one slug.
 pub fn project_slug(project_root: impl AsRef<Path>) -> String {
     let root = project_root.as_ref();
     let canonical = root
@@ -105,24 +87,22 @@ pub fn project_slug(project_root: impl AsRef<Path>) -> String {
     format!("{name}-{}", &digest[..8])
 }
 
-/// The directory holding a project's argosy state: the local (writable)
-/// bundle at `<...>/default`, pulled checkouts at `<...>/<name>`, and the
-/// derived index at `<...>/index.db` — under
-/// `$XDG_STATE_HOME/argosy/projects/<slug>`, never in the project tree.
+/// The directory holding a project's argosy state (local `default` bundle,
+/// pulled checkouts, derived `index.db`), never in the project tree.
 pub fn project_argosy_dir(project_root: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(project_argosy_dir_at(&state_dir()?, project_root))
 }
 
 /// [`project_argosy_dir`] against an explicit state root (tests and hosts
-/// inject a tempdir instead of touching `~/.local/state`).
+/// inject a tempdir).
 pub fn project_argosy_dir_at(state_root: &Path, project_root: impl AsRef<Path>) -> PathBuf {
     state_root.join("projects").join(project_slug(project_root))
 }
 
 /// The canonical spelling of `project_root`: its resolved path when the
-/// directory exists, else its absolutized spelling. Using the fallback for
-/// a deleted project keeps its slug (and therefore its slot) stable, so a
-/// stale slot still maps to the path it was created for.
+/// directory exists, else its absolutized spelling.
+///
+/// The fallback keeps a deleted project's slot stable.
 pub fn canonical_project_root(project_root: impl AsRef<Path>) -> PathBuf {
     let root = project_root.as_ref();
     root.canonicalize()
@@ -131,10 +111,7 @@ pub fn canonical_project_root(project_root: impl AsRef<Path>) -> PathBuf {
 }
 
 /// Records `project_root`'s canonical path in its state-dir slot, creating
-/// the slot directory if needed, and returns the slot path. Called when a
-/// project slot is created (`argosy init` with no path, a project-scoped
-/// `argosy pull`), so the catalog can later map the slot back to its
-/// project root and detect stale slots.
+/// the slot directory if needed, and returns the slot path.
 pub fn record_project_root_at(
     state_root: &Path,
     project_root: impl AsRef<Path>,
@@ -153,18 +130,15 @@ pub fn record_project_root(project_root: impl AsRef<Path>) -> Result<PathBuf> {
     record_project_root_at(&state_dir()?, project_root)
 }
 
-/// The project root recorded for `slot` by [`record_project_root_at`], if
-/// any. Slots created before recording existed (or by a host that wrote the
-/// bundle directly) have no sidecar and return `None`.
+/// The project root recorded for `slot` by [`record_project_root_at`], if any.
 pub fn recorded_project_root(slot: &Path) -> Option<PathBuf> {
     let text = fs::read_to_string(slot.join(SLOT_ROOT_FILE)).ok()?;
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
-/// Maps a failed `git` process spawn. A missing binary is a setup problem,
-/// not an I/O problem on the destination — name `git` and PATH so the user
-/// can act on the message instead of chasing a misleading path.
+/// Maps a failed `git` process spawn. A missing binary is a setup problem, not
+/// an I/O problem on the destination.
 fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
     if err.kind() == std::io::ErrorKind::NotFound {
         return ValidationSnafu {
@@ -180,21 +154,15 @@ fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
     .into_error(err)
 }
 
-/// Clones the argosy at `url` into `<root>/<name>` via `git clone`, opens
-/// it, and — when the clone carries an integrity sidecar
-/// ([`crate::package::INTEGRITY_FILENAME`], emitted by
-/// [`crate::package::package`]) — verifies every hash in it before the
-/// checkout is accepted, refusing to overwrite an existing checkout and
-/// rejecting `name` outside the URI charset (see
-/// [`crate::bundle::is_safe_bundle_name`]). All-or-nothing: a failed or
-/// non-bundle clone, or one whose sidecar disagrees with its contents,
-/// leaves no partial checkout behind.
+/// Clones the argosy at `url` into `<root>/<name>` via `git clone`, opens it,
+/// and verifies its integrity sidecar ([`crate::package::INTEGRITY_FILENAME`])
+/// before accepting the checkout.
+///
+/// All-or-nothing: a failed, non-bundle, or integrity-failing clone leaves no
+/// checkout behind.
 pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
-    // The URL reaches `git` verbatim: a leading dash would be parsed as a
-    // git option (`--upload-pack=<cmd>` executes commands), and `ext::`
-    // transports execute local commands by design. The CLI caller is the
-    // local user, but this is a public library API — refuse option-shaped
-    // URLs up front rather than trusting every future caller.
+    // The URL reaches `git` verbatim, and this is a public API: option-shaped
+    // URLs (`--upload-pack=<cmd>`, `ext::` transports) execute commands.
     ensure!(
         !url.is_empty() && !url.starts_with('-'),
         ValidationSnafu {
@@ -251,22 +219,15 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
     }
     match Argosy::open(&dest) {
         Ok(argosy) => {
-            // A packaged bundle ships an integrity sidecar; a book that
-            // carries one is verified before it becomes an import, so a
-            // clone tampered with in transit (or a repo whose sidecar
-            // disagrees with its contents) is refused at the door. No
-            // sidecar means nothing was ever packaged — nothing to verify
-            // (tier policy, not this check, governs trust).
+            // A missing sidecar is fine: never packaged, nothing to verify.
             if sidecar_is_regular_file(&dest)
                 && let Err(error) = crate::package::validate_integrity(&dest)
             {
                 let _ = fs::remove_dir_all(&dest);
                 return Err(error);
             }
-            // Record what was verified beside the checkout, in
-            // importer-controlled state: the stamp is what makes a *later*
-            // tamper with the cloned tree (sidecar deleted or rewritten
-            // included) detectable at the next open.
+            // The stamp is what makes a *later* tamper with the cloned tree
+            // detectable.
             if let Err(error) = write_import_integrity_stamp(&dest) {
                 let _ = fs::remove_dir_all(&dest);
                 return Err(error);
@@ -284,12 +245,8 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
     }
 }
 
-/// Whether an accepted checkout carries a verified integrity sidecar:
-/// `"verified"` when [`crate::package::INTEGRITY_FILENAME`] is present (a
-/// present sidecar on an accepted checkout has necessarily passed
-/// [`crate::package::validate_integrity`]), `"no sidecar"` when the book
-/// was never packaged. Pull output relays this so the user can see which
-/// imports are tamper-checked.
+/// Whether an accepted checkout carries a verified sidecar: `"verified"` or
+/// `"no sidecar"`.
 pub fn integrity_status(checkout: &Path) -> &'static str {
     if sidecar_is_regular_file(checkout) {
         "verified"
@@ -298,8 +255,7 @@ pub fn integrity_status(checkout: &Path) -> &'static str {
     }
 }
 
-/// The pull-time stamp path beside a checkout:
-/// `<parent>/<name>.import-integrity` (see [`IMPORT_INTEGRITY_SUFFIX`]).
+/// The pull-time stamp path beside a checkout: `<parent>/<name>.import-integrity`.
 pub fn import_integrity_stamp(checkout: &Path) -> PathBuf {
     let name = checkout
         .file_name()
@@ -308,10 +264,10 @@ pub fn import_integrity_stamp(checkout: &Path) -> PathBuf {
     checkout.with_file_name(format!("{name}{IMPORT_INTEGRITY_SUFFIX}"))
 }
 
-/// The sidecar is present as a real regular file — symlinks do not count:
-/// the sidecar lives inside the (attacker-reachable) checkout, and a
-/// symlinked `argosy-integrity.txt` must read as absent, not as a stream
-/// to follow.
+/// Whether the integrity sidecar is present as a regular file.
+///
+/// Symlinks count as absent: a symlinked sidecar is in attacker-reachable
+/// space and must never be followed.
 fn sidecar_is_regular_file(checkout: &Path) -> bool {
     std::fs::symlink_metadata(checkout.join(crate::package::INTEGRITY_FILENAME))
         .is_ok_and(|m| m.file_type().is_file())
@@ -329,25 +285,17 @@ fn stamp_body(checkout: &Path) -> Result<String> {
 }
 
 /// Writes the pull-time integrity stamp beside `checkout`. Called only
-/// after the checkout was accepted (sidecar verified when present).
+/// after the checkout was accepted.
 fn write_import_integrity_stamp(checkout: &Path) -> Result<()> {
     let stamp = import_integrity_stamp(checkout);
     fs::write(&stamp, stamp_body(checkout)?).context(IoSnafu { path: stamp })
 }
 
-/// Verifies a checkout against its pull-time stamp
-/// ([`IMPORT_INTEGRITY_SUFFIX`]). `Err(reason)` means the checkout must be
-/// excluded from the active set — never served:
+/// Verifies a checkout against its pull-time stamp ([`IMPORT_INTEGRITY_SUFFIX`]);
+/// `Err` means the checkout must be excluded from the active set — never served.
 ///
-/// - a stamped sidecar must still exist byte-for-byte (delete it, or
-///   rewrite it to match injected content, and the import is out);
-/// - a checkout pulled *without* a sidecar must not grow one;
-/// - whenever a sidecar is present its hashes must still cover the
-///   checkout's contents ([`crate::package::validate_integrity`]).
-///
-/// Checkouts pulled before stamps existed (or pointed at directly by a
-/// host) have no stamp: the standing rule applies — a present sidecar is
-/// verified, an absent one means nothing was ever packaged.
+/// Unstamped checkouts follow the standing rule: a present sidecar is verified,
+/// an absent one means nothing was ever packaged.
 pub fn verify_import_integrity(checkout: &Path) -> std::result::Result<(), String> {
     let repull = "remove the checkout and `argosy pull` it again";
     let stamp = fs::read_to_string(import_integrity_stamp(checkout))
@@ -384,13 +332,10 @@ pub fn verify_import_integrity(checkout: &Path) -> std::result::Result<(), Strin
     }
 }
 
-/// The commit a checkout's git metadata resolves to, when it has any:
-/// the provenance hits and reads report for imported content. Pure file
-/// reads — a loose `HEAD` ref first, then `packed-refs`, following one
-/// `gitdir:` indirection (worktrees/submodules) — because every import
-/// open would otherwise pay a git subprocess. `None` is not an error:
-/// checkouts without git metadata (hosts pointing at plain trees) simply
-/// have no commit to report.
+/// The commit a checkout's git metadata resolves to, if any — the provenance
+/// hits and reads report for imported content, and `None` is not an error.
+///
+/// Read from git files, not a subprocess, so opening imports stays cheap.
 pub fn checkout_head_commit(checkout: &Path) -> Option<String> {
     fn is_commit_id(text: &str) -> bool {
         let text = text.trim();
@@ -417,14 +362,12 @@ pub fn checkout_head_commit(checkout: &Path) -> Option<String> {
         return Some(head);
     }
     let ref_name = head.strip_prefix("ref: ")?.trim();
-    // Loose ref first (a fresh clone always has one)…
     if let Ok(loose) = fs::read_to_string(git_dir.join(ref_name))
         && is_commit_id(&loose)
     {
         return Some(loose.trim().to_string());
     }
-    // …then packed-refs (`<sha> <refname>` lines; `^`-prefixed peel lines
-    // fail the shape test and drop out).
+    // `^`-prefixed peel lines fail the shape check and drop out.
     let packed = fs::read_to_string(git_dir.join("packed-refs")).ok()?;
     packed.lines().find_map(|line| {
         let (hash, name) = line.split_once(' ')?;
@@ -472,8 +415,8 @@ mod tests {
 
     #[test]
     fn git_spawn_error_names_git_when_the_binary_is_missing() {
-        // Regression: a failed `git` spawn used to surface as an I/O error
-        // on the *destination path* — misleading on machines without git.
+        // Regression: a failed spawn used to surface as a misleading I/O error
+        // on the destination path.
         let err = git_spawn_error(
             Path::new("/tmp/dest"),
             std::io::Error::from(std::io::ErrorKind::NotFound),
@@ -490,8 +433,7 @@ mod tests {
         assert!(matches!(err, crate::error::Error::Io { .. }), "got {err:?}");
     }
 
-    /// Option-shaped URLs must be refused before they reach `git clone`:
-    /// `--upload-pack=<cmd>` (or an `ext::` transport) executes commands.
+    /// `--upload-pack=<cmd>` and `ext::` transports execute commands.
     #[test]
     fn clone_as_checkout_refuses_option_like_urls() {
         for bad in ["--upload-pack=touch /tmp/pwned", "-", ""] {
@@ -512,8 +454,6 @@ mod tests {
         );
     }
 
-    // --- state-dir layout ---
-
     #[test]
     fn project_slug_is_name_plus_a_short_hash_of_the_absolute_path() {
         let a = Path::new("/home/me/Projects/craft");
@@ -528,9 +468,7 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "hash is lowercase hex: {slug}"
         );
-        // Same-named projects at different paths never collide…
         assert_ne!(slug, project_slug(Path::new("/home/you/Projects/craft")));
-        // …and one path is stable across calls.
         assert_eq!(slug, project_slug(a));
     }
 
@@ -575,8 +513,7 @@ mod tests {
         assert_eq!(recorded, canonical_project_root(&project));
         assert!(recorded.is_absolute());
 
-        // A deleted project keeps its spelling (absolutized) so the slot map
-        // stays valid for stale detection.
+        // A deleted project keeps its absolutized spelling so stale slots stay detectable.
         fs::remove_dir_all(&project).unwrap();
         assert_eq!(recorded_project_root(&slot), Some(recorded));
     }
@@ -655,8 +592,7 @@ mod tests {
         assert!(!root.join("notargosy").exists(), "partial checkout removed");
     }
 
-    /// Builds a git repo from a *packaged* copy of the minimal bundle, so
-    /// the clone carries an integrity sidecar.
+    /// Builds a repo from a *packaged* bundle, so clones carry a sidecar.
     fn packaged_repo(dir: &Path) {
         fs::create_dir_all(dir).unwrap();
         let source = tempfile::tempdir().unwrap();
@@ -717,15 +653,13 @@ mod tests {
 
         clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
 
-        // The stamp hashes the *verified* sidecar and lives outside the
-        // cloned tree — the importer's record of what it accepted.
+        // The stamp is the importer's record of the verified sidecar, outside the clone.
         let stamp = fs::read_to_string(import_integrity_stamp(&root.join("shared"))).unwrap();
         let sidecar =
             fs::read(root.join("shared").join(crate::package::INTEGRITY_FILENAME)).unwrap();
         assert_eq!(stamp, crate::hash::sha256_hex(&sidecar));
         assert_eq!(stamp.len(), 64, "a sha256 hex digest: {stamp}");
 
-        // Accepting against the stamp: unchanged checkout verifies.
         assert!(verify_import_integrity(&root.join("shared")).is_ok());
     }
 
@@ -748,9 +682,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("pkg-repo");
         packaged_repo(&repo);
-        // Tamper *after* the sidecar was committed, and commit the tamper:
-        // a book whose sidecar no longer matches its contents is exactly
-        // what a rug-pulled or tampered repo looks like.
+        // Tamper after the commit — this is what a rug-pulled repo looks like.
         fs::write(repo.join("document/guide.md"), "Injected.\n").unwrap();
         let git = |args: &[&str]| {
             let out = Command::new("git")
@@ -798,8 +730,6 @@ mod tests {
         assert_eq!(integrity_status(&root.join("shared")), "no sidecar");
     }
 
-    // --- source-commit provenance ---
-
     #[test]
     fn a_clone_reports_its_head_commit() {
         let tmp = TempDir::new().unwrap();
@@ -831,8 +761,7 @@ mod tests {
         let root = tmp.path().join("store");
         clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
 
-        // A clone whose branch lives only in packed-refs (e.g. after a
-        // server-side repack): the loose ref is gone, HEAD still names it.
+        // After a server-side repack the branch lives only in packed-refs.
         let git_dir = root.join("shared/.git");
         let head = fs::read_to_string(git_dir.join("HEAD")).unwrap();
         let ref_name = head.trim().strip_prefix("ref: ").unwrap().to_string();

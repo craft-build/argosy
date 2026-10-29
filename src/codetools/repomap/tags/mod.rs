@@ -63,8 +63,7 @@ impl LangId {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
-            // JSX-bearing files need the TSX grammar; plain TypeScript
-            // chokes on JSX and yields error-ridden tags.
+            // JSX files need the TSX grammar; plain TypeScript yields error-ridden tags.
             "ts" | "js" | "mjs" | "cjs" => Some(Self::TypeScript),
             "tsx" | "jsx" => Some(Self::Tsx),
             "py" | "pyi" => Some(Self::Python),

@@ -1,11 +1,7 @@
-//! Coding-harness integration: installing argosy's `reviewer` subagent
-//! definition into a harness's project agent directory. The three
-//! supported harnesses all discover agents as markdown files — frontmatter
-//! for configuration, body for the system prompt — differing only in
-//! location and frontmatter fields. The reviewer body is shared: a
-//! read-only review workflow, adapted from Craft's built-in reviewer,
-//! that grounds findings in the project's styleguide rules through the
-//! argosy MCP tools.
+//! Installs argosy's `reviewer` subagent definition into a harness's agent directory.
+//!
+//! All supported harnesses discover agents as markdown files; the reviewer body,
+//! a read-only review workflow over the argosy MCP tools, is shared across them.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,11 +14,11 @@ use crate::error::{IoSnafu, Result, ValidationSnafu};
 /// The coding harnesses argosy can install agent definitions into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
-    /// OpenCode — `.opencode/agents/` (V2 agent markdown).
+    /// OpenCode — `.opencode/agents/`.
     OpenCode,
-    /// Claude Code — `.claude/agents/` subagent markdown.
+    /// Claude Code — `.claude/agents/`.
     Claude,
-    /// Kiro (IDE and `kiro-cli` share `.kiro/agents/`).
+    /// Kiro IDE and `kiro-cli` share `.kiro/agents/`.
     KiroCli,
 }
 
@@ -39,8 +35,7 @@ impl Harness {
         }
     }
 
-    /// Resolves a harness id ([`Harness::as_id`] spelling). An unknown id
-    /// is an error naming the valid ones.
+    /// Resolves a [`Harness::as_id`] spelling; unknown ids are errors naming valid ones.
     pub fn from_id(id: &str) -> Result<Self> {
         Self::ALL
             .iter()
@@ -58,8 +53,7 @@ impl Harness {
             })
     }
 
-    /// The project-relative directory the harness reads agent definitions
-    /// from.
+    /// The project-relative directory the harness reads agent definitions from.
     fn agents_dir(&self) -> PathBuf {
         match self {
             Harness::OpenCode => PathBuf::from(".opencode/agents"),
@@ -73,13 +67,11 @@ impl Harness {
         self.agents_dir().join("reviewer.md")
     }
 
-    /// The full reviewer definition file: harness-specific frontmatter
-    /// followed by the shared reviewer system prompt body.
+    /// The reviewer definition file: harness-specific frontmatter, then the shared body.
     pub fn reviewer_definition(&self) -> String {
         let frontmatter = match self {
-            // OpenCode V2: `mode: subagent` keeps it out of the primary
-            // slot; the deny rules make read-only structural, not just
-            // prompted.
+            // `mode: subagent` keeps it out of primary modes; the deny rules make
+            // read-only structural, not just prompted.
             Harness::OpenCode => format!(
                 "description: {REVIEWER_DESCRIPTION}\n\
                  mode: subagent\n\
@@ -91,12 +83,9 @@ impl Harness {
                  \x20   resource: \"*\"\n\
                  \x20   effect: deny\n"
             ),
-            // Claude Code: `name` + `description` are the required pair;
-            // `model: inherit` follows the parent. MCP tools are spelled
-            // `mcp__<server>__<tool>` — the `argosy` server name is the
-            // documented convention; if the server is registered under
-            // another name the native tools still work and the prompt's
-            // ungrounded-finding rule applies.
+            // MCP tools are spelled `mcp__<server>__<tool>`; if the argosy server
+            // is registered under another name the native tools still work and the
+            // prompt's ungrounded-finding rule applies.
             Harness::Claude => format!(
                 "name: reviewer\n\
                  description: {REVIEWER_DESCRIPTION}\n\
@@ -107,10 +96,8 @@ impl Harness {
                  mcp__argosy__report_finding, mcp__argosy__review_findings\n\
                  model: inherit\n"
             ),
-            // Kiro: tool tags — `read` (file reads, listing, search) plus
-            // `@mcp` (every MCP server from mcp.json, which is where the
-            // argosy server is registered). No write/shell tags, so the
-            // reviewer is structurally read-only here too.
+            // `read` plus `@mcp` (every mcp.json server); no write/shell tags, so
+            // the reviewer is structurally read-only here too.
             Harness::KiroCli => format!(
                 "name: reviewer\n\
                  description: {REVIEWER_DESCRIPTION}\n\
@@ -121,18 +108,13 @@ impl Harness {
     }
 }
 
-/// The reviewer's `description` frontmatter field — the text harnesses
-/// show in their agent catalogs and delegate on, so it states both the
-/// job and the trigger.
+/// The reviewer's `description` frontmatter field, shown in agent catalogs when delegating.
 pub(crate) const REVIEWER_DESCRIPTION: &str = "Reviews code against argosy styleguide rules and best \
      practices; reports prioritized findings (P0-P3) without modifying files. Use when asked \
      to review code, changes, or a diff.";
 
-/// The reviewer subagent's base system prompt: Craft's built-in reviewer
-/// adapted for an MCP harness — findings go in the final message, rule
-/// grounding goes through the argosy MCP tools, and reachability checks
-/// use the harness's own code search. Defect classes, priorities, and the
-/// verdict contract carry over so reviews mean the same thing everywhere.
+/// The reviewer subagent's system prompt: findings in the final message, rule
+/// grounding through the argosy MCP tools, reachability via code search.
 pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code reviewer. Review code against styleguide rules and best practices. Report findings with clear priority levels. Be thorough but constructive.
 
 # Critical rules
@@ -223,24 +205,20 @@ Keep the verdict short and synthetic. The findings list above it is the durable 
 - Every tool result grows your context. Minimize use of verbose tool calls; batch independent reads when the harness supports it.
 "#;
 
-/// The outcome of installing the reviewer agent definition for one
-/// harness: what was written, where, and whether it replaced something.
+/// The outcome of one reviewer install: what was written and whether it replaced something.
 #[derive(Debug, Serialize)]
 pub struct ReviewerSetup {
-    /// The harness the definition was written for, by id
-    /// (`opencode`, `claude`, `kiro-cli`).
+    /// The harness the definition was written for, by id.
     pub harness: String,
-    /// The definition file as written (the project root joined with the
-    /// harness-relative path).
+    /// The written definition file (project root joined with the harness-relative path).
     pub path: PathBuf,
     /// Whether an existing definition was replaced.
     pub overwritten: bool,
 }
 
-/// Writes the `reviewer` subagent definition for `harness` into
-/// `project_root`'s harness agent directory, creating the directory as
-/// needed. An existing definition is an error unless `force` replaces
-/// it — regenerating silently would discard user edits.
+/// Writes the `reviewer` subagent definition into `project_root`'s harness agent directory.
+///
+/// An existing definition is an error unless `force` replaces it.
 pub fn setup_reviewer(harness: Harness, project_root: &Path, force: bool) -> Result<ReviewerSetup> {
     let dest = project_root.join(harness.reviewer_definition_rel());
     let existed = dest.exists();
@@ -260,9 +238,7 @@ pub fn setup_reviewer(harness: Harness, project_root: &Path, force: bool) -> Res
             path: parent.to_path_buf(),
         })?;
     }
-    // Crash-atomic like every other argosy write: stage then rename, so a
-    // crash mid-write can never leave a truncated harness definition the
-    // harness would happily load.
+    // Crash-atomic write: stage then rename, so a crash never leaves a truncated definition.
     let tmp = dest.with_file_name(format!(
         "{}.tmp",
         dest.file_name()
@@ -310,9 +286,7 @@ mod tests {
                 "{}: frontmatter block opens the file",
                 harness.as_id()
             );
-            // Exactly one frontmatter block: the body must not close and
-            // reopen one (a `---` line at body start would swallow the
-            // prompt).
+            // Exactly one frontmatter close: a `---` in the body would swallow the prompt.
             assert_eq!(
                 definition.match_indices("\n---\n").count(),
                 1,
@@ -345,11 +319,9 @@ mod tests {
             for marker in [
                 "You are a code reviewer",
                 "search_rules",
-                // The argosy tools require `cwd` since the multi-project
-                // refactor; a prompt that omits it gets every call rejected.
+                // The argosy tools require `cwd`; a prompt omitting it gets every call rejected.
                 "pass the project's absolute root directory",
-                // Provenance weighting (SEC-1/SEC-2): the reviewer must
-                // bracket imported excerpts and prefer local rules.
+                // SEC-1/SEC-2 provenance weighting: bracket imported excerpts, prefer local rules.
                 "untrusted-content",
                 "**P0 - Critical**",
                 "**P3 - Low**",
@@ -414,7 +386,6 @@ mod tests {
             err.to_string().contains("already exists"),
             "error names the collision: {err}"
         );
-        // The user's file is untouched.
         assert_eq!(fs::read_to_string(&path).unwrap(), "user edits\n");
     }
 

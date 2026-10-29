@@ -88,9 +88,8 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
         let exported = is_exported(def_node, lang, content.as_bytes());
         let scope_chain = build_scope_chain(def_node, content.as_bytes());
 
-        // Rust: a function is a method only inside an `impl`/`trait`, not
-        // merely because it has a named enclosing scope — `mod tests { fn
-        // helper() {} }` must stay a function.
+        // Rust: a function is a method only inside an `impl`/`trait`, not a
+        // named enclosing scope like `mod tests`.
         let kind = if matches!(lang, LangId::Rust)
             && kind == SymbolKind::Function
             && in_impl_or_trait(def_node)
@@ -125,10 +124,8 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
 
     symbols.sort_by_key(|s| (s.range.start_row, s.range.start_col));
 
-    // Markdown heading nodes cover only the heading line, but zoom promises
-    // the section's content — extend each heading to the next same-or-higher
-    // level heading. The HTML-family queries capture *every* element as a
-    // "heading"; only h1-h6 are.
+    // Zoom promises a heading's whole section, not just the heading line;
+    // the HTML-family queries capture every element as a "heading".
     if matches!(lang, LangId::Markdown) {
         extend_markdown_heading_sections(&mut symbols, content);
     }
@@ -159,15 +156,14 @@ fn in_impl_or_trait(node: tree_sitter::Node) -> bool {
     false
 }
 
-/// A markdown heading's ATX level, read off its signature (`## Setup` → 2).
-/// Zero for anything unhashlike, which never terminates another section.
+/// A markdown heading's ATX level (`## Setup` → 2). Zero for anything
+/// unhashlike, which never terminates another section.
 fn markdown_heading_level(signature: &str) -> usize {
     signature.chars().take_while(|c| *c == '#').count()
 }
 
-/// Extends each heading symbol's range to its whole section: from the
-/// heading line to just before the next heading of the same or higher
-/// level (or EOF).
+/// Extends each heading symbol's range to just before the next heading of
+/// the same or higher level, or EOF.
 fn extend_markdown_heading_sections(symbols: &mut [Symbol], content: &str) {
     let last_row = content.lines().count().saturating_sub(1);
     let headings: Vec<(usize, usize, usize)> = symbols
@@ -194,8 +190,7 @@ fn extend_markdown_heading_sections(symbols: &mut [Symbol], content: &str) {
     }
 }
 
-/// True iff `name` is an h1-h6 tag name — the only HTML elements treated
-/// as headings.
+/// True iff `name` is an h1-h6 tag name, the only elements treated as headings.
 fn is_hn_heading(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() == 2 && matches!(bytes[0], b'h' | b'H') && (b'1'..=b'6').contains(&bytes[1])

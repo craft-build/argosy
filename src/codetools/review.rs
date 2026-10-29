@@ -1,8 +1,7 @@
 //! In-process review sessions over immutable repository diffs.
 //!
-//! `start_review` snapshots a git diff. Agents read that exact snapshot
-//! through `review_diff` and attach structured findings, which can be
-//! retrieved through `review_findings`.
+//! `start_review` snapshots the diff; the other tools read that exact
+//! snapshot and attach or retrieve findings.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,16 +30,14 @@ static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 pub struct StartReviewParams {
     /// Repository root (or a directory inside it).
     pub cwd: PathBuf,
-    /// Git revision to compare the working tree against (default
-    /// `HEAD`): any revision git resolves — a commit, branch, tag, or
-    /// tree — or a range like `start..end` / `start...end` for endpoint
-    /// and merge-base diffs. Values starting with `-` are rejected.
-    /// Mutually exclusive with `commit`.
+    /// Git revision or range to compare the working tree against (default `HEAD`).
+    ///
+    /// Mutually exclusive with `commit`; values starting with `-` are rejected.
     pub base: Option<String>,
-    /// Review exactly this committed revision (or range of commits)
-    /// instead of the working tree: any revision or range git
-    /// resolves. Values starting with `-` are rejected. Merge commits
-    /// are compared with their first parent.
+    /// Committed revision or commit range to review instead of the working tree.
+    ///
+    /// Values starting with `-` are rejected; merge commits compare with their
+    /// first parent.
     pub commit: Option<String>,
 }
 
@@ -126,16 +123,14 @@ pub struct ReviewFinding {
     pub rule_uris: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
-    /// Advisory decision-endpoint assessment, when a decision endpoint was
-    /// enabled at report time. Never changes the finding's presence or
-    /// priority — it exists for audit.
+    /// Advisory assessment from the decision endpoint, when one was enabled at
+    /// report time; it never changes the finding's presence or priority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assessment: Option<FindingAssessment>,
 }
 
-/// An advisory assessment of a finding by the decision endpoint: whether the
-/// code supports the finding and what severity it reads as. Purely
-/// informational; it never filters or downgrades a finding.
+/// An advisory assessment of a finding by the decision endpoint; it never
+/// filters or downgrades the finding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindingAssessment {
     /// `"supported"` or `"unsupported"`, when the endpoint answered.
@@ -403,8 +398,7 @@ impl ReviewManager {
             .findings
             .iter()
             .any(|existing| existing.finding_id == finding.finding_id);
-        // The diff hunk for this finding, captured before releasing the lock
-        // so the advisory decision call is made lock-free.
+        // Captured before releasing the lock so the decision call is lock-free.
         #[cfg(feature = "decision")]
         let hunk = created.then(|| diff_for_file(&session.diff, &finding.path).unwrap_or_default());
         if created {
@@ -413,8 +407,7 @@ impl ReviewManager {
         let finding_count = session.findings.len();
         drop(sessions);
 
-        // Advisory assessment: computed outside the lock (it is a network
-        // call), then recorded on the stored finding. Any failure is silent —
+        // Computed outside the lock (a network call); any failure is silent —
         // scoring never affects whether the finding exists.
         #[cfg(feature = "decision")]
         if created
@@ -473,9 +466,8 @@ impl ReviewManager {
     }
 }
 
-/// Asks the decision endpoint to score a finding: whether the code supports
-/// it and what severity it reads as. Returns `None` when the endpoint
-/// answered nothing usable. Advisory only — never a filter.
+/// Asks the decision endpoint to score a finding, returning `None` when it
+/// answers nothing usable. Advisory only — never a filter.
 #[cfg(feature = "decision")]
 fn assess_finding(
     decision: &dyn crate::decision::DecisionProvider,
@@ -679,34 +671,14 @@ fn repository_root(cwd: &Path) -> Result<PathBuf> {
     ))
 }
 
-/// Resolves a caller-supplied `base`/`commit` revision expression into a
-/// canonical form that can never be parsed as a git option, before the
-/// value ever reaches `git diff` or `git show`.
+/// Resolves a caller-supplied `base`/`commit` revision into an inert value —
+/// a verified hex object SHA, or `sha..sha`/`sha...sha` for ranges — before
+/// it ever reaches `git diff` or `git show`.
 ///
-/// The revision is passed to those commands as a positional argument
-/// *before* their `--` path separator, so without this gate an
-/// option-shaped value would be parsed as a git option — and both
-/// commands accept `--output=<path>`, which writes the diff to an
-/// arbitrary file. The tool is reachable by every MCP caller, including
-/// a model steered by prompt-injected content, so the write is not
-/// hypothetical; `crate::pull::clone_as_checkout` refuses leading-dash
-/// clone URLs for the same reason. This is the review tools' copy of
-/// that guard, shaped so that none of the reviewer's expressiveness is
-/// lost on the way: single revisions of any object type (commits,
-/// including annotated tags, and trees) resolve through `git rev-parse
-/// --verify`, and ranges `a..b` / `a...b` resolve both endpoints the
-/// same way and are recombined in SHA-only form. Three layers:
-///
-/// 1. A leading `-` (or whitespace-only input) is refused outright.
-/// 2. Everything else reaches only `git rev-parse --verify`, where
-///    `--end-of-options` ends option parsing entirely — whatever the
-///    spec says, it cannot select a git option there. Range endpoints
-///    append `^{commit}` because git itself requires range endpoints to
-///    name commits.
-/// 3. Only output that is a hex object SHA (recombined into
-///    `sha..sha`/`sha...sha` for ranges) is accepted; hex can never be
-///    mistaken for a dash-prefixed option, so only an inert value is
-///    ever passed to the diff commands.
+/// An option-shaped value would be parsed as a git option there, and both
+/// commands accept `--output=<path>`: an arbitrary file write. A leading `-`
+/// is refused outright; everything else resolves only through `git rev-parse
+/// --verify --end-of-options`, and only a hex SHA is accepted.
 fn resolve_revision(root: &Path, spec: &str, param: &str) -> Result<String> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -736,9 +708,8 @@ fn resolve_revision(root: &Path, spec: &str, param: &str) -> Result<String> {
     if output.status.success() {
         let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !is_object_sha(&sha) {
-            // Unreachable with `--verify` today; kept because the whole
-            // contract of this function is that only an inert value
-            // ever reaches `git diff` / `git show`.
+            // Unreachable with `--verify` today, but the contract is that only
+            // an inert value ever reaches `git diff` / `git show`.
             return CodeToolSnafu {
                 message: format!(
                     "{param} `{spec}` resolved to unexpected revision `{sha}`; \
@@ -749,11 +720,10 @@ fn resolve_revision(root: &Path, spec: &str, param: &str) -> Result<String> {
         }
         return Ok(sha);
     }
-    // A range (`a..b`, merge-base `a...b`) legitimately fails `--verify`
-    // with "needed a single revision", so split and resolve each
-    // endpoint instead. Revision syntax cannot otherwise contain `..`:
-    // git rejects it inside refnames and inside `^{/regex}` blocks, so
-    // this split matches git's own grammar.
+    // A range legitimately fails `--verify` with "needed a single revision",
+    // so split and resolve each endpoint. Revision syntax cannot otherwise
+    // contain `..` — git rejects it in refnames and `^{/regex}` — so the
+    // split matches git's own grammar.
     if let Some((left, right, dots)) = split_range(spec) {
         let left_sha = resolve_endpoint(root, left, param, spec)?;
         let right_sha = resolve_endpoint(root, right, param, spec)?;
@@ -768,9 +738,8 @@ fn resolve_revision(root: &Path, spec: &str, param: &str) -> Result<String> {
     .fail()
 }
 
-/// Splits `a..b` or `a...b` into its endpoints and separator; either
-/// side may be empty (git reads an empty side as `HEAD`). Returns `None`
-/// when the spec contains no range separator at all.
+/// Splits `a..b`/`a...b` into endpoints and separator; an empty side means
+/// `HEAD`. `None` when there is no range separator.
 fn split_range(spec: &str) -> Option<(&str, &str, &'static str)> {
     let start = spec.find("..")?;
     let rest = &spec[start..];
@@ -783,10 +752,8 @@ fn split_range(spec: &str) -> Option<(&str, &str, &'static str)> {
     }
 }
 
-/// Resolves one endpoint of a range. Range endpoints must name
-/// commits — the same rule git applies when it parses `a..b` itself —
-/// so an empty side means `HEAD` and the appended `^{commit}` peels tags
-/// to their commit. Returns the verified hex SHA.
+/// Resolves one endpoint of a range to a verified hex SHA, appending
+/// `^{commit}` (peeling tags); an empty side means `HEAD`.
 fn resolve_endpoint(root: &Path, side: &str, param: &str, spec: &str) -> Result<String> {
     let rev = if side.is_empty() { "HEAD" } else { side };
     if rev.starts_with('-') {
@@ -828,8 +795,7 @@ fn resolve_endpoint(root: &Path, side: &str, param: &str, spec: &str) -> Result<
     Ok(sha)
 }
 
-/// A git object id as printed by `rev-parse --verify`: 40 (SHA-1) or 64
-/// (SHA-256) hex digits.
+/// A git object id as printed by `rev-parse --verify`: 40 (SHA-1) or 64 (SHA-256) hex digits.
 fn is_object_sha(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -984,8 +950,7 @@ mod tests {
         assert!(!diff.contains("three"));
     }
 
-    /// One commit plus an uncommitted working-tree change: the minimal
-    /// repository every `start_review` call needs.
+    /// One commit plus an uncommitted working-tree change, the minimum `start_review` needs.
     fn review_repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "--quiet"]);
@@ -1182,8 +1147,7 @@ mod tests {
         std::fs::write(repo.path().join("hello.txt"), "later\n").unwrap();
         let tools = super::super::CodeTools::default();
 
-        // Working-tree mode against a tag: the resolution must accept
-        // any commit-ish, and the outcome keeps the caller's spelling.
+        // Working-tree mode against a tag: the outcome keeps the caller's spelling.
         let opened = start_review(
             &tools,
             StartReviewParams {
@@ -1280,8 +1244,7 @@ mod tests {
         std::fs::write(repo.path().join("hello.txt"), "later\n").unwrap();
         let tools = super::super::CodeTools::default();
 
-        // Two dots: both endpoint trees changed relative to each other,
-        // so the side file shows as removed alongside hello.txt.
+        // Two dots: both endpoint trees changed, so the side file shows as removed.
         let two = start_review(
             &tools,
             StartReviewParams {
@@ -1317,8 +1280,7 @@ mod tests {
         .unwrap();
         assert!(side.diff.unwrap().contains("-side"));
 
-        // Three dots: from the merge base, where hello.txt did change
-        // but the side work predates the fork point and is invisible.
+        // Three dots: from the merge base, so the side work predates the fork point.
         let three = start_review(
             &tools,
             StartReviewParams {

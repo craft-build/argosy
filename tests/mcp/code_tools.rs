@@ -1,5 +1,4 @@
-//! Code-intelligence tools over the wire: the seven tools ported from
-//! Craft, driven like any MCP client would.
+//! Code-intelligence tools driven over the wire like any MCP client would.
 
 use std::fs;
 use std::path::Path;
@@ -32,8 +31,7 @@ fn workspace() -> TempDir {
 
 type TestClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-/// Serves the rig with the code tools anchored at `root` — the stand-in
-/// for the workspace the real server is spawned in.
+/// Serves the rig with the code tools anchored at `root`, the real server's workspace stand-in.
 async fn client(root: &Path) -> (TestClient, tokio::task::JoinHandle<()>) {
     let rig = rig();
     let (server_io, client_io) = tokio::io::duplex(8192);
@@ -73,7 +71,6 @@ async fn outline_file_and_directory() {
     let ws = workspace();
     let (client, server) = client(ws.path()).await;
 
-    // File mode: symbol tree with kinds and line numbers.
     let out = call_ok(
         &client,
         "outline",
@@ -87,7 +84,6 @@ async fn outline_file_and_directory() {
     );
     assert!(out["text"].as_str().unwrap().contains("helper"));
 
-    // Directory mode: per-file trees with a skipped section.
     let out = call_ok(
         &client,
         "outline",
@@ -99,7 +95,6 @@ async fn outline_file_and_directory() {
     assert!(text.contains("run"), "got {text}");
     assert!(text.contains("total: 2 files"), "got {text}");
 
-    // Files mode: flat table with languages.
     let out = call_ok(
         &client,
         "outline",
@@ -190,7 +185,6 @@ async fn astgrep_search_diff_apply_and_guards() {
     let ws = workspace();
     let (client, server) = client(ws.path()).await;
 
-    // Search mode.
     let out = call_ok(
         &client,
         "astgrep",
@@ -208,7 +202,6 @@ async fn astgrep_search_diff_apply_and_guards() {
         "got {out}"
     );
 
-    // Dry-run: unified diff, file untouched.
     let before = fs::read_to_string(ws.path().join("src/main.rs")).unwrap();
     let out = call_ok(
         &client,
@@ -231,7 +224,6 @@ async fn astgrep_search_diff_apply_and_guards() {
         before
     );
 
-    // Apply: writes and reports.
     let out = call_ok(
         &client,
         "astgrep",
@@ -254,8 +246,7 @@ async fn astgrep_search_diff_apply_and_guards() {
         "the file was rewritten"
     );
 
-    // Syntax-breaking rewrite is rolled back, file untouched. The dry-run
-    // first records the read the apply's fail-closed guard requires.
+    // The dry-run first records the read the fail-closed apply guard requires.
     fs::write(
         ws.path().join("src/broken.rs"),
         "fn broken() {\n    println!(\"x\");\n}\n",
@@ -292,8 +283,7 @@ async fn astgrep_search_diff_apply_and_guards() {
         before
     );
 
-    // Stale read: dry-run records the read, an external change then
-    // blocks the apply.
+    // Stale read: an external change makes the apply skip that file, reported inline.
     let out = call_ok(
         &client,
         "astgrep",
@@ -311,9 +301,6 @@ async fn astgrep_search_diff_apply_and_guards() {
         "fn broken() {\n    println!(\"changed\");\n}\n",
     )
     .unwrap();
-    // Stale read: dry-run records the read, an external change then makes
-    // the apply skip that file. Skipping is reported inline (per-file), not
-    // a whole-run error — files earlier in the walk may already be written.
     let out = call_ok(
         &client,
         "astgrep",
@@ -508,7 +495,6 @@ async fn repomap_renders_and_caches() {
     assert!(text.contains("main.rs"), "got {text}");
     assert!(text.contains("helper"), "got {text}");
 
-    // Same call again hits the per-root cache: identical output.
     let again = call_ok(
         &client,
         "repomap",
@@ -621,10 +607,8 @@ async fn structured_review_findings_round_trip_over_mcp() {
     server.abort();
 }
 
-/// Item 1 of docs/next.md: `base`/`commit` reach `git diff`/`git show`
-/// before their `--` separator, so option-shaped values would be parsed
-/// as git options and `--output=<path>` writes to an arbitrary file.
-/// Over the wire, the tool must refuse them before git runs.
+/// Option-shaped `base`/`commit` values reach `git diff`/`git show` before
+/// their `--` separator, so the tool must refuse them before git runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn start_review_rejects_option_shaped_revisions_over_mcp() {
     let ws = workspace();
@@ -700,16 +684,14 @@ async fn start_review_rejects_option_shaped_revisions_over_mcp() {
     server.abort();
 }
 
-/// Item 2 of docs/next.md: code-tool paths are confined to the workspace
-/// root, and the two writing tools fail closed on files that were never
-/// read through these tools in the session.
+/// Code-tool paths are confined to the workspace root, and the two writing
+/// tools fail closed on files never read through them in the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn code_tool_paths_are_confined_and_writes_require_a_prior_read() {
     let ws = workspace();
     let (client, server) = client(ws.path()).await;
 
-    // An absolute path outside the workspace is refused, even though it
-    // exists on disk.
+    // Refused even though the file exists on disk.
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("secret.rs"), "fn main() {}\n").unwrap();
     let err = call_err(
@@ -720,7 +702,6 @@ async fn code_tool_paths_are_confined_and_writes_require_a_prior_read() {
     .await;
     assert!(err.contains("escapes the workspace root"), "{err}");
 
-    // A `..` escape is refused too.
     let err = call_err(
         &client,
         "zoom",
@@ -729,7 +710,6 @@ async fn code_tool_paths_are_confined_and_writes_require_a_prior_read() {
     .await;
     assert!(err.contains("escapes the workspace root"), "{err}");
 
-    // Relative paths resolve against the workspace root.
     let out = call_ok(
         &client,
         "outline",
@@ -741,8 +721,6 @@ async fn code_tool_paths_are_confined_and_writes_require_a_prior_read() {
         "got {out}"
     );
 
-    // Fail-closed write guard: apply on a never-read file is skipped with
-    // an actionable message, and the file is untouched.
     fs::write(ws.path().join("fresh.rs"), "fn f() { println!(\"x\"); }\n").unwrap();
     let out = call_ok(
         &client,

@@ -42,10 +42,9 @@ fn index_on_a_project_without_a_local_bundle_points_at_init() {
         .stderr(predicate::str::contains("argosy init"));
 }
 
-/// Full round trip with the real backend: `build` then `status` then
-/// `query --json`. Needs the model weights — the first run downloads ~90 MB
+/// Full round trip with the real backend: `build` then `status` then `query --json`.
+/// The first run downloads ~90 MB of model weights.
 #[cfg(feature = "default-index")]
-/// `cargo test --test cli -- --ignored index_build_status_query_round_trip`.
 #[cfg(feature = "default-index")]
 #[test]
 #[ignore = "downloads the tract model weights (needs network on first run)"]
@@ -74,7 +73,6 @@ fn index_build_status_query_round_trip() {
         .stdout(predicate::str::contains("acme-billing/document: 3"))
         .stdout(predicate::str::contains("up to date"));
 
-    // A second build is incremental: everything unchanged.
     argosy_bin()
         .args(["index", "build"])
         .current_dir(&project)
@@ -85,8 +83,7 @@ fn index_build_status_query_round_trip() {
             "0 concept(s) (0 passage(s)) upserted, 0 removed",
         ));
 
-    // A second checkout in the project's store joins the index
-    // automatically (no --import): rebuilding discovers it.
+    // A second checkout joins the index automatically (no --import): rebuilding discovers it.
     let vendor = store.join("vendor-b");
     fs::create_dir_all(vendor.join("document")).unwrap();
     fs::write(
@@ -139,5 +136,3 @@ fn index_build_status_query_round_trip() {
         .failure()
         .code(1);
 }
-
-// ------------------------------------------------------------------- agent

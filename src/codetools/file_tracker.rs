@@ -1,10 +1,8 @@
-//! The stale-read guard for the code tools' write paths, ported from
-//! Craft's `tools/file_tracker.rs`: files read through these tools are
-//! tracked by (canonical path, mtime), and `astgrep` apply / `conflicts`
-//! resolve refuse to write a file that changed since the last read — or
-//! that was never read at all (fail closed). Only a file that does not
-//! exist is allowed unread: the write creates it, so there is nothing to
-//! clobber.
+//! The stale-read guard for the code tools' write paths: tracks reads by
+//! (canonical path, mtime) and refuses writes to files that changed since
+//! the last read or were never read (fail closed).
+//!
+//! A file that does not exist may be written unread: the write creates it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -55,10 +53,8 @@ impl FileReadTracker {
         let normalized = normalize_path(path);
         let mut guard = self.lock();
         let Some(&recorded) = guard.get(&normalized) else {
-            // Fail closed: a file on disk that was never read through
-            // these tools is refused — the writer has not seen what it is
-            // about to overwrite. A file that does not exist is fine: the
-            // write creates it, so nothing is clobbered.
+            // Fail closed: a never-read file is refused — the writer has not
+            // seen what it is about to overwrite. A new file clobbers nothing.
             if get_mtime(&normalized).is_some() {
                 return Err(format!(
                     "{NO_READ_MSG}: {} - read it through these tools first (zoom or outline it, \
@@ -87,9 +83,8 @@ impl FileReadTracker {
 }
 
 impl FileReadTracker {
-    /// A poisoned lock only means some other call panicked mid-edit; the
-    /// map itself is still consistent, so recover the guard instead of
-    /// panicking on every later call (`NO-UNWRAP-IN-PROD`).
+    /// A poisoned lock only means another call panicked mid-edit; the map is
+    /// still consistent, so recover the guard instead of panicking.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, SystemTime>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -122,8 +117,7 @@ mod tests {
         assert!(err.contains(NO_READ_MSG), "{err}");
     }
 
-    /// A file that does not exist may be written unread: the write creates
-    /// it, so there is nothing to clobber.
+    /// The write creates the file, so there is nothing to clobber.
     #[test]
     fn untracked_missing_file_allows_edit() {
         let dir = tempfile::tempdir().unwrap();

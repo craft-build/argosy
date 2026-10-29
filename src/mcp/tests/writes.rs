@@ -30,7 +30,6 @@ fn write_and_read_memory_round_trip() {
         .unwrap();
     assert!(read.content.contains("# N"));
 
-    // Writes land in the local argosy on disk.
     let local_root = rig
         .state
         .session(project())
@@ -42,9 +41,7 @@ fn write_and_read_memory_round_trip() {
     assert!(local_root.join("memory/rust-internals.md").is_file());
 }
 
-/// A memory write without a usable frontmatter `type` is auto-filled as
-/// `type: Memory` instead of a MEM-1 rejection — what round-trips carries
-/// the filled type.
+/// A memory write without a usable frontmatter `type` is auto-filled as `type: Memory`.
 #[test]
 fn write_memory_auto_fills_missing_type() {
     let mut rig = rig();
@@ -70,8 +67,7 @@ fn write_memory_auto_fills_missing_type() {
         "auto-filled frontmatter, got {}",
         read.content
     );
-    // `bytes` reports what landed on disk (the serialized concept with
-    // the auto-filled type), not the submitted input's length.
+    // `bytes` reports the on-disk concept, not the submitted input's length.
     assert_eq!(
         out.bytes,
         Some(read.content.len() as u64),
@@ -79,9 +75,7 @@ fn write_memory_auto_fills_missing_type() {
     );
 }
 
-/// The staleness regression: a concept written through the MCP surface
-/// is findable via search in the SAME session, no restart. A deleted
-/// one disappears immediately.
+/// Staleness regression: writes are searchable and deletions vanish within the same session.
 #[test]
 fn write_then_search_and_delete_then_search_are_immediately_visible() {
     let mut rig = rig();
@@ -180,16 +174,14 @@ fn rewriting_an_existing_concept_reports_updated_not_created() {
     assert!(out.indexed);
 }
 
-/// The degraded path (M1): when the embedding model is unavailable, a
-/// write still succeeds on disk and the report says `indexed: false`
-/// with an actionable error.
+/// The degraded path: with the embedding model unavailable, the write still lands on disk
+/// and the report says `indexed: false` with an actionable error.
 #[test]
 fn write_with_a_failing_embedder_still_writes_and_reports_not_indexed() {
     use crate::index::Index;
     use crate::index::tests::MemStore;
 
-    /// A provider whose embed always fails — the "model unavailable"
-    /// double.
+    /// A provider whose embed always fails — the "model unavailable" double.
     struct FailingEmbedder;
 
     impl crate::index::EmbeddingProvider for FailingEmbedder {
@@ -229,7 +221,6 @@ fn write_with_a_failing_embedder_still_writes_and_reports_not_indexed() {
     assert!(!out.indexed, "reconcile could not embed");
     let note = out.index_error.expect("the failure is explained");
     assert!(note.contains("not yet indexed"), "got {note}");
-    // The write itself stands on disk.
     assert!(local.path().join("memory/offline-write.md").is_file());
 }
 
@@ -306,7 +297,7 @@ fn write_and_delete_rule_with_contract_checks() {
     assert_eq!(out.action, "created");
     assert!(out.indexed);
 
-    // STG-3: a rule without a description is refused by the library.
+    // STG-3: a rule without a description is refused.
     let err = rig
         .state
         .write_rule(WriteParams {
@@ -359,7 +350,6 @@ fn write_and_delete_document_round_trip() {
         .unwrap();
     assert!(read.text.contains("# Decision"));
 
-    // The edit path: rewriting reports `updated`, not `created`.
     let revised = "---\ntype: Decision\ndescription: Cache responses.\n---\n# Decision\n\nWe cache, revisited.\n";
     let out = rig
         .state
@@ -392,9 +382,7 @@ fn write_and_delete_document_round_trip() {
         .unwrap_err();
 }
 
-/// The staleness regression, document flavor: a document written through
-/// the MCP surface is findable via search in the SAME session, and a
-/// deleted one disappears immediately.
+/// Staleness regression for documents: writes and deletes are visible within the same session.
 #[test]
 fn write_then_search_and_delete_then_search_documents_are_visible() {
     let mut rig = rig();
@@ -492,7 +480,6 @@ fn write_document_rejects_untyped_reserved_and_escape_paths() {
             "{path}: got {err:?}"
         );
     }
-    // Nothing was written for any of them.
     let local_root = rig
         .state
         .session(project())

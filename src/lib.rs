@@ -1,8 +1,7 @@
 //! Argosy: libraries for creating, consuming, and using OKF knowledge bundles.
-//! The foundation every later module builds on: the crate-wide [`Error`]
-//! type, [`Concept`] — the markdown-plus-frontmatter document all parsing,
-//! validation, and indexing operate on — and [`Argosy`], which opens and
-//! structurally validates a bundle on disk.
+//!
+//! The foundation: the crate-wide [`Error`] type, the [`Concept`] document
+//! everything operates on, and [`Argosy`], which opens and validates a bundle.
 
 pub mod bundle;
 pub mod catalog;

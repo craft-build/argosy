@@ -93,13 +93,10 @@ fn truncate_signature_long() {
     assert!(truncated.ends_with('…'));
 }
 
-/// The byte cut must land on a char boundary: outline text routinely
-/// contains multibyte characters, and `String::truncate` panics when the
-/// new length splits one.
+/// The byte cut must not split a multibyte character: `truncate` would panic.
 #[test]
 fn outline_truncation_lands_on_char_boundaries() {
-    // Every `é` is two bytes, so a byte cut at an odd offset would split
-    // a character — exactly the case at the 30KB cap.
+    // Every `é` is two bytes, so an odd-offset cut would split one.
     let mut out = "é".repeat(20_000);
     assert!(out.len() > 30_000);
     let (text, truncated) = truncate_outline(&mut out);
@@ -109,8 +106,7 @@ fn outline_truncation_lands_on_char_boundaries() {
     assert!(text.len() <= 30_000);
 }
 
-/// A markdown heading's range must cover its whole section, not just the
-/// heading line: zoom promises "section content under a heading".
+/// Zoom promises a heading's whole section, not just the heading line.
 #[test]
 fn markdown_heading_range_covers_its_section() {
     let src =
@@ -130,8 +126,7 @@ fn markdown_heading_range_covers_its_section() {
     assert_eq!(next.range.end_row, 13);
 }
 
-/// Only h1-h6 are headings in HTML-family grammars; the raw query captures
-/// every element.
+/// Only h1-h6 are headings; the raw query captures every element.
 #[test]
 fn html_outline_only_takes_h1_to_h6_headings() {
     let src =
@@ -592,8 +587,7 @@ fn run_outlines_directory_with_skips() {
 fn run_missing_path_errors() {
     let dir = tempfile::tempdir().unwrap();
     let tools = super::CodeTools::default().with_root(dir.path());
-    // A missing path inside the workspace is the caller's own not-found
-    // error — containment must not shadow it with an escape error.
+    // A missing in-workspace path is the caller's not-found error, not an escape error.
     let err = run(
         &tools,
         OutlineParams {
@@ -609,8 +603,7 @@ fn run_missing_path_errors() {
     assert!(err.to_string().contains("does not exist"), "{err}");
 }
 
-/// Directory mode records its reads like every other code tool, so the
-/// stale-read guard covers files an agent last saw through an outline.
+/// Directory mode records its reads so the stale-read guard covers outlined files.
 #[test]
 fn run_dir_mode_records_reads_for_the_stale_guard() {
     let dir = tempfile::tempdir().unwrap();
@@ -678,8 +671,7 @@ fn run_single_oversize_file_is_refused() {
     assert!(err.to_string().contains("too large"), "{err}");
 }
 
-/// A Rust function is a method only inside `impl`/`trait` — a named
-/// enclosing scope alone (`mod tests`) must not relabel it.
+/// A Rust function is a method only inside `impl`/`trait`, not inside `mod tests`.
 #[test]
 fn rust_functions_inside_mods_stay_functions() {
     let src = "mod tests {\n    fn helper() {}\n}\nimpl Foo {\n    fn method(&self) {}\n}\nfn free() {}\n";

@@ -1,15 +1,6 @@
-//! The semantic index: trait boundaries, embedding units, reconciliation,
-//! and ranked search. The index is a derived, rebuildable artifact whose
-//! only inputs are on-disk bundles and an [`EmbeddingProvider`]; custom
-//! backends implement the traits, sqlite-vec + tract by default. One or
-//! more units per concept — a short concept is a single unit, a long one is
-//! split into heading-based passages ([`chunk`]) — and every hit names the
-//! passage it matched. Search is hybrid: the store's vector (k-NN) and
-//! lexical (BM25) legs are fused by reciprocal rank fusion
-//! ([`rrf_fuse`]), so exact identifiers rank next to semantic matches;
-//! a store with no lexical leg (the default trait method) keeps plain
-//! vector ranking. A zero-model [`LexicalOnlyProvider`] powers the
-//! lexical-only mode. Search via [`Index::search`], lookup via resolve.
+//! The semantic index: trait boundaries, embedding units, reconciliation, and ranked search.
+//!
+//! Search is hybrid: vector and lexical legs fused by reciprocal rank fusion ([`rrf_fuse`]).
 
 use std::collections::HashMap;
 
@@ -28,47 +19,37 @@ pub mod sqlite;
 #[cfg(feature = "default-index")]
 pub mod tract;
 
-/// Produces embedding vectors for texts. Batch-only: every call, even for a
-/// single text, is a `&[String]` batch returning one vector per text in the
-/// same order — this keeps the trait minimal and lets backends batch
-/// efficiently.
+/// Produces embedding vectors for texts.
 pub trait EmbeddingProvider {
-    /// The stable identity of the model — name and version/revision
-    /// (e.g. `"tract/all-MiniLM-L6-v2@tract-1"`). Compared against the
-    /// store's recorded identity on every reconcile: vectors from different
-    /// models are not comparable, so this must change with the weights.
+    /// The model's stable identity, e.g. `"tract/all-MiniLM-L6-v2@tract-1"`.
+    ///
+    /// Must change with the weights: vectors from different models are not
+    /// comparable.
     fn model_id(&self) -> &str;
 
-    /// The vector dimensionality every [`EmbeddingProvider::embed`] call
-    /// produces.
+    /// The vector dimensionality every [`EmbeddingProvider::embed`] call produces.
     fn dimensions(&self) -> usize;
 
-    /// Embeds every text in `texts`, returning exactly one vector of
-    /// [`EmbeddingProvider::dimensions`] floats per text, in order.
+    /// Embeds every text in `texts`, returning exactly one vector per text, in order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 
-    /// Embeds query-side text (the [`Index::search`] input). Asymmetric
-    /// models (the BGE family) require a query-side instruction that must
-    /// never appear on the document side ([`EmbeddingProvider::embed`],
-    /// used at index time); symmetric models default to plain `embed`.
+    /// Embeds query-side text (the [`Index::search`] input).
+    ///
+    /// Asymmetric models need a query-side instruction that never appears on
+    /// the document side.
     fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.embed(texts)
     }
 }
 
-/// The model identity the zero-model embedder records
-/// ([`LexicalOnlyProvider`]): a store built in lexical mode records it
-/// like any other model identity, so switching to or from a real model is
-/// an ordinary identity-mismatch full rebuild.
+/// The model identity the zero-model embedder ([`LexicalOnlyProvider`]) records.
+///
+/// Switching to or from a real model is an ordinary identity-mismatch full rebuild.
 pub const LEXICAL_ONLY_MODEL_ID: &str = "lexical-only@1";
 
-/// The zero-model [`EmbeddingProvider`]: the `index.search_mode =
-/// "lexical"` mode. Chunking, hashing, staleness diffing, and BM25 stay
-/// exactly the hybrid path's, but no vector is ever produced and no model
-/// is ever downloaded — the store records zero dimensionality (no vec0
-/// table at all) and search ranks by the lexical leg alone. This is
-/// BM25-only retrieval: exact identifiers and rule IDs match strongly,
-/// paraphrases do not.
+/// The zero-model [`EmbeddingProvider`] for the `index.search_mode = "lexical"` mode.
+///
+/// BM25-only retrieval: exact identifiers and rule IDs match strongly, paraphrases do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LexicalOnlyProvider;
 
@@ -87,10 +68,9 @@ impl EmbeddingProvider for LexicalOnlyProvider {
     }
 }
 
-/// The structured metadata a query can filter on:
-/// the OKF frontmatter fields, flattened and nullable to mirror the optional
-/// accessors on [`Concept`]. A `None` field means the source concept did not
-/// declare it, and such a unit cannot match a filter constraining that field.
+/// The OKF frontmatter fields a query can filter on.
+///
+/// A `None` field means undeclared, and such a unit never matches a filter constraining it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct UnitMeta {
     /// The frontmatter `type` (e.g. `Skill`, `Styleguide Rule`).
@@ -118,11 +98,8 @@ impl UnitMeta {
     }
 }
 
-/// One embedded unit of a concept: enough to trace any retrieval
-/// back to its source concept unambiguously. A concept is one unit when it
-/// fits the chunk budget, or one unit per heading-based passage when it does
-/// not ([`chunk::chunk_concept`]), distinguished by
-/// [`EmbeddingUnit::chunk_ordinal`].
+/// One embedded unit of a concept: the whole concept, or a heading-based
+/// passage ([`chunk::chunk_concept`]).
 #[derive(Debug, Clone)]
 pub struct EmbeddingUnit {
     /// The source concept's qualified identity.
@@ -130,25 +107,19 @@ pub struct EmbeddingUnit {
     /// The unit's position within its source concept (`0` for the first
     /// passage).
     pub chunk_ordinal: u32,
-    /// The lowercase hex SHA-256 of the exact text that was embedded. Doubles
-    /// as the staleness signal and the content-change detector
-    ///: same text ⇒ same hash ⇒ no re-embed.
+    /// The lowercase hex SHA-256 of the embedded text; same text ⇒ no re-embed.
     pub text_hash: String,
     /// The unit's embedding vector.
     pub vector: Vec<f32>,
     /// The filterable facets of the source concept.
     pub meta: UnitMeta,
-    /// The passage's heading breadcrumb (`"Setup › Database"`); empty for a
-    /// whole-concept chunk or a pre-heading passage.
+    /// The passage's heading breadcrumb; empty for a whole-concept chunk or pre-heading passage.
     pub heading_path: String,
-    /// 1-based first line of the concept body the passage covers
-    /// (frontmatter excluded) — the range `read` accepts for expansion.
+    /// 1-based first body line of the passage, frontmatter excluded; the range `read` accepts.
     pub start_line: u32,
-    /// 1-based last line of the concept body the passage covers.
+    /// 1-based last body line of the passage, frontmatter excluded.
     pub end_line: u32,
-    /// The passage text as embedded (prefix included, invisible characters
-    /// stripped), returned in hits so an agent can answer without a second
-    /// `read`.
+    /// The passage as embedded (prefix included, invisible characters stripped).
     pub passage: String,
 }
 
@@ -158,9 +129,7 @@ pub struct EmbeddingUnit {
 pub struct Filter {
     /// Only return units in these namespaces.
     pub namespaces: Option<Vec<Namespace>>,
-    /// Only return units from these argosies (manifest names).
-    /// [`Index::search`] validates every name against the context's active
-    /// set before reaching the store; individual stores may assume validity.
+    /// Only return units from these argosies (manifest names); stores may assume validity.
     pub argosies: Option<Vec<String>>,
     /// Only return units whose `type` is one of these.
     pub concept_types: Option<Vec<String>>,
@@ -177,27 +146,19 @@ pub struct Filter {
 pub struct SearchHit {
     /// The retrieved concept's qualified identity — origin argosy visible.
     pub concept: QualifiedConceptId,
-    /// Fused retrieval score: the reciprocal-rank-fusion sum over the
-    /// retrieval legs that returned this unit ([`rrf_fuse`]); higher is
-    /// better and hits are ordered by descending score. Not a
-    /// similarity — leg manifests (cosine, BM25, …) are fused by rank,
-    /// never blended by value.
+    /// Reciprocal-rank-fusion score; higher is better, hits sort by it descending.
     pub score: f32,
-    /// The retrieved unit's facets, so callers can present/filter further
-    /// without resolving the concept.
+    /// The unit's facets, so callers can filter/present without resolving.
     pub meta: UnitMeta,
     /// The matched passage's position within its concept.
     pub chunk_ordinal: u32,
-    /// The passage's heading breadcrumb (`"Setup › Database"`); empty for a
-    /// whole-concept chunk or a pre-heading passage.
+    /// The passage's heading breadcrumb; empty for a whole-concept chunk or pre-heading passage.
     pub heading_path: String,
     /// 1-based first body line of the matched passage.
     pub start_line: u32,
     /// 1-based last body line of the matched passage.
     pub end_line: u32,
-    /// The matched passage text (prefix included, invisible characters
-    /// stripped). Imported passages are delimiter-wrapped at the MCP layer,
-    /// like every other imported free text.
+    /// The matched passage as embedded (prefix included, invisible characters stripped).
     pub passage: String,
 }
 
@@ -213,8 +174,7 @@ pub struct Query {
 }
 
 impl Query {
-    /// An unscoped query: searches every active argosy and
-    /// namespace the store holds.
+    /// An unscoped query: searches every active argosy and namespace the store holds.
     pub fn unscoped(text: impl Into<String>, k: usize) -> Self {
         Self {
             text: text.into(),
@@ -224,36 +184,16 @@ impl Query {
     }
 }
 
-/// The reciprocal-rank-fusion smoothing constant: the rank offset that
-/// keeps one leg's top hits from dominating the fused order. 60 is the
-/// literature default (Cormack et al., 2009 — the same value the hybrid
-/// retrieval literature reports needs no per-corpus tuning), which is
-/// why legs are fused by rank instead of blending normalized scores.
+/// Reciprocal-rank-fusion rank smoothing constant; 60 is the standard default.
 pub const RRF_K: u32 = 60;
 
-/// Fuses ranked retrieval legs with reciprocal rank fusion: each unit's
-/// fused score is the sum, over the legs that returned it, of
-/// `1/(RRF_K + rank)`. Legs are ordered best-first (the vector leg
-/// first); a unit is identified by `(concept, chunk_ordinal)`, so one
-/// passage returned by both legs scores twice — the intended hybrid
-/// boost — while different passages of the same concept compete
-/// independently. Result: the fused score ordering, truncated to `k`.
+/// Fuses ranked retrieval legs with reciprocal rank fusion, truncating the fused order to `k`.
 ///
-/// **Tie preservation:** equal-scored hits inside one leg share that leg's
-/// rank (the rank at which the tie group starts, competition-style), so
-/// content ties remain fused-score ties and fusion never introduces a
-/// distinction the legs' own rankings did not make — retrieval alone
-/// orders results, per the spec's no-precedence rule (QRY-7). A single
-/// leg therefore keeps its exact order, with scores rescaled to
-/// `1/(RRF_K + rank)`.
+/// Ties inside a leg share that leg's rank, so fusion never orders results the legs did not.
 pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
     if legs.is_empty() || k == 0 {
         return Vec::new();
     }
-    // First-appearance payload per unit (both legs decode the same units
-    // row, so a unit's payload is leg-independent; taking the first
-    // avoids clones), the fused-score table parallel to it, and the key
-    // index into both.
     let mut hits: Vec<SearchHit> = Vec::new();
     let mut fused: Vec<f64> = Vec::new();
     let mut seen: HashMap<(QualifiedConceptId, u32), usize> = HashMap::new();
@@ -262,8 +202,7 @@ pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
         let mut rank: u32 = 0;
         let mut prev_score: Option<f32> = None;
         for (position, hit) in leg.iter().enumerate() {
-            // Tie-aware ranking: a hit whose leg score equals its
-            // predecessor's reuses the predecessor's rank.
+            // Tie-aware ranking: an equal leg score reuses the predecessor's rank.
             if prev_score.is_none_or(|score| hit.score != score) {
                 rank = position as u32;
             }
@@ -281,9 +220,7 @@ pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
         }
     }
 
-    // Fused scores in, stable descending sort out: ties keep
-    // first-appearance order, which is best-leg-first — never an
-    // argosy-precedence order, because the store never sees precedence.
+    // Stable sort keeps ties in best-leg-first order, never argosy precedence.
     let mut fused_hits: Vec<(f64, SearchHit)> = fused
         .into_iter()
         .zip(hits)
@@ -297,102 +234,74 @@ pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
     fused_hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
-/// Stores and retrieves embedding units. Implementations own the ranking
-/// contract: [`VectorStore::search`] returns hits ordered by descending
-/// similarity. `argosy` ships a sqlite-vec implementation behind
-/// the `default-index` feature; any store honoring this contract composes
-/// with [`Index`].
+/// Stores and retrieves embedding units; search returns hits ordered by descending similarity.
 pub trait VectorStore {
-    /// The model identity recorded for the vectors the store currently
-    /// holds, or `None` before the first reconcile and after
-    /// [`VectorStore::clear`].
+    /// The model identity recorded for the store's current vectors, or `None`
+    /// before the first reconcile and after [`VectorStore::clear`].
     fn model_id(&self) -> Option<&str>;
 
-    /// The vector width the store's current contents were built with, or
-    /// `None` when the backend does not record it. Search compares it
-    /// against the provider's width so a model switch surfaces as an
-    /// actionable rebuild hint instead of a backend shape error.
+    /// The vector width the store's contents were built with, or `None` when unrecorded.
     fn recorded_dimensions(&self) -> Option<usize> {
         None
     }
 
-    /// Records the model identity of the store's current contents (set by
-    /// [`Index::reconcile`] after a (re)build).
+    /// Records the model identity of the store's current contents.
     fn set_model_id(&mut self, id: &str) -> Result<()>;
 
-    /// Inserts or replaces units keyed by their source concept —
-    /// re-upserting must not duplicate it.
+    /// Inserts or replaces units keyed by their source concept; re-upserting must not duplicate.
     fn upsert(&mut self, units: &[EmbeddingUnit]) -> Result<()>;
 
     /// Drops every unit of one concept (incremental deletion).
     fn remove_concept(&mut self, concept: &QualifiedConceptId) -> Result<()>;
 
-    /// The stored `text_hash` of every concept — the diff input
-    /// [`Index::reconcile`] compares against freshly hashed content
-    ///, so unchanged concepts never reach the embedder.
+    /// The stored `text_hash` of every concept, the diff input for [`Index::reconcile`].
     fn unit_hashes(&self) -> Result<HashMap<QualifiedConceptId, String>>;
 
-    /// Drops every unit — the full-rebuild path. Dropping the
-    /// recorded model identity too is recommended but not required:
-    /// [`Index::reconcile`] re-records the identity explicitly after every
-    /// rebuild rather than relying on this side effect.
+    /// Drops every unit — the full-rebuild path.
+    ///
+    /// Dropping the recorded model identity is recommended but optional (reconcile re-records it).
     fn clear(&mut self) -> Result<()>;
 
-    /// The `k` units most similar to `vector` under `filter`, ordered by
-    /// descending similarity. **Filter contract**: filters constrain the
-    /// full ranked order and `k` truncates afterwards — truncating before
-    /// filtering silently loses recall when the k nearest units are
-    /// non-matching. Backends that truncate first must over-fetch.
+    /// The `k` units most similar to `vector` under `filter`, ordered by descending similarity.
+    ///
+    /// Filters constrain the full ranked order; truncate-first backends
+    /// over-fetch or lose recall.
     fn search(&self, vector: &[f32], k: usize, filter: &Filter) -> Result<Vec<SearchHit>>;
 
-    /// The lexical (BM25/full-text) leg of hybrid retrieval: the `k`
-    /// best-ranked units for `text` under `filter`, ordered best-first.
-    /// Only each leg's ORDER matters to the fuse — scores are
-    /// backend-specific and comparable within a leg, never across legs.
-    /// Honors the same filter-then-truncate contract as
-    /// [`VectorStore::search`].
+    /// The lexical (BM25) leg of hybrid retrieval, ordered best-first.
     ///
-    /// **Default:** an empty leg, so backends without a lexical index
-    /// keep ordinary vector-only ranking; fusing one non-empty leg
-    /// preserves its order verbatim.
+    /// Honors the same filter-then-truncate contract as [`VectorStore::search`];
+    /// defaults to an empty leg, keeping plain vector ranking.
     fn lexical_search(&self, text: &str, k: usize, filter: &Filter) -> Result<Vec<SearchHit>> {
         let _ = (text, k, filter);
         Ok(Vec::new())
     }
 }
 
-/// The report of one [`Index::reconcile`] run, for observability (printed by
-/// the CLI's `index` subcommand).
+/// The report of one [`Index::reconcile`] run, printed by the CLI's `index` subcommand.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexReport {
     /// True iff the store was cleared and fully re-embedded.
     pub rebuilt: bool,
     /// Concepts embedded and upserted (new or content-changed).
     pub upserted: usize,
-    /// Passages (embedding units) those concepts expanded to: equal to
-    /// `upserted` when every concept fit one chunk, larger when long
-    /// concepts were split by heading.
+    /// Passages (embedding units) the upserted concepts expanded to.
     #[serde(default)]
     pub passages: usize,
     /// Concepts removed from the store (deleted from disk).
     pub removed: usize,
-    /// Concepts whose content hash was unchanged — each cost one hash and no
-    /// embedding.
+    /// Concepts whose content hash was unchanged.
     pub unchanged: usize,
     /// The model identity the store now records.
     pub model_id: String,
-    /// One line per concept that was (re)embedded carrying invisible
-    /// format characters (zero-width/bidi/tag Unicode — see
-    /// [`is_invisible_format`]): stripped from the indexed text, bytes on
-    /// disk unchanged. Empty for a clean run; an unchanged book never
-    /// re-warns, because only units being embedded are reported.
+    /// Warnings for invisible format characters stripped from (re)embedded
+    /// concepts (see [`is_invisible_format`]); bytes on disk stay unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
-/// The default namespace set an [`Index::new`] index walks (and the set
-/// [`staleness_report`] diffs against): `document`, `skill`, and
-/// `styleguide` of every active argosy, plus `memory`.
+/// The default namespace set: `document`, `skill`, and `styleguide` of every
+/// active argosy, plus `memory`.
 fn default_namespaces() -> Vec<Namespace> {
     vec![
         Namespace::Document,
@@ -402,12 +311,10 @@ fn default_namespaces() -> Vec<Namespace> {
     ]
 }
 
-/// Walks `namespaces` of every active argosy in `context` and hashes each
-/// concept's would-be embedded text. Sorted by URI so downstream embedding
-/// batches are deterministic. Shared by [`Index::reconcile`] and
-/// [`staleness_report`], which must never drift apart. Each gathered
-/// concept carries its chunks (see [`chunk::chunk_concept`]) and their
-/// invisible-format character count for reconcile-time warnings.
+/// Walks `namespaces` of every active argosy and hashes each concept's
+/// would-be embedded text, sorted by URI for deterministic embedding batches.
+///
+/// Shared by [`Index::reconcile`] and [`staleness_report`], which must never drift apart.
 fn gather_concepts(
     context: &ProjectContext,
     namespaces: &[Namespace],
@@ -452,10 +359,8 @@ fn gather_concepts(
     Ok(out)
 }
 
-/// The concept-level staleness hash: SHA-256 over every chunk's text, in
-/// order, length-delimited so no two chunkings collide. Stored on every
-/// unit row of the concept, which is what keeps [`VectorStore::unit_hashes`]
-/// (one entry per concept) and the reconcile diff unchanged.
+/// The concept-level staleness hash: SHA-256 over the chunks' texts,
+/// length-delimited so no two chunkings collide.
 pub(crate) fn concept_hash(chunks: &[Chunk]) -> String {
     let mut buffer = Vec::new();
     for chunk in chunks {
@@ -465,8 +370,7 @@ pub(crate) fn concept_hash(chunks: &[Chunk]) -> String {
     sha256_hex(&buffer)
 }
 
-/// The diff [`staleness_report`] computes: what [`Index::reconcile`] would
-/// do, by category.
+/// The diff [`staleness_report`] computes: what [`Index::reconcile`] would do, by category.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StalenessReport {
     /// Concepts on disk the store does not hold.
@@ -477,17 +381,11 @@ pub struct StalenessReport {
     pub removed: usize,
     /// Concepts whose content hash is unchanged.
     pub unchanged: usize,
-    /// True iff the store's recorded model identity differs from
-    /// `expected_model_id`, OR the store holds data with no recorded
-    /// identity — either way a full rebuild, not an incremental diff
-    /// (mirroring [`Index::reconcile`]'s guard).
+    /// True iff a model mismatch forces a full rebuild instead of a diff.
     pub model_mismatch: bool,
 }
 
-/// A read-only, embed-free preview of what [`Index::reconcile`] would apply
-/// (the CLI's `index status`): gathers the default namespace
-/// selection from disk, chunks and hashes each concept, and diffs against
-/// [`VectorStore::unit_hashes`]. Makes no embed calls and no writes.
+/// A read-only preview of what [`Index::reconcile`] would apply: no embed calls, no writes.
 pub fn staleness_report(
     context: &ProjectContext,
     store: &impl VectorStore,
@@ -497,10 +395,8 @@ pub fn staleness_report(
     let current = gather_concepts(context, &default_namespaces(), false, chunk_config)?;
     let stored = store.unit_hashes()?;
 
-    // Mirrors reconcile's identity check exactly: a store holding
-    // data with no recorded identity is a full rebuild, not a diff — the
-    // preview must never claim "up to date" when the next build re-embeds
-    // everything.
+    // Mirrors reconcile's identity check: data with no recorded identity is a
+    // full rebuild, so the preview must not claim "up to date".
     let model_mismatch = match store.model_id() {
         Some(recorded) => recorded != expected_model_id,
         None => !stored.is_empty(),
@@ -534,27 +430,21 @@ struct GatheredConcept {
     qid: QualifiedConceptId,
     /// The concept's chunks, ordered by ordinal.
     chunks: Vec<Chunk>,
-    /// The concept-level hash over all chunk texts (see [`concept_hash`]);
-    /// stored on every unit row.
+    /// The concept-level hash over all chunk texts ([`concept_hash`]); stored
+    /// on every unit row.
     hash: String,
     meta: UnitMeta,
-    /// How many invisible format characters were stripped across the
-    /// chunks (see [`is_invisible_format`]); zero for honest text. Reported
-    /// as a warning when — and only when — the concept is (re)embedded, so
-    /// an unchanged book does not re-warn on every reconcile.
+    /// Invisible format characters stripped across the chunks (see [`is_invisible_format`]).
     invisible: usize,
 }
 
-/// The per-leg candidate depth hybrid search fetches before fusing:
-/// several times the caller's k with a floor, so reciprocal-rank fusion
-/// has more to fuse than each leg's top handful, without paying for a
-/// corpus-wide ranking on either leg.
+/// The per-leg candidate depth hybrid search fetches before fusing: several
+/// times `k` with a floor, so fusion sees past each leg's top handful.
 fn hybrid_fetch_k(k: usize) -> usize {
     (k * 4).max(32)
 }
 
-/// The reconcile/query engine, written against the [`EmbeddingProvider`] and
-/// [`VectorStore`] trait boundaries only. Owns the provider and the store.
+/// The reconcile/query engine over the [`EmbeddingProvider`] and [`VectorStore`] trait boundaries.
 pub struct Index<P: EmbeddingProvider, S: VectorStore> {
     provider: P,
     store: S,
@@ -564,11 +454,10 @@ pub struct Index<P: EmbeddingProvider, S: VectorStore> {
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
-    /// An index over the default namespace set: `document`, `skill`, and
-    /// `styleguide` of every active argosy, plus `memory` of the *local*
-    /// argosy only. Custom namespaces are not indexed by default; use
-    /// [`Index::with_namespaces`]. Chunking uses [`ChunkConfig::default`];
-    /// use [`Index::with_chunk_config`] to honor user configuration.
+    /// An index over the default namespace set: `document`, `skill`, and `styleguide`
+    /// of every active argosy, plus `memory` of the *local* argosy only.
+    ///
+    /// Custom namespaces are not indexed by default; use [`Index::with_namespaces`].
     pub fn new(provider: P, store: S) -> Self {
         Self {
             provider,
@@ -579,10 +468,10 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         }
     }
 
-    /// An index over an explicit namespace set, honored verbatim for every
-    /// active argosy — including `memory` of imports when listed. The
-    /// selection is part of the index's identity: reconcile removes anything
-    /// stored that the current selection no longer walks.
+    /// An index over an explicit namespace set, honored verbatim — including
+    /// `memory` of imports when listed.
+    ///
+    /// Reconcile removes anything stored that the selection no longer walks.
     pub fn with_namespaces(provider: P, store: S, namespaces: Vec<Namespace>) -> Self {
         Self {
             provider,
@@ -593,9 +482,10 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         }
     }
 
-    /// Overrides the chunking budget (user configuration
-    /// `index.chunk_max_tokens`). A different budget re-chunks and re-hashes
-    /// affected concepts, so the next reconcile re-embeds them.
+    /// Overrides the chunking budget (user configuration `index.chunk_max_tokens`).
+    ///
+    /// A different budget re-chunks and re-hashes affected concepts, so the next
+    /// reconcile re-embeds them.
     pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
         self.chunk_config = chunk_config;
         self
@@ -611,10 +501,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         &self.provider
     }
 
-    /// Replaces the provider (e.g. after a model upgrade). The next
-    /// [`Index::reconcile`] detects the identity change and
-    /// rebuilds; vectors from the old model are never mixed with the new
-    /// one's.
+    /// Replaces the provider; the next reconcile rebuilds on the model identity change.
     pub fn set_provider(&mut self, provider: P) {
         self.provider = provider;
     }
@@ -624,8 +511,9 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         &self.store
     }
 
-    /// The vector store, mutably. Bypassing [`Index::reconcile`] can desync
-    /// the store's hashes from the bundles — prefer reconcile.
+    /// The vector store, mutably.
+    ///
+    /// Bypassing reconcile can desync the store's hashes from the bundles — prefer reconcile.
     pub fn store_mut(&mut self) -> &mut S {
         &mut self.store
     }
@@ -635,9 +523,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         &self.namespaces
     }
 
-    /// Walks the configured namespaces of every active argosy and hashes
-    /// each concept's would-be embedded text. Sorted by URI so downstream
-    /// embedding batches are deterministic.
+    /// Walks the configured namespaces of every active argosy.
     fn gather(&self, context: &ProjectContext) -> Result<Vec<GatheredConcept>> {
         gather_concepts(
             context,
@@ -647,19 +533,16 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         )
     }
 
-    /// Brings the store in line with the disk. An identity mismatch (or
-    /// data with none recorded) clears the store **before** re-embedding,
-    /// so it never holds two models' vectors. Otherwise a diff: only new or
-    /// changed concepts are embedded, gone ones removed — reconcile scales
-    /// with what changed. Returns an [`IndexReport`]; fully rebuildable.
+    /// Brings the store in line with the disk: full rebuild on model identity
+    /// mismatch, otherwise an incremental diff.
+    ///
+    /// A mismatch clears the store before re-embedding, so it never holds two models' vectors.
     pub fn reconcile(&mut self, context: &ProjectContext) -> Result<IndexReport> {
         self.reconcile_with_progress(context, |_, _| {})
     }
 
-    /// Like [`Index::reconcile`], reporting `(completed, total)` passages
-    /// needing embeddings once the diff is known and after each committed
-    /// batch. An unchanged run reports `(0, 0)`. The callback is not invoked
-    /// for scanning, deletions, or model loading.
+    /// Like [`Index::reconcile`], reporting `(completed, total)` once the diff
+    /// is known and after each committed batch.
     pub fn reconcile_with_progress(
         &mut self,
         context: &ProjectContext,
@@ -671,8 +554,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
 
         let identity_mismatch = match self.store.model_id() {
             Some(recorded) => recorded != model,
-            // Data with no recorded identity cannot be trusted to match this
-            // provider either — treat it as a mismatch.
+            // Data with no recorded identity cannot be trusted — treat it as a mismatch.
             None => !stored.is_empty(),
         };
 
@@ -693,9 +575,6 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             stored
         };
 
-        // Deletions: stored concepts no longer on disk under any walked
-        // namespace. The lookup set keeps this O(stored + current)
-        // rather than O(stored * current).
         let on_disk: std::collections::HashSet<&QualifiedConceptId> =
             current.iter().map(|c| &c.qid).collect();
         for qid in prior.keys() {
@@ -705,8 +584,6 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
 
-        // New or content-changed concepts; everything else is one
-        // hash and done.
         let mut to_embed = Vec::new();
         for gathered in &current {
             match prior.get(&gathered.qid) {
@@ -715,13 +592,10 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
 
-        // Keep both the embedding input and the resulting vectors bounded.
-        // Each upsert is atomic in the sqlite store; a later failure can leave
-        // completed batches in place, which the next reconcile will diff and
-        // resume (or rebuild if the model identity was not recorded yet).
-        // Batches are grouped by CONCEPT, because the store's upsert replaces
-        // a concept's units wholesale — splitting one concept's chunks across
-        // two batches would drop the first batch's rows.
+        // Batching bounds the embedding input and vectors; each upsert is atomic,
+        // so a later failure leaves completed batches for the next reconcile to resume.
+        // Batches are grouped by CONCEPT: the store's upsert replaces a concept's
+        // units wholesale, so splitting one across two batches would drop rows.
         const EMBED_BATCH: usize = 32;
         let total: usize = to_embed.iter().map(|g| g.chunks.len()).sum();
         progress(0, total);
@@ -782,9 +656,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             start = end;
         }
 
-        // Invisible-Unicode flagging (RAG-poisoning defense): warn for the
-        // concepts this run actually embedded, so the report stays quiet
-        // once the stripped text is what the store holds.
+        // Invisible-Unicode flagging: RAG-poisoning defense; warn only for
+        // concepts this run embedded, so unchanged concepts never re-warn.
         for gathered in &to_embed {
             if gathered.invisible > 0 {
                 report.warnings.push(format!(
@@ -796,11 +669,9 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
         }
 
-        // First reconcile (no identity yet) and every rebuild record the
-        // current identity. The rebuild branch does not rely on
-        // `clear()` having dropped the identity: a store that kept it would
-        // otherwise reconcile against a stale identity on every run and
-        // clear + re-embed the whole corpus each time.
+        // Every rebuild (and first reconcile) explicitly records the identity —
+        // clear() is not required to drop it, and a stale identity would force
+        // a full re-embed on every run.
         if report.rebuilt || self.store.model_id().is_none() {
             self.store.set_model_id(&model)?;
         }
@@ -808,16 +679,10 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         Ok(report)
     }
 
-    /// Ranked hybrid search: embeds [`Query::text`], runs the store's
-    /// vector leg on the embedding and its lexical (BM25) leg on the raw
-    /// text, and fuses the two rankings by reciprocal rank fusion
-    /// ([`rrf_fuse`]) before truncating to [`Query::k`]. A store without
-    /// a lexical leg (the trait default) keeps pure vector ranking;
-    /// a zero-dimension provider (`LexicalOnlyProvider`, the
-    /// `index.search_mode = "lexical"` mode) keeps pure lexical ranking.
-    /// A query with no indexable terms falls to the vector leg alone.
-    /// For direct lookup use [`ProjectContext::resolve`]. Names in
-    /// `filter.argosies` must be active in `context` — else
+    /// Ranked hybrid search: the store's vector and lexical legs fused by
+    /// reciprocal rank fusion ([`rrf_fuse`]).
+    ///
+    /// Names in `filter.argosies` must be active in `context` — else
     /// [`crate::error::Error::UnknownArgosy`], never a silent empty.
     pub fn search(&self, context: &ProjectContext, query: &Query) -> Result<Vec<SearchHit>> {
         if let Some(reason) = self.dimension_guard_reason() {
@@ -851,10 +716,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
             }
             .fail();
         }
-        // Each leg ranks a wider candidate set than the caller's k —
-        // cheap on both (vec0 already brute-forces every row; the FTS5
-        // leg has one LIMIT) and what lets the fusion see past the top
-        // handful — then the fuse truncates to k.
+        // Cheap to over-fetch: vec0 already brute-forces every row and the
+        // FTS5 leg has one LIMIT.
         let fetch = hybrid_fetch_k(query.k);
         let vector_hits = self.store.search(&vector, fetch, &query.filter)?;
         let lexical_hits = self
@@ -863,16 +726,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         Ok(rrf_fuse(&[vector_hits, lexical_hits], query.k))
     }
 
-    /// The read-path half of a model switch: the recorded model identity
-    /// drives rebuilds during `reconcile`, but a search against a stale
-    /// store must fail with a rebuild hint, never a backend-specific
-    /// shape error. `Some(reason)` blocks the search:
-    /// - recorded width != provider width (the provider's width is never
-    ///   unknown — `EmbeddingProvider::dimensions` returns a `usize`);
-    /// - recorded width unknown *while the store holds units*: an
-    ///   unvalidated width can never be allowed through silently;
-    ///   an empty store with no recorded width is fine (nothing to
-    ///   compare, nothing to return).
+    /// The read-path half of a model switch: a search against a stale store
+    /// must fail with a rebuild hint, never a backend shape error.
     fn dimension_guard_reason(&self) -> Option<String> {
         match self.store.recorded_dimensions() {
             Some(recorded) if recorded != self.provider.dimensions() => Some(format!(
@@ -890,8 +745,8 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
         }
     }
 
-    /// Whether the store holds any unit; a failed probe counts as holding
-    /// (the search would surface the same failure moments later).
+    /// Whether the store holds any unit; a failed probe counts as holding (the
+    /// search would surface the same failure anyway).
     fn store_has_units(&self) -> bool {
         self.store
             .unit_hashes()
@@ -900,11 +755,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Index<P, S> {
     }
 }
 
-/// Unicode that renders as nothing (or as pure direction/formatting):
-/// zero-width spaces and joiners, bidi marks and overrides, word joiners,
-/// the BOM, interlinear annotations, and tag characters. Hidden payload
-/// in these is the classic text-steganography channel for RAG poisoning —
-/// invisible to a reader, fully visible to an embedder.
+/// Unicode that renders as nothing or as pure formatting: the RAG-poisoning steganography channel.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
@@ -921,12 +772,9 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
-// The exact text embedded for a concept is per-passage now (see
-// `chunk::chunk_concept`): invisible format characters are stripped there
-// (`is_invisible_format`) and counted on each `Chunk` so the caller can
-// warn. Stripping touches the indexed text only: bytes on disk stay exactly
-// as written, so the integrity sidecar still verifies and the payload a
-// poisoned book planted remains inspectable by `read`.
+// Invisible format stripping (in `chunk::chunk_concept`) touches only the
+// indexed text: bytes on disk stay as written, so the integrity sidecar
+// still verifies and planted payloads remain inspectable by `read`.
 
 /// Builds the id callers use for [`ConceptId`] plumbing in tests.
 #[cfg(test)]

@@ -25,7 +25,6 @@ fn init_creates_a_bundle_that_validates_clean() {
     let manifest = fs::read_to_string(target.join("argosy.md")).unwrap();
     assert!(manifest.contains("name: fresh-bundle"));
 
-    // The created bundle passes its own validator.
     argosy_bin()
         .args(["validate", target.to_str().unwrap()])
         .assert()
@@ -35,8 +34,7 @@ fn init_creates_a_bundle_that_validates_clean() {
 
 #[test]
 fn init_current_directory_and_json_output() {
-    // No path: the project's `default` bundle under the state dir, named
-    // after the project directory, keyed by its slug (name + path hash).
+    // No path: the `default` bundle under the state dir, keyed by slug (name + path hash).
     let scratch = TempDir::new().unwrap();
     let target = scratch.path().join("cwd-test");
     fs::create_dir_all(&target).unwrap();
@@ -58,10 +56,8 @@ fn init_current_directory_and_json_output() {
         "state-dir layout: {path}"
     );
     assert!(Path::new(path).join("argosy.md").is_file());
-    // The project tree itself stays argosy-free.
     assert!(!target.join(".argosy").exists());
 
-    // And the created bundle validates.
     argosy_bin()
         .args(["validate", path])
         .assert()
@@ -84,8 +80,6 @@ fn init_refuses_to_overwrite_an_existing_bundle() {
         .code(1)
         .stderr(predicate::str::contains("already contains an argosy"));
 }
-
-// ---------------------------------------------------------------- validate
 
 #[test]
 fn validate_valid_fixture_exits_zero_with_ok_line() {
@@ -151,8 +145,7 @@ fn validate_json_is_the_serialized_validation_report() {
         .get_output()
         .clone();
     let report: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
-    // Conformant bundles still serialize their non-error findings (the
-    // info note); exit 0 means: no errors.
+    // Exit 0 means no errors: conformant bundles still serialize their info findings.
     let findings = report["findings"].as_array().unwrap();
     assert!(
         findings.iter().all(|f| f["severity"] != "error"),
@@ -192,8 +185,7 @@ fn validate_namespace_skill_passes_on_valid_fixture() {
 
 #[test]
 fn validate_namespace_document_memory_keep_bundle_level_findings() {
-    // Regression: scoped runs used to drop findings with no path, so a
-    // bundle with no `argosy.md` validated "OK" under any namespace scope.
+    // Scoped runs must keep path-less findings; a missing `argosy.md` fails under any scope.
     for ns in ["document", "memory"] {
         argosy_bin()
             .args([
@@ -211,8 +203,6 @@ fn validate_namespace_document_memory_keep_bundle_level_findings() {
 
 #[test]
 fn validate_namespace_memory_scopes_path_findings() {
-    // Path findings stay scoped: an untyped concept under document/ is not
-    // reported by a memory-scoped run.
     argosy_bin()
         .args([
             "validate",
@@ -223,5 +213,3 @@ fn validate_namespace_memory_scopes_path_findings() {
         .assert()
         .success();
 }
-
-// ----------------------------------------------------------------- package

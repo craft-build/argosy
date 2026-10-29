@@ -164,7 +164,6 @@ fn delete_document_removes_and_prunes_parents() {
         tmp.path().join("document/architecture.md").is_file(),
         "sibling documents survive"
     );
-    // The pre-existing decisions/ tree is untouched.
     assert!(
         tmp.path()
             .join("document/decisions/2026-05-caching.md")
@@ -212,8 +211,7 @@ fn write_refuses_custom_namespace() {
 fn write_memory_auto_fills_missing_type() {
     let tmp = fixture_copy("valid-acme-billing");
     let local = LocalArgosy::open(tmp.path()).unwrap();
-    // No frontmatter at all, and an empty `type` alongside a real field:
-    // both get `type: Memory` rather than a MEM-1 rejection.
+    // No frontmatter and an empty `type` both get auto-filled rather than rejected.
     local
         .write_memory(
             &id("memory/x"),
@@ -230,7 +228,7 @@ fn write_memory_auto_fills_missing_type() {
         let written = Concept::from_file(tmp.path().join(format!("{target}.md"))).unwrap();
         assert_eq!(written.concept_type(), Some("Memory"), "{target}");
     }
-    // What landed on disk satisfies MEM-1: the bundle still validates.
+    // What lands on disk still satisfies MEM-1.
     let report = Argosy::validate(tmp.path());
     assert!(report.is_conformant(), "{report:?}");
 }
@@ -302,8 +300,7 @@ fn write_skill_entry_point_without_description_is_skl4() {
 fn write_skill_supporting_material_needs_only_okf_conformance() {
     let tmp = fixture_copy("valid-acme-billing");
     let local = LocalArgosy::open(tmp.path()).unwrap();
-    // Not an entry-point position (a `references/` material): a typed
-    // concept with no description and the "wrong" type writes fine.
+    // `references/` is not an entry-point position, so only OKF conformance applies.
     let concept = Concept::from_str("---\ntype: Note\n---\n# Extra\n\nMaterial.\n").unwrap();
     local
         .write_concept(
@@ -348,9 +345,7 @@ fn promote_to_document_copies_and_cites_source() {
         )
         .unwrap();
 
-    // The source is byte-identical afterwards.
     assert_eq!(fs::read(&source_path).unwrap(), before);
-    // A new, independent concept exists at the target id.
     let drafted = &promotion.drafted;
     let listed = local
         .concepts(&Namespace::Document)
@@ -361,7 +356,6 @@ fn promote_to_document_copies_and_cites_source() {
         .1;
     assert_eq!(listed, *drafted, "what was written is what was returned");
     assert_eq!(drafted.concept_type(), Some("Session Note"));
-    // `sources` cites the bundle-relative memory path.
     let sources = drafted.get("sources").unwrap().as_sequence().unwrap();
     assert_eq!(sources.len(), 1);
     assert_eq!(
@@ -369,7 +363,7 @@ fn promote_to_document_copies_and_cites_source() {
         "memory/gotchas.md"
     );
 
-    // No silent overwrites: promoting again to the same id fails.
+    // No silent overwrites.
     let err = local
         .promote_memory(
             &id("memory/gotchas"),
@@ -385,8 +379,7 @@ fn promote_to_document_copies_and_cites_source() {
 fn promote_to_styleguide_requires_a_description() {
     let tmp = fixture_copy("valid-acme-billing");
     let local = LocalArgosy::open(tmp.path()).unwrap();
-    // `memory/gotchas.md` has no `description`; without an override the
-    // promotion must fail rather than write an invalid rule.
+    // The fixture's `memory/gotchas.md` has no `description`, so an override is required.
     let err = local
         .promote_memory(
             &id("memory/gotchas"),
@@ -435,7 +428,6 @@ fn promote_to_styleguide_uses_override_and_sets_rule_type() {
         sources[0].get("resource").unwrap().as_str().unwrap(),
         "memory/gotchas.md"
     );
-    // The written rule is listable like any other.
     let rules = crate::styleguide::StyleguideRule::list(&local).unwrap();
     assert!(
         rules
@@ -478,8 +470,7 @@ fn promote_preserves_preseeded_sources() {
     );
 }
 
-/// Provenance is append, never replace: a hand-edited scalar `sources`
-/// must error, not silently become a fresh one-element list.
+/// A hand-edited scalar `sources` must error rather than silently become a list.
 #[test]
 fn promote_refuses_non_list_sources_instead_of_replacing() {
     let tmp = fixture_copy("valid-acme-billing");
@@ -508,8 +499,7 @@ fn promote_refuses_non_list_sources_instead_of_replacing() {
     assert!(!tmp.path().join("document/promoted-bad-sources.md").exists());
 }
 
-/// The refusal names the concrete directory to remove out-of-band, since
-/// no argosy API deletes skill directories.
+/// The refusal names the directory to remove, since no argosy API deletes skill directories.
 #[test]
 fn deleting_a_directory_skill_entry_point_names_the_directory() {
     let tmp = fixture_copy("valid-acme-billing");
@@ -543,7 +533,7 @@ fn promote_leaves_source_and_tree_conformant() {
             None,
         )
         .unwrap();
-    // The source stays in memory/ (auto-delete never happens).
+    // Promotion never auto-deletes the source.
     assert!(tmp.path().join("memory/gotchas.md").is_file());
     assert!(
         local
@@ -552,7 +542,6 @@ fn promote_leaves_source_and_tree_conformant() {
             .iter()
             .any(|(cid, _)| cid.as_str() == "memory/gotchas")
     );
-    // The whole tree (with the promoted concept) still validates clean.
     let report = Argosy::validate(tmp.path());
     assert!(
         report.errors().next().is_none(),

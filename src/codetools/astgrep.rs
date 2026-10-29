@@ -1,13 +1,7 @@
-//! The `astgrep` tool: AST search and replace with metavariables, ported
-//! from Craft's `tools/astgrep.rs`.
+//! The `astgrep` tool: AST search and replace with metavariables.
 //!
-//! Port notes: Craft compiled only four grammars (rust, typescript/tsx,
-//! python, go) while claiming ~22 languages; argosy enables ast-grep's full
-//! `builtin-parser` set, so every name `parse_lang` accepts genuinely works,
-//! and the error message lists exactly those. The write path keeps Craft's
-//! discipline: dry-run diffs by default, `apply` writes only after a
-//! stale-read check and a syntax re-validation that rolls back bad
-//! replacements.
+//! Dry-run diffs by default; `apply` refuses stale reads and rolls back
+//! replacements that introduce syntax errors.
 
 use std::path::PathBuf;
 
@@ -26,16 +20,13 @@ use crate::error::Result;
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AstgrepParams {
-    /// AST pattern with `$VAR` (single node) and `$$$BODY` (zero or more
-    /// nodes) metavariables.
+    /// AST pattern with `$VAR` (single node) and `$$$BODY` (zero or more nodes) metavariables.
     pub pattern: String,
-    /// Replacement pattern; omit for search-only mode. Uses `$VAR` refs
-    /// from the pattern.
+    /// Replacement pattern using `$VAR` refs from the pattern; omit for search-only mode.
     pub rewrite: Option<String>,
     /// Language name (see the tool description for the list).
     pub lang: String,
-    /// Directory or file to search (default: the server's working
-    /// directory).
+    /// Directory or file to search (default: the server's working directory).
     pub path: Option<String>,
     /// Glob patterns to include (e.g. `["*.rs", "src/**"]`).
     pub globs: Option<Vec<String>>,
@@ -48,8 +39,7 @@ pub struct AstgrepParams {
 pub struct AstgrepReport {
     /// `"search"`, `"diff"` (dry-run replace), or `"apply"`.
     pub mode: &'static str,
-    /// Header (mode, pattern, match counts) plus match previews or unified
-    /// diffs, capped at 30 KB.
+    /// Header plus match previews or unified diffs, capped at 30 KB.
     pub text: String,
     /// Total matches across files; search mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,8 +47,7 @@ pub struct AstgrepReport {
     /// Files successfully written; apply mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files_changed: Option<usize>,
-    /// True iff at least one file's replacement was rolled back for
-    /// introducing syntax errors; apply mode only.
+    /// True iff a replacement was rolled back for syntax errors; apply mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rolled_back: Option<bool>,
 }
@@ -71,8 +60,7 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
     let pattern_str = params.pattern.as_str();
     let rewrite_str = params.rewrite.as_deref();
 
-    // Mutating runs serialize against each other (see `CodeTools::begin_write`)
-    // so the stale-read check below cannot race a concurrent apply's write.
+    // Serializes mutating runs so the stale-read check cannot race a concurrent write.
     let _write_guard = if apply {
         Some(code.begin_write())
     } else {
@@ -101,14 +89,9 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
     let mut total_matches = 0usize;
 
     for path in paths {
-        // The stale-read guard runs BEFORE this call's own read+record, so
-        // it compares against the last read from an earlier tool call
-        // (zoom, a previous astgrep, ...). Craft checked after recording,
-        // which made its own check a no-op; checking first implements the
-        // documented intent. A stale file skips that file's apply only —
-        // rewrites already written to other files must be reported, not
-        // buried by one opaque error — and its read stays unrecorded so
-        // the guard keeps comparing against the earlier, now-stale view.
+        // Checked BEFORE this call's own read+record, so it compares against
+        // the last read from an earlier tool call; a skipped file's read stays
+        // unrecorded so the guard keeps comparing against the stale view.
         let stale = if apply {
             code.check_before_edit(&path).err()
         } else {
@@ -145,9 +128,8 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
             let rel = relative_path(&path.to_string_lossy());
 
             if apply {
-                // Roll back only when the replacement INTRODUCES errors: a
-                // file that already carried error nodes (WIP code) must not
-                // have every rewrite rejected for damage it did not cause.
+                // Roll back only when the replacement INTRODUCES errors —
+                // pre-existing error nodes (WIP code) must not doom every rewrite.
                 let repl_grep = lang.ast_grep(&new_content);
                 if has_error_or_missing(&repl_grep.root()) && !has_error_or_missing(&grep.root()) {
                     rolled_back = true;
@@ -157,8 +139,7 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
                     continue;
                 }
                 let diff_count = count_changes(&content, &new_content);
-                // A per-file write failure skips that file only; the rest
-                // of the run (and its report) must survive it.
+                // A per-file write failure skips that file only; the run must survive it.
                 if let Err(e) = std::fs::write(&path, &new_content) {
                     results.push(format!("{rel}: SKIPPED — write error: {e}"));
                     continue;
@@ -318,7 +299,7 @@ mod tests {
         ] {
             assert!(err.contains(name), "{name} missing from: {err}");
         }
-        // Craft's message promised languages it never compiled; ours must not.
+        // The list may promise only languages that genuinely parse.
         assert!(!err.contains("starlark"), "{err}");
         assert!(!err.contains("zig"), "{err}");
     }
@@ -475,12 +456,10 @@ mod tests {
         run(&tools, params(&dir, Some(")))) not rust"), false)).unwrap();
         let report = run(&tools, params(&dir, Some(")))) not rust"), true)).unwrap();
         assert_eq!(report.rolled_back, Some(true));
-        // The file must be untouched.
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 
-    /// The rollback guard blames the replacement only: a file that already
-    /// carried error nodes (WIP code) must still accept valid rewrites.
+    /// A file that already carried error nodes (WIP code) must still accept valid rewrites.
     #[test]
     fn run_apply_tolerates_pre_existing_syntax_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -509,8 +488,7 @@ mod tests {
         let file = dir.path().join("src/main.rs");
 
         let tools = CodeTools::default().with_root(dir.path());
-        // First call records the read (dry-run), then the file changes
-        // externally before the apply.
+        // The dry-run records the read the apply's guard will compare against.
         run(&tools, params(&dir, Some("eprintln!($MSG)"), false)).unwrap();
         let changed = "fn main() {\n    println!(\"changed\");\n}\n";
         std::fs::write(&file, changed).unwrap();
@@ -526,8 +504,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), changed);
     }
 
-    /// One stale file must not bury rewrites already written to others:
-    /// apply is per-file, and the report says exactly which file skipped.
+    /// One stale file must not bury rewrites already written to others.
     #[test]
     fn run_apply_skips_stale_file_and_applies_the_rest() {
         let dir = tempfile::tempdir().unwrap();
@@ -579,9 +556,7 @@ mod tests {
         assert!(err.to_string().contains("unsupported language"), "{err}");
     }
 
-    /// Fail-closed stale-write guard: apply on files never read through
-    /// the tools is skipped with an actionable message, never a blind
-    /// overwrite (docs/next.md item 2).
+    /// Fail-closed: a file never read through the tools is never blindly overwritten.
     #[test]
     fn run_apply_without_prior_read_skips() {
         let dir = write_fixture();

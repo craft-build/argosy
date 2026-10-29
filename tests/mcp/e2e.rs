@@ -8,8 +8,6 @@ use argosy::context::ProjectContext;
 use argosy::index::Index;
 use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
 
-// --- End-to-end over an in-process duplex ---------------------------------
-
 #[tokio::test(flavor = "multi_thread")]
 async fn end_to_end_over_in_process_duplex() {
     let rig = rig();
@@ -20,17 +18,14 @@ async fn end_to_end_over_in_process_duplex() {
     let server_task = tokio::spawn(async move {
         use rmcp::ServiceExt;
         let running = server.serve(server_io).await.expect("server initializes");
-        // `waiting()` (not `cancel()`, which shuts down immediately): serve
-        // until the client drops its end of the duplex.
+        // `waiting()`, not `cancel()`, serves until the client drops the duplex.
         running.waiting().await
     });
 
-    // `()` is rmcp's minimal client handler; serve() completes the handshake.
+    // `()` is rmcp's minimal client handler.
     use rmcp::ServiceExt;
     let client = ().serve(client_io).await.expect("initialize handshake");
 
-    // list_skills: trust tier surfaced for local (unverified) and imported
-    // (machine-confirmed) skills.
     let skills = complete(
         client
             .call_tool_once(call("list_skills", serde_json::json!({"cwd": &cwd})))
@@ -54,7 +49,6 @@ async fn end_to_end_over_in_process_duplex() {
             .any(|s| s["name"] == "reconcile-ledger" && s["verified"] == "unverified")
     );
 
-    // search: semantic query returns qualified URIs.
     let search = complete(
         client
             .call_tool_once(call(
@@ -72,8 +66,7 @@ async fn end_to_end_over_in_process_duplex() {
             .starts_with("argosy://acme-billing/")),
         "qualified hits, got {search}"
     );
-    // Hits are passage-level: the wire shape names the passage and the body
-    // lines a ranged read can expand.
+    // Hits are passage-level; the body lines are what a ranged read can expand.
     let hit = &search["hits"].as_array().unwrap()[0];
     assert!(
         hit["passage"]
@@ -91,8 +84,6 @@ async fn end_to_end_over_in_process_duplex() {
         "hit carries an exact line range: {hit}"
     );
 
-    // write_memory → read_memory verifies the write round trips, and the
-    // same-session search sees it (the index reconciles on every write).
     let content = "---\ntype: Session Note\ndescription: e2e\n---\n# E2E\n\nBody.\n";
     let written = complete(
         client
@@ -151,9 +142,7 @@ async fn end_to_end_over_in_process_duplex() {
             .contains("# E2E")
     );
 
-    // `read` with an `argosy` selector reaches an imported argosy — the
-    // tool-side path for imported concepts (resources serve only the
-    // process working directory's project).
+    // Resources only serve the cwd project, so imports need `read`'s `argosy` selector.
     let imported_read = complete(
         client
             .call_tool_once(call(
@@ -200,8 +189,6 @@ async fn end_to_end_over_in_process_duplex() {
         "unknown argosy is a tool error"
     );
 
-    // write_document → same-session search sees it → delete_document makes
-    // it disappear (the index reconciles on every mutation).
     let doc = "---\ntype: Decision\ndescription: e2e doc\n---\n# E2E Doc\n\nWe decide.\n";
     let written = complete(
         client
@@ -261,7 +248,6 @@ async fn end_to_end_over_in_process_duplex() {
     );
     assert_eq!(structured(&deleted)["action"], "deleted");
 
-    // promote to document, then read the promoted concept as a resource.
     let promoted = complete(
         client
             .call_tool_once(call(
@@ -295,7 +281,6 @@ async fn end_to_end_over_in_process_duplex() {
     };
     assert!(text.contains("type: Session Note"), "frontmatter survives");
 
-    // The argosys listing resource.
     let argosys = client
         .read_resource(rmcp::model::ReadResourceRequestParams::new(
             argosy::mcp::ARGOSYS_URI,
@@ -331,8 +316,6 @@ async fn end_to_end_over_in_process_duplex() {
     );
     assert_eq!(bad.is_error, Some(true), "bad write is a tool error");
 
-    // Prompts: memory consolidation, project documentation, and structured
-    // code review workflows.
     let prompts = client.list_prompts(None).await.unwrap();
     let names: Vec<_> = prompts.prompts.iter().map(|p| p.name.as_str()).collect();
     #[cfg(feature = "code-tools")]
@@ -437,11 +420,11 @@ async fn end_to_end_over_in_process_duplex() {
     server_task.abort();
 }
 
-/// SEP-2549: `ttlMs` and `cacheScope` are required on list/read results
-/// under protocol `2026-07-28`, and strict clients (ZCode) reject the
-/// response when they are absent. Static capability listings are public
-/// and long-lived; resource listings and reads are private and never
-/// fresh from cache.
+/// `ttlMs` and `cacheScope` are required on list/read results under protocol
+/// `2026-07-28`: strict clients reject the response when they are absent.
+///
+/// Static capability listings are public and long-lived; resource listings and
+/// reads are private and never fresh from cache.
 #[tokio::test(flavor = "multi_thread")]
 async fn list_and_read_results_carry_sep2549_cache_hints() {
     let rig = rig();
@@ -485,18 +468,10 @@ async fn list_and_read_results_carry_sep2549_cache_hints() {
     server_task.abort();
 }
 
-// --- Multi-project behavior over the wire ----------------------------------
-
-/// The server needs no project at startup and serves several projects from
-/// one process: each tool call's `cwd` selects (and lazily opens) its own
-/// session, an argosy-less cwd is a tool-level error, and the sessions are
-/// isolated from each other.
+/// The server needs no project at startup: each call's `cwd` lazily opens an isolated session.
 #[tokio::test(flavor = "multi_thread")]
 async fn tools_select_their_project_by_cwd() {
-    // Real project layouts, opened by the real discovery path against an
-    // injected state root (a tempdir, so the user store cannot leak in).
-    // Each project's bundles live under `<state>/projects/<slug>` — never
-    // inside the project directory itself.
+    // Real discovery path with an injected state root, so the user's store cannot leak in.
     let state = tempfile::tempdir().unwrap();
     let state_root = state.path().to_path_buf();
     let factory: SessionFactory<FakeEmbedder, MemVec> = Arc::new(move |root| {
@@ -536,8 +511,6 @@ async fn tools_select_their_project_by_cwd() {
     use rmcp::ServiceExt;
     let client = ().serve(client_io).await.expect("initialize handshake");
 
-    // Writes land in the project named by cwd, and each project sees only
-    // its own write.
     for (root, name) in [(alpha.path(), "alpha"), (beta.path(), "beta")] {
         let written = complete(
             client
@@ -598,8 +571,7 @@ async fn tools_select_their_project_by_cwd() {
         );
     }
 
-    // A cwd with no argosy: tool-level error (isError), not a protocol
-    // error, pointing at `argosy init`.
+    // A cwd with no argosy is a tool error, not a protocol error.
     let nowhere = tempfile::tempdir().unwrap();
     let result = complete(
         client
@@ -625,8 +597,3 @@ async fn tools_select_their_project_by_cwd() {
     drop(client);
     server_task.abort();
 }
-
-// --- Code-intelligence tools over the wire ---------------------------------//
-// The seven tools ported from Craft, driven like any MCP client would:
-// absolute paths into a tempdir workspace, structured outcomes, tool-level
-// errors with `isError`.

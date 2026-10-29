@@ -32,7 +32,6 @@ fn agent_reviewer_writes_each_harness_definition_from_cwd() {
         assert!(path.is_file(), "{harness}: definition written");
         let definition = fs::read_to_string(&path).unwrap();
         assert!(definition.starts_with("---\n"), "{harness}: frontmatter");
-        // The shared reviewer system prompt body.
         assert!(definition.contains("You are a code reviewer"));
         assert!(definition.contains("**P0 - Critical**"));
         assert!(definition.contains("approve_with_nits"));
@@ -53,7 +52,6 @@ fn agent_reviewer_refuses_existing_then_force_replaces() {
         .success();
     fs::write(&path, "user edits\n").unwrap();
 
-    // Without --force the user's file is an error, and it stays untouched.
     argosy_bin()
         .args(["agent", "reviewer", "opencode"])
         .current_dir(&project)
@@ -63,7 +61,6 @@ fn agent_reviewer_refuses_existing_then_force_replaces() {
         .stderr(predicate::str::contains("already exists"));
     assert_eq!(fs::read_to_string(&path).unwrap(), "user edits\n");
 
-    // With --force the definition is regenerated.
     argosy_bin()
         .args(["agent", "reviewer", "opencode", "--force"])
         .current_dir(&project)
@@ -98,8 +95,7 @@ fn agent_reviewer_json_is_the_setup_report() {
             .as_str()
             .is_some_and(|p| p.ends_with(".kiro/agents/reviewer.md"))
     );
-    // The human-only MCP hint never pollutes the JSON contract on stdout;
-    // notes go to stdout only in human mode, so JSON stdout stays pure.
+    // The human-only MCP hint never pollutes the JSON stdout contract.
     assert!(!String::from_utf8_lossy(&output.stdout).contains("note:"));
 }
 
@@ -112,6 +108,5 @@ fn agent_reviewer_unknown_harness_is_a_usage_error() {
         .assert()
         .failure()
         .code(2);
-    // Nothing was written for the rejected harness.
     assert!(!scratch.path().join(".cursor").exists());
 }

@@ -1,27 +1,20 @@
-//! Heading-based chunking of concept bodies: the deterministic, no-LLM half
-//! of contextual retrieval. A concept whose whole prefixed body fits the
-//! token budget stays one chunk; a longer one splits at ATX headings, and
-//! any over-long section splits again at paragraph (and, if needed, line)
-//! boundaries. Every chunk is embedded behind a `Concept:`/`Section:` prefix
-//! — title plus heading breadcrumb — so a passage deep in a long document
-//! carries enough context to stand on its own.
+//! Heading-based chunking of concept bodies: short concepts stay one chunk,
+//! longer ones split at ATX headings, and every passage is embedded behind
+//! a `Concept:`/`Section:` prefix so it can stand on its own.
 //!
 //! Chunks are line-exact: `start_line`/`end_line` are 1-based lines of the
-//! concept *body* (frontmatter excluded), the same numbering `read` accepts
-//! for small-to-big expansion. A `#` inside a fenced code block is never a
-//! heading; an over-long fence still splits at line boundaries (an indexed
-//! fragment beats an unsearchable tail), and an indivisible line longer than
-//! the budget stays whole — the embedder's truncation is the backstop.
+//! concept body (frontmatter excluded), the numbering `read` accepts. A `#`
+//! inside a fenced code block is never a heading.
 
 use crate::concept::Concept;
 
 use super::is_invisible_format;
 
-/// Token budget for one chunk's embedded text, prefix included. Defaults
-/// leave headroom under the embedder's 256-token truncation.
+/// Token budget for one chunk's embedded text, prefix included; the default
+/// leaves headroom under the embedder's 256-token truncation.
 pub const DEFAULT_MAX_TOKENS: usize = 220;
 
-/// The chunking knobs (user configuration `index.chunk_max_tokens`).
+/// Chunking configuration (user setting `index.chunk_max_tokens`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkConfig {
     /// Maximum estimated tokens per chunk, prefix included.
@@ -41,24 +34,22 @@ impl Default for ChunkConfig {
 pub struct Chunk {
     /// Position within the source concept, `0..`.
     pub ordinal: u32,
-    /// The exact text embedded and returned as the hit's passage: the
-    /// `Concept:`/`Section:` prefix, a blank line, then the passage body.
+    /// The exact embedded text: prefix, a blank line, then the passage body.
     pub text: String,
-    /// The heading breadcrumb (`"Setup › Database"`); empty for the
-    /// pre-heading passage and for a whole-concept chunk.
+    /// The heading breadcrumb, e.g. `"Setup › Database"`; empty when the
+    /// passage has no heading.
     pub heading_path: String,
     /// 1-based first body line covered (frontmatter excluded).
     pub start_line: u32,
     /// 1-based last body line covered.
     pub end_line: u32,
-    /// Invisible format characters stripped from [`Chunk::text`] (see
-    /// [`super::is_invisible_format`]); the on-disk bytes are untouched.
+    /// Invisible format characters stripped from [`Chunk::text`]; the
+    /// on-disk bytes are untouched.
     pub invisible: usize,
 }
 
-/// Splits a concept into embeddable chunks. `fallback_title` names the
-/// concept when neither an H1 nor a frontmatter description provides one
-/// (the caller passes the concept id's last segment).
+/// Splits a concept into embeddable chunks; `fallback_title` names the
+/// concept when neither an H1 nor the description provides one.
 pub fn chunk_concept(concept: &Concept, fallback_title: &str, config: ChunkConfig) -> Vec<Chunk> {
     let body = concept.body();
     let title = concept_title(body, concept.description(), fallback_title);
@@ -67,8 +58,7 @@ pub fn chunk_concept(concept: &Concept, fallback_title: &str, config: ChunkConfi
         .map(str::trim)
         .filter(|d| !d.is_empty());
     let body_lines: Vec<&str> = body.lines().collect();
-    // Trailing blank lines are not part of any passage: the whole-concept
-    // chunk's range must not claim them (a ranged `read` would return air).
+    // Trailing blank lines claim no range: a ranged `read` would return air.
     let last_content_line = body_lines
         .iter()
         .rposition(|line| !line.trim().is_empty())
@@ -76,9 +66,6 @@ pub fn chunk_concept(concept: &Concept, fallback_title: &str, config: ChunkConfi
         .unwrap_or(1) as u32;
     let prefix = prefix_text(&title, description, "");
 
-    // Short concepts stay whole: one passage, no heading split. This is the
-    // common case (skills, rules, memory notes) and keeps their passage
-    // identical to the concept body.
     if estimate_tokens(&prefix) + estimate_tokens(body) + 4 <= config.max_tokens {
         return vec![finish_chunk(
             0,
@@ -107,9 +94,6 @@ pub fn chunk_concept(concept: &Concept, fallback_title: &str, config: ChunkConfi
             ));
             continue;
         }
-        // Over-long section: pack whole blocks (paragraphs, code fences,
-        // heading lines) greedily, then split an over-budget block at line
-        // boundaries.
         let budget = config
             .max_tokens
             .saturating_sub(estimate_tokens(&full) + 4)
@@ -140,17 +124,15 @@ pub fn chunk_concept(concept: &Concept, fallback_title: &str, config: ChunkConfi
     chunks
 }
 
-/// Approximate token count: whitespace words × 4/3. The chunker cannot see
-/// the embedder's tokenizer (it is provider-agnostic), and word counts
-/// understate English token length (~1.3 tokens per word), which is why the
-/// default budget leaves a margin under the model's 256-token limit.
+/// Approximate token count: whitespace words × 4/3, roughly the English
+/// tokens-per-word rate.
 pub fn estimate_tokens(text: &str) -> usize {
     let words = text.split_whitespace().count();
     (words * 4).div_ceil(3)
 }
 
-/// The concept's display title: its first heading (preferring H1), else the
-/// description, else the caller's fallback (the id).
+/// The concept's display title: first heading (preferring H1), else the
+/// description, else the fallback.
 fn concept_title(body: &str, description: Option<&str>, fallback: &str) -> String {
     let mut first_heading: Option<&str> = None;
     let mut in_code = false;
@@ -169,8 +151,7 @@ fn concept_title(body: &str, description: Option<&str>, fallback: &str) -> Strin
             first_heading.get_or_insert(text);
             continue;
         }
-        // Only the leading heading block counts as a title; prose owns the
-        // document after that.
+        // Only the leading heading block is a title.
         if !line.trim().is_empty() {
             break;
         }
@@ -184,9 +165,8 @@ fn concept_title(body: &str, description: Option<&str>, fallback: &str) -> Strin
     fallback.to_string()
 }
 
-/// The prefix lines shared by every chunk of a concept. The description is
-/// capped so a pathological one cannot inflate every passage past the
-/// budget (the title and breadcrumb are the load-bearing part).
+/// The prefix lines shared by every chunk; the description is capped so a
+/// pathological one cannot inflate every passage past the budget.
 fn prefix_text(title: &str, description: Option<&str>, breadcrumb: &str) -> String {
     let mut text = format!("Concept: {title}");
     if let Some(description) = description
@@ -201,12 +181,11 @@ fn prefix_text(title: &str, description: Option<&str>, breadcrumb: &str) -> Stri
     text
 }
 
-/// The maximum characters of a frontmatter description copied into a
-/// passage prefix.
+/// The maximum description characters copied into a passage prefix.
 const MAX_DESCRIPTION_CHARS: usize = 200;
 
 /// Truncates a description to [`MAX_DESCRIPTION_CHARS`] at a char boundary,
-/// marking the cut, so the prefix stays small whatever the frontmatter says.
+/// marking the cut.
 fn cap_description(description: &str) -> String {
     if description.chars().count() <= MAX_DESCRIPTION_CHARS {
         return description.to_string();
@@ -241,8 +220,7 @@ fn finish_chunk(
     }
 }
 
-/// Removes invisible format characters from the indexed text, counting
-/// them. Only the embedded text changes, never the bytes on disk.
+/// Removes invisible format characters from the text, counting them.
 fn strip_invisible(raw: &str) -> (String, usize) {
     if !raw.contains(is_invisible_format) {
         return (raw.to_string(), 0);
@@ -259,9 +237,8 @@ fn strip_invisible(raw: &str) -> (String, usize) {
     (text, stripped)
 }
 
-/// One contiguous section of a body: a heading and everything beneath it
-/// until the next heading of any level (the pre-heading prose is its own
-/// section with an empty breadcrumb).
+/// One heading and everything beneath it until the next heading of any
+/// level; the pre-heading prose is a section with an empty breadcrumb.
 struct Section {
     heading_path: String,
     /// 0-based inclusive line range.
@@ -269,9 +246,8 @@ struct Section {
     end: usize,
 }
 
-/// Splits the body at ATX headings, tracking a heading stack so each
-/// section knows its breadcrumb. Fenced code is opaque — a `#` inside a
-/// fence is code, not a heading.
+/// Splits the body at ATX headings, tracking a breadcrumb stack — a `#`
+/// inside a fence is code, not a heading.
 fn split_sections(body: &str) -> Vec<Section> {
     let lines: Vec<&str> = body.lines().collect();
     let mut sections = Vec::new();
@@ -319,10 +295,9 @@ fn split_sections(body: &str) -> Vec<Section> {
     merge_heading_only_sections(&lines, sections)
 }
 
-/// A heading with no content beneath it (adjacent headings, or a trailing
-/// empty section) must not become its own passage: attach its lines to the
-/// following section (the last one joins its predecessor), keeping coverage
-/// gapless while the *content's* breadcrumb wins.
+/// A heading with no content beneath it must not become its own passage:
+/// attach it to the following section (the last joins its predecessor),
+/// keeping coverage gapless while the content's breadcrumb wins.
 fn merge_heading_only_sections(lines: &[&str], sections: Vec<Section>) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::with_capacity(sections.len());
     let mut pending: Option<Section> = None;
@@ -343,8 +318,7 @@ fn merge_heading_only_sections(lines: &[&str], sections: Vec<Section>) -> Vec<Se
         });
     }
     if let Some(pending) = pending {
-        // A trailing heading joins its predecessor, blank separator included
-        // (a range may cover blank lines; they carry no content).
+        // A trailing heading joins its predecessor, blank separator included.
         match out.last_mut() {
             Some(last) if last.end < pending.start => last.end = pending.end,
             _ => out.push(pending),
@@ -353,8 +327,7 @@ fn merge_heading_only_sections(lines: &[&str], sections: Vec<Section>) -> Vec<Se
     out
 }
 
-/// A section's blocks: runs of non-blank lines (paragraphs and heading
-/// lines), with fenced code blocks kept whole.
+/// A section's blocks: runs of non-blank lines with fenced code kept whole.
 type Block = (usize, usize);
 
 fn section_blocks(lines: &[&str], start: usize, end: usize) -> Vec<Block> {
@@ -377,8 +350,7 @@ fn section_blocks(lines: &[&str], start: usize, end: usize) -> Vec<Block> {
                 }
                 continue;
             }
-            // A blank line ends the block; it is never part of the range, so
-            // a heading-only block is exactly one line.
+            // A blank line ends the block; it is never part of the range.
             if next.trim().is_empty() {
                 break;
             }
@@ -390,14 +362,13 @@ fn section_blocks(lines: &[&str], start: usize, end: usize) -> Vec<Block> {
         blocks.push((block_start, block_end));
         cursor = block_end + 1;
     }
-    // A section's leading heading line is a block of its own; it belongs
-    // with the passage beneath it rather than becoming a one-line chunk (its
-    // text is already in the prefix breadcrumb).
+    // A leading heading is its own block; it belongs with the passage
+    // beneath it (its text is already in the prefix breadcrumb).
     merge_heading_blocks(lines, blocks)
 }
 
-/// Attaches a heading-only block to the block that follows it (a trailing one
-/// joins its predecessor), so headings never stand as passages alone.
+/// Attaches heading-only blocks to the block that follows (a trailing one
+/// joins its predecessor), so headings never stand alone.
 fn merge_heading_blocks(lines: &[&str], blocks: Vec<Block>) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::with_capacity(blocks.len());
     let mut pending: Option<usize> = None;
@@ -410,8 +381,7 @@ fn merge_heading_blocks(lines: &[&str], blocks: Vec<Block>) -> Vec<Block> {
         out.push((start, block.1));
     }
     if let Some(start) = pending {
-        // A trailing heading joins its predecessor, blank separator included
-        // (the range may cover blank lines; they carry no content).
+        // A trailing heading joins its predecessor, blank separator included.
         match out.last_mut() {
             Some(last) if last.1 < start => last.1 = start,
             _ => out.push((start, start)),
@@ -452,10 +422,9 @@ fn pack_blocks(lines: &[&str], section: &Section, budget: usize) -> Vec<Block> {
     packed
 }
 
-/// Splits an over-budget block at line boundaries. A single over-budget
-/// line stays whole: its line range stays exact and the embedder's
-/// truncation is the backstop. A leading run of heading lines stays attached
-/// to the first piece rather than becoming a one-line passage.
+/// Splits an over-budget block at line boundaries; a single over-budget
+/// line stays whole (the embedder's truncation is the backstop), and a
+/// leading heading run stays attached to the first piece.
 fn split_block(lines: &[&str], block: Block, budget: usize) -> Vec<Block> {
     let mut out = Vec::new();
     let mut start = block.0;
@@ -471,8 +440,8 @@ fn split_block(lines: &[&str], block: Block, budget: usize) -> Vec<Block> {
     out
 }
 
-/// True iff every non-blank line in the range is a heading — such a run is a
-/// section's title, never a passage of its own.
+/// True iff every non-blank line is a heading; such a run is never a
+/// passage of its own.
 fn only_headings(lines: &[&str], start: usize, end: usize) -> bool {
     lines[start..=end]
         .iter()
@@ -485,9 +454,8 @@ fn join_lines(lines: &[&str], start: usize, end: usize) -> String {
     lines[start.min(end)..=end].join("\n")
 }
 
-/// An ATX heading: 1–6 `#` after at most three spaces of indent, then a
-/// space (or the end of the line). Setext headings are not recognized, and
-/// the trailing closing sequence (`## Title ##`) is trimmed.
+/// An ATX heading: 1–6 `#` after at most three spaces of indent; Setext
+/// headings are not recognized.
 fn heading(line: &str) -> Option<(u8, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {

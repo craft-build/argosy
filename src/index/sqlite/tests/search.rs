@@ -2,10 +2,8 @@
 
 use super::*;
 
-/// Regression (filtered recall): vec0 applies metadata filters after
-/// whenever the k nearest concepts are all non-matching. The store
-/// ranks the full corpus when a filter is active; filtered queries
-/// are exact.
+/// Regression (filtered recall): with a filter active, the store ranks the full corpus, so
+/// filtered queries stay exact.
 #[test]
 fn filtered_search_returns_matches_beyond_the_unfiltered_top_k() {
     let (_dir, mut store) = open_in_tmp();
@@ -39,8 +37,6 @@ fn filtered_search_returns_matches_beyond_the_unfiltered_top_k() {
         .unwrap()
         .remove(0);
 
-    // k = 3 with a styleguide filter: the unfiltered top-3 are all
-    // documents, yet the rule must surface — not an empty result.
     let hits = store
         .search(
             &query,
@@ -76,8 +72,7 @@ fn filtered_search_returns_matches_beyond_the_unfiltered_top_k() {
     );
 }
 
-/// Real-database coverage: engine + store on a temp ProjectContext,
-/// including the model-mismatch rebuild paths.
+/// Real-database coverage: engine + store on a temp ProjectContext, including rebuild paths.
 #[test]
 fn reconcile_end_to_end_with_sqlite_store() {
     let (local, _imported, ctx) = fixture();
@@ -88,7 +83,6 @@ fn reconcile_end_to_end_with_sqlite_store() {
     assert_eq!(report.upserted, 5);
     assert_eq!(report.model_id, "mock-embedder@1");
 
-    // Search over real SQL: the architecture doc wins its own query.
     let hits = index
         .search(&ctx, &Query::unscoped("architecture", 10))
         .unwrap();
@@ -98,7 +92,6 @@ fn reconcile_end_to_end_with_sqlite_store() {
     );
     assert_eq!(hits[0].concept.id.as_str(), "document/arch");
 
-    // Edit one concept → exactly it is re-staged, and its old text is gone.
     let edited = crate::concept::Concept::from_str(
         "---\ntype: Note\ndescription: Build gotchas.\ntags: [build]\n---\nMoldova espresso deadlines.\n",
     )
@@ -127,8 +120,7 @@ fn reconcile_end_to_end_with_sqlite_store() {
         "the replaced text no longer tops its own old query"
     );
 
-    // A provider with a different identity rebuilds
-    // everything with zero errors and zero mixed vectors.
+    // A different identity rebuilds with no mixed old/new vectors.
     index.set_provider(MockEmbedder::with_model_id(
         "tract/sentence-transformers/all-MiniLM-L6-v2@tract-9",
     ));
@@ -168,8 +160,7 @@ fn reopening_the_store_reuses_the_index_with_zero_reembeds() {
     );
 }
 
-/// Passage fields survive the sqlite round trip: the matched chunk's
-/// ordinal, breadcrumb, line range and text come back exactly as upserted.
+/// Passage fields (ordinal, breadcrumb, line range, text) survive the sqlite round trip.
 #[test]
 fn search_returns_the_matched_passage_fields() {
     let (_dir, mut store) = open_in_tmp();
@@ -227,8 +218,7 @@ fn lexical_search_ranks_exact_terms_first() {
     ];
     store.upsert(&units).unwrap();
 
-    // BM25 finds the identifier that embeddings would have to compress
-    // into an unstructured neighborhood.
+    // BM25 finds exact identifiers that embeddings would compress away.
     let hits = store
         .lexical_search("USR-1042", 10, &Filter::default())
         .unwrap();
@@ -265,9 +255,7 @@ fn lexical_search_matches_the_concept_id_column() {
         )])
         .unwrap();
 
-    // The passage never spells the rule id out; the indexed concept_id
-    // column still makes the documented query ("the naming/case rule")
-    // findable — the roadmap's exact-rule-id case.
+    // The passage never spells the id; the indexed concept_id column makes the query findable.
     let hits = store
         .lexical_search("naming case", 10, &Filter::default())
         .unwrap();
@@ -312,7 +300,7 @@ fn lexical_search_honors_filters_like_the_vector_leg() {
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].concept.id.as_str(), "styleguide/rust/naming");
-    // Empty allow-list: nothing, never everything (doc-06 semantics).
+    // An empty allow-list matches nothing, never everything.
     let hits = store
         .lexical_search(
             "naming",
@@ -332,17 +320,13 @@ fn queries_without_indexable_terms_sit_the_lexical_leg_out() {
     let embedder = MockEmbedder::new();
     seed(&mut store, &embedder);
 
-    // Punctuation-only, empty queries: no term, no ranking — the vector
-    // leg owns the query.
+    // No indexable terms — the vector leg owns the query.
     for query in ["", "   ", "?!/-", "—···"] {
         let hits = store.lexical_search(query, 10, &Filter::default()).unwrap();
         assert!(hits.is_empty(), "query {query:?} ranked nothing tokenless");
     }
 
-    // FTS operators in the text are never parsed as syntax: quoted terms
-    // mean exactly themselves, so `OR` matches no passage that does not
-    // contain the literal term — and the punctuation around operators
-    // ("OR", "NEAR(a b)", "-rust") merely splits into literal terms.
+    // FTS operators are never parsed as syntax — queries match their literal terms.
     let hits = store.lexical_search("OR", 10, &Filter::default()).unwrap();
     assert!(hits.is_empty(), "the operator is a term, not syntax");
     let hits = store
@@ -376,8 +360,7 @@ fn lexical_search_tracks_writes_through_the_units_triggers() {
         1
     );
 
-    // Re-upsert with different text: the FTS index must follow the
-    // delete-then-insert triggers, leaving no stale term behind.
+    // The FTS index follows the delete-then-insert triggers: no stale term survives.
     let rewritten = make_unit(
         &embedder,
         "local",
@@ -402,7 +385,6 @@ fn lexical_search_tracks_writes_through_the_units_triggers() {
         1
     );
 
-    // Removal and clear stay in sync too.
     store
         .remove_concept(&QualifiedConceptId {
             argosy: "local".to_string(),
@@ -436,9 +418,8 @@ fn lexical_search_tracks_writes_through_the_units_triggers() {
     );
 }
 
-/// Hybrid end to end: a query whose tokens overlap no passage (so the
-/// mock vector leg scores every unit identically) still finds the rule
-/// through the lexical leg, and the fusion puts it first.
+/// Hybrid end to end: with no token overlap the mock vector leg scores all units identically,
+/// so only the lexical leg can find the rule.
 #[test]
 fn hybrid_search_finds_rule_ids_the_vector_leg_cannot() {
     let local = make_argosy(
@@ -470,9 +451,8 @@ fn hybrid_search_finds_rule_ids_the_vector_leg_cannot() {
     assert_eq!(hits[0].concept.id.as_str(), "styleguide/rust/naming/case");
 }
 
-/// The zero-model mode: a lexical-only index stores units and FTS rows
-/// (no vec0 table at all, nothing ever embedded), still searches, and a
-/// later switch to a real model is an ordinary full rebuild.
+/// Zero-model mode: a lexical-only index has no vec table, embeds nothing, still searches —
+/// and a switch to a real model is an ordinary full rebuild.
 #[test]
 fn lexical_only_mode_builds_a_zero_model_bm25_index() {
     let (_local, _imported, ctx) = fixture();
@@ -487,7 +467,6 @@ fn lexical_only_mode_builds_a_zero_model_bm25_index() {
         "the lexical mode records its own identity"
     );
 
-    // No vec table exists and the vector leg is empty by construction.
     let vec_tables: i64 = index
         .store()
         .conn
@@ -507,8 +486,6 @@ fn lexical_only_mode_builds_a_zero_model_bm25_index() {
         "BM25-only search still finds the locking note"
     );
 
-    // Switching to a real model is the ordinary identity flip: full
-    // rebuild, now with vectors — hybrid from then on.
     drop(index);
     let mut index = Index::new(MockEmbedder::new(), SqliteVecStore::open(&db_path).unwrap());
     let report = index.reconcile(&ctx).unwrap();

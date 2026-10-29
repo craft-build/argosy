@@ -1,7 +1,7 @@
-//! The `outline` tool: a structural outline of a file or directory,
-//! ported from Craft's `tools/outline.rs`. Also the de-facto language
-//! registry for the code tools — `zoom` and `callgraph` reuse [`LangId`]
-//! and [`extract_symbols`].
+//! The `outline` tool: a structural outline of a file or directory.
+//!
+//! Also the language registry for the code tools: `zoom` and `callgraph`
+//! reuse [`LangId`] and [`extract_symbols`].
 
 mod extract;
 mod imports;
@@ -19,9 +19,8 @@ pub use types::{Range, Symbol, SymbolKind};
 
 use std::path::Path;
 
-// The `JsonSchema` derive expansion references the `schemars` crate by
-// bare name; aliasing rmcp's re-export keeps our version pinned to the
-// SDK's.
+// The `JsonSchema` derive expansion references `schemars` by bare name;
+// aliasing rmcp's re-export pins our version to the SDK's.
 #[cfg(feature = "mcp")]
 use rmcp::schemars;
 
@@ -39,11 +38,9 @@ use types::DirEntry;
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct OutlineParams {
-    /// Path (absolute, or relative to the server's working directory) of a
-    /// file or directory.
+    /// Path of a file or directory, absolute or relative to the working directory.
     pub path: String,
-    /// When `path` is a directory, return a flat file table instead of
-    /// nested symbols.
+    /// When `path` is a directory, return a flat file table instead of nested symbols.
     pub files: Option<bool>,
 }
 
@@ -52,16 +49,13 @@ pub struct OutlineParams {
 pub struct OutlineReport {
     /// The resolved path that was outlined.
     pub path: String,
-    /// The rendered outline (file tree, directory listing, or file table),
-    /// capped at 30 KB.
+    /// The rendered outline, capped at 30 KB.
     pub text: String,
-    /// True iff the rendering hit the 30 KB cap — narrow the path to see
-    /// more.
+    /// True iff the rendering hit the 30 KB cap; narrow the path to see more.
     pub truncated: bool,
 }
 
-/// Runs the `outline` tool: one file renders its symbol tree; a directory
-/// renders per-file trees (or a flat file table with `files`).
+/// Runs the `outline` tool: a file renders its symbol tree; a directory renders per-file trees.
 pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
     let path = code.resolve_path(&params.path)?;
     let p = Path::new(&path);
@@ -82,8 +76,7 @@ pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
         )));
     }
 
-    // A single explicit file gets the same size cap as directory walks,
-    // checked before the read so a giant file is never fully loaded.
+    // Size-check before reading so a giant file is never fully loaded.
     let size = std::fs::metadata(p)
         .map_err(|e| tool_error(format!("read error: {e}")))?
         .len();
@@ -124,9 +117,7 @@ fn outline_dir(code: &CodeTools, path: &str, files_mode: bool) -> (String, bool)
 
     for entry in walk_source_files(path) {
         let p = Path::new(&entry);
-        // Size-check before reading: a giant file must not be fully loaded
-        // (a giant non-UTF-8 one not read at all) just to be labeled
-        // "(too large)".
+        // Size-check before reading: never load a giant file just to label it "(too large)".
         let too_large = std::fs::metadata(p)
             .map(|m| m.len() > MAX_FILE_BYTES as u64)
             .unwrap_or(false);
@@ -141,9 +132,8 @@ fn outline_dir(code: &CodeTools, path: &str, files_mode: bool) -> (String, bool)
                 continue;
             }
         };
-        // Recorded like every other code-tool read, so `astgrep` apply and
-        // `conflicts` resolve refuse to edit a file that changed since this
-        // outline saw it.
+        // Recorded like every other read, so `astgrep` and `conflicts`
+        // refuse to edit a file that changed since this outline saw it.
         code.record_read(p);
         total_bytes += content.len();
 

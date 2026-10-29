@@ -1,13 +1,8 @@
 //! The MCP server: argosys as MCP resources and tools for any
-//! MCP-compatible harness. Stdout *is* the protocol channel — one stray
-//! `println!` corrupts it; diagnostics go to stderr. [`McpState`] holds the
-//! sync, unit-testable handlers; [`ArgosyMcpServer`] dispatches.
-//!
-//! Multi-project: every tool call names its project with `cwd` (the project
-//! root); [`McpState`] opens each project once through its
-//! [`SessionFactory`] and caches by canonical root under a TTL/LRU bound.
-//! Resources (which carry no cwd) resolve against the process working
-//! directory, opened the same lazy way.
+//! MCP-compatible harness. Stdout *is* the protocol channel — a stray
+//! `println!` corrupts it; diagnostics go to stderr. Tool calls name
+//! their project with `cwd`; resources resolve against the process
+//! working directory.
 
 mod params;
 mod reports;
@@ -24,16 +19,13 @@ pub use server::ArgosyMcpServer;
 pub use session::{McpState, ProjectSession, SessionFactory};
 pub use tools::tool_definitions;
 
-/// The `argosy://_argosys` pseudo-resource: the active argosys with their
-/// versions and local/imported roles.
+/// The `argosy://_argosys` pseudo-resource: the active argosys.
 pub const ARGOSYS_URI: &str = "argosy://_argosys";
 
-/// The `argosy://catalog` pseudo-resource: the global catalog of every
-/// project slot under the argosy state dir (see [`crate::catalog`]).
+/// The `argosy://catalog` pseudo-resource (see [`crate::catalog`]).
 pub const CATALOG_URI: &str = "argosy://catalog";
 
-/// Suffix of the `argosy://<name>/_index` pseudo-resource: a bundle's root
-/// `index.md`.
+/// Suffix of the `argosy://<name>/_index` root-index pseudo-resource.
 pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";
 
 /// Default hit count for `search`/`search_rules`.
@@ -45,8 +37,7 @@ pub(super) const DEFAULT_PROJECT_TTL: std::time::Duration = std::time::Duration:
 /// Default project-session cap.
 pub(super) const DEFAULT_MAX_PROJECT_SESSIONS: usize = 8;
 
-/// The trust tier reported for concepts with no `verified` frontmatter —
-/// the canonical spelling lives with the tier machinery ([`crate::trust`]).
+/// The trust tier reported for concepts with no `verified` frontmatter ([`crate::trust`]).
 pub(super) use crate::trust::UNVERIFIED;
 
 #[cfg(test)]

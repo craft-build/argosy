@@ -62,8 +62,7 @@ fn meta(
     }
 }
 
-/// The standard corpus: three concepts across two argosies/namespaces
-/// with distinct facets, so every Filter dimension has a discriminant.
+/// The standard corpus: three concepts whose facets give every Filter dimension a discriminant.
 fn seed(store: &mut SqliteVecStore, embedder: &MockEmbedder) -> Vec<EmbeddingUnit> {
     let units = vec![
         make_unit(

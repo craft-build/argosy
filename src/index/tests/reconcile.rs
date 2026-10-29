@@ -32,7 +32,6 @@ fn staleness_preview_matches_the_diff_reconcile_applies() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    // Edit one concept, delete one, add one.
     write_file(local.path(), "memory/gotchas.md", "Edited build notes.\n");
     fs::remove_file(local.path().join("skill/deploy.md")).unwrap();
     write_file(
@@ -62,15 +61,12 @@ fn staleness_agrees_with_reconcile_on_identity_states() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    // A recorded identity differing from the expected model ⇒ mismatch
-    // (reconcile would rebuild).
+    // A recorded identity differing from the expected model ⇒ mismatch.
     let report =
         staleness_report(&ctx, index.store(), "other-model@2", ChunkConfig::default()).unwrap();
     assert!(report.model_mismatch);
 
-    // Data present with NO recorded identity: reconcile's `None =>
-    // !stored.is_empty()` guard rebuilds, so the preview must not claim
-    // "up to date".
+    // Reconcile's `None ⇒ !stored.is_empty()` guard: data with no identity is a rebuild.
     index.store_mut().model_id = None;
     let report = staleness_report(
         &ctx,
@@ -84,8 +80,7 @@ fn staleness_agrees_with_reconcile_on_identity_states() {
         "data without a recorded identity is a rebuild, never \"up to date\""
     );
 
-    // An empty store with no recorded identity announces nothing; the
-    // added counts carry the whole story.
+    // An empty store with no recorded identity announces nothing.
     index.store_mut().clear().unwrap();
     let report = staleness_report(
         &ctx,
@@ -217,8 +212,7 @@ fn first_reconcile_embeds_every_default_namespace_concept_and_records_model() {
 
     let report = index.reconcile(&ctx).unwrap();
 
-    // local: arch + deploy + gotchas + case; vendor: locking (its
-    // memory/ is skipped by the default walk).
+    // Four local concepts plus vendor's locking; its memory/ is skipped by the default walk.
     assert_eq!(report.upserted, 5);
     assert_eq!(report.removed, 0);
     assert_eq!(report.unchanged, 0);
@@ -271,7 +265,6 @@ fn editing_one_concept_upserts_exactly_it_and_deleting_removes_it() {
     let mut index = fresh_index();
     index.reconcile(&ctx).unwrap();
 
-    // Edit the memory note in place through the write surface.
     let edited = Concept::from_str(
         "---\ntype: Note\ndescription: Build gotchas.\ntags: [build]\n---\nCargo needs a workspace.\n",
     )
@@ -296,8 +289,6 @@ fn editing_one_concept_upserts_exactly_it_and_deleting_removes_it() {
     let new_hashes = index.store().unit_hashes().unwrap();
     assert_ne!(old_hashes[&qid], new_hashes[&qid]);
 
-    // Delete it: the next reconcile calls remove_concept, and search can
-    // no longer return it.
     ctx.local()
         .delete_concept(Namespace::Memory, &concept_id("memory/gotchas"))
         .unwrap();
@@ -339,9 +330,7 @@ fn flipping_the_model_id_clears_and_fully_rebuilds() {
     assert_eq!(index.store().model_id(), Some("mock-embedder@2"));
     assert_eq!(index.store().clears, 1, "clear happened before re-embed");
 
-    // The same concepts are re-stored under the new identity and are
-    // searchable — the cleared old vectors are gone entirely (interleaving
-    // old and new models is impossible by construction).
+    // Old and new vectors never interleave: everything is re-stored under the new identity.
     assert!(index.store().unit_hashes().unwrap() == before);
     let hits = index
         .search(&ctx, &Query::unscoped("architecture", 10))
@@ -351,10 +340,7 @@ fn flipping_the_model_id_clears_and_fully_rebuilds() {
 
 #[test]
 fn rebuild_re_records_identity_even_if_clear_keeps_the_old_one() {
-    // Regression for the mismatch guard previously relying on `clear()`
-    // dropping the identity: a store that keeps it must still end the
-    // reconcile recording the new model, or every later reconcile would
-    // see a mismatch and clear + re-embed the whole corpus again.
+    // Without re-recording, every later reconcile would be another full rebuild.
     /// A `MemStore` whose `clear()` drops units but keeps `model_id`.
     struct StickyClear(MemStore);
 
@@ -394,7 +380,6 @@ fn rebuild_re_records_identity_even_if_clear_keeps_the_old_one() {
     assert!(report.rebuilt);
     assert_eq!(index.store().model_id(), Some("mock-embedder@2"));
 
-    // The next reconcile is incremental, not another full rebuild.
     let report = index.reconcile(&ctx).unwrap();
     assert!(!report.rebuilt);
     assert_eq!(report.upserted, 0);
@@ -436,9 +421,6 @@ fn a_long_concept_upserts_one_unit_per_passage_and_counts_them() {
 
 #[test]
 fn a_long_concept_is_retrievable_past_its_first_paragraph() {
-    // The old one-vector pipeline truncated at ~150–200 words: a phrase
-    // from the last section could not win its own query. Passage-level
-    // embedding makes the tail searchable.
     let (local, _imported, ctx) = fixture();
     write_file(
         local.path(),
@@ -475,8 +457,7 @@ fn editing_one_section_reembeds_only_the_concept_holding_it() {
     index.reconcile(&ctx).unwrap();
     let embedded = index.provider().embed_calls();
 
-    // Same length, different words in the last section: the concept hash
-    // changes once, and no other concept re-embeds.
+    // Same length, different words — the concept hash must still change.
     let edited = long_concept().replace("## Storage", "## Persistence");
     write_file(local.path(), "document/long.md", &edited);
     let report = index.reconcile(&ctx).unwrap();

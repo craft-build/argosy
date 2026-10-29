@@ -1,18 +1,10 @@
-//! Provenance-based trust tiers: the OKF tier a concept *claims* in its
-//! `verified` frontmatter is only ever relayed verbatim for the local
-//! (writable) argosy. An imported argosy is shared content — it cannot
-//! grade its own homework — so its concepts' effective tier is capped at
-//! the tier the *importing* user configured for that import
-//! ([`TrustPolicy`]), never at the book's self-claim. With no configured
-//! cap every import reads as [`UNVERIFIED`].
+//! Provenance-based trust tiers: local `verified` claims are relayed verbatim;
+//! an imported argosy cannot grade its own homework — its concepts' effective
+//! tier is the importing user's cap ([`TrustPolicy`]), defaulting to [`UNVERIFIED`].
 //!
-//! Integrity verification ([`crate::package::validate_integrity`]) is the
-//! orthogonal tamper check: a checkout whose sidecar disagrees with its
-//! contents is excluded from the context outright (see
-//! [`crate::context::ProjectContext`]) rather than downgraded, while a
-//! book that ships no sidecar at all is still eligible for a configured
-//! cap — the sidecar proves the bytes match what was packaged, not that
-//! anyone reviewed them.
+//! Integrity verification ([`crate::package::validate_integrity`]) is the orthogonal
+//! tamper check: a mismatched sidecar excludes the checkout outright
+//! rather than downgrading it, while a missing sidecar still allows a cap.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -21,17 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::concept::Concept;
 
-/// The tier reported for concepts with no `verified` frontmatter — and the
-/// floor of every effective tier (OKF SEC-2's tier vocabulary).
+/// The tier for missing `verified` claims — the floor of every effective tier (OKF SEC-2).
 pub const UNVERIFIED: &str = "unverified";
 
-/// The OKF trust tiers, weakest to strongest (the ordering that makes
-/// [`TrustPolicy::effective`] a `min`).
+/// The OKF trust tiers, weakest to strongest — the ordering that makes a cap a `min`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustTier {
-    /// No review signal at all — the default for every import without a
-    /// configured cap.
+    /// No review signal — the default without a configured cap.
     #[default]
     Unverified,
     /// A machine check passed (lint, tests, provenance tooling).
@@ -50,9 +39,7 @@ impl TrustTier {
         }
     }
 
-    /// Parses a tier from its frontmatter/config spelling; `None` for
-    /// anything else (an unrecognized `verified` value carries no trust
-    /// signal to relay).
+    /// Parses a tier spelling; `None` for values carrying no trust signal.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim() {
             UNVERIFIED => Some(TrustTier::Unverified),
@@ -85,24 +72,22 @@ pub enum Origin {
     Imported,
 }
 
-/// The importing user's trust decisions: one maximum tier per imported
-/// argosy, keyed by manifest name (the `argosy://` URI spelling). Derived
-/// from the user configuration's `trust` section; an import with no entry
-/// is capped at [`TrustTier::Unverified`] whatever it claims.
+/// Per-import tier caps from the user config's `trust` section, keyed by manifest
+/// name (the `argosy://` URI spelling).
+///
+/// An import with no entry is capped at [`TrustTier::Unverified`] whatever it claims.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustPolicy {
     caps: HashMap<String, TrustTier>,
 }
 
 impl TrustPolicy {
-    /// The empty policy: every import is `unverified`, the local argosy is
-    /// unaffected.
+    /// The empty policy: every import is `unverified`; local claims are unaffected.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builds the policy from the user configuration's caps (manifest name
-    /// → maximum tier for that import).
+    /// Builds the policy from configured caps (manifest name → maximum tier).
     pub fn from_caps(caps: HashMap<String, TrustTier>) -> Self {
         Self { caps }
     }
@@ -112,12 +97,9 @@ impl TrustPolicy {
         self.caps.get(argosy).copied().unwrap_or_default()
     }
 
-    /// The effective tier for one concept's `verified` claim:
-    ///
-    /// - [`Origin::Local`]: the claim verbatim (or [`UNVERIFIED`] when
-    ///   absent) — the local book is the user's own writing;
-    /// - [`Origin::Imported`]: `min(claim, configured cap)`, where an
-    ///   absent or unrecognized claim counts as [`TrustTier::Unverified`].
+    /// The effective tier for one concept's `verified` claim: local verbatim
+    /// (absent → [`UNVERIFIED`]); imported `min(claim, cap)`, absent or
+    /// unrecognized claims counting as [`TrustTier::Unverified`].
     pub fn effective(&self, origin: Origin, argosy: &str, claim: Option<&str>) -> String {
         match origin {
             Origin::Local => claim.unwrap_or(UNVERIFIED).trim().to_string(),
@@ -163,8 +145,7 @@ mod tests {
             assert_eq!(TrustTier::parse(tier.as_str()), Some(tier));
             assert_eq!(tier.as_str().parse::<TrustTier>().unwrap(), tier);
         }
-        // Whitespace-tolerant, casing-strict: an unknown spelling is not a
-        // trust signal.
+        // Whitespace-tolerant, casing-strict: an unknown spelling is not a trust signal.
         assert_eq!(
             TrustTier::parse("  human-reviewed "),
             Some(TrustTier::HumanReviewed)
@@ -185,8 +166,7 @@ mod tests {
                 "human-reviewed"
             );
             assert_eq!(p.effective(Origin::Local, "local", None), UNVERIFIED);
-            // An unconventional local claim is passed through untouched:
-            // local frontmatter is the user's own hand.
+            // An unconventional local claim passes through: the user's own hand.
             assert_eq!(
                 p.effective(Origin::Local, "local", Some("audited 2026-01")),
                 "audited 2026-01"
@@ -197,17 +177,14 @@ mod tests {
     #[test]
     fn imported_claims_are_capped_by_the_configured_tier() {
         let p = policy(&[("acme-shared", TrustTier::MachineConfirmed)]);
-        // Claim above the cap: capped.
         assert_eq!(
             p.effective(Origin::Imported, "acme-shared", Some("human-reviewed")),
             "machine-confirmed"
         );
-        // Claim at the cap: stands.
         assert_eq!(
             p.effective(Origin::Imported, "acme-shared", Some("machine-confirmed")),
             "machine-confirmed"
         );
-        // Claim below the cap: stands.
         let elevated = policy(&[("acme-shared", TrustTier::HumanReviewed)]);
         assert_eq!(
             elevated.effective(Origin::Imported, "acme-shared", Some("machine-confirmed")),

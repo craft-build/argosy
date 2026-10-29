@@ -387,23 +387,18 @@ const YAML_SRC: &str = r#"
 static YAML_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("yaml", &tree_sitter_yaml::LANGUAGE.into(), YAML_SRC));
 
-// TOML has no functions, classes, or imports, just nested tables of key/value
-// pairs, so `extract_toml_symbols` walks the tree directly instead of running
-// this query. The query is kept only so `all_queries_compile_against_grammar`
-// stays uniform across every language; the grammar declares no named fields on
-// `pair`, so the query matches the node itself rather than a keyed child.
+// Never run: `extract_toml_symbols` walks the tree directly. Kept only so
+// `all_queries_compile_against_grammar` stays uniform, and node-anchored
+// because the grammar declares no named fields on `pair`.
 const TOML_SRC: &str = "(pair) @const.def\n";
 static TOML_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("toml", &tree_sitter_toml_ng::LANGUAGE.into(), TOML_SRC));
 
-// SQL DDL: surface the shape of schema objects (tables, views, materialized
-// views, types, functions, triggers, indexes, schemas). DML (SELECT/INSERT/
-// UPDATE/DELETE) and ALTER/DROP are not matched, so they contribute no
-// symbols -- same noise filtering as other extractors that ignore usage nodes.
-// The `.` immediate-sibling anchor pins the name to the token right after the
-// leading keyword (trigger/index/schema names share their node type with later
-// references inside the same statement). tree-sitter-sequel as published has no
-// `create_procedure` node, so procedures are not captured here either.
+// DML and ALTER/DROP are deliberately unmatched, the same noise filtering as
+// other extractors. The `.` immediate-sibling anchor pins the name right after
+// the leading keyword, because trigger/index/schema names share their node
+// type with later references in the same statement. tree-sitter-sequel as
+// published has no `create_procedure` node, so procedures are not captured.
 const SQL_SRC: &str = r#"
 (create_table (object_reference) @class.name) @class.def
 (create_view (object_reference) @class.name) @class.def

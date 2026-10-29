@@ -1,15 +1,12 @@
-//! Invisible-Unicode stripping at index time (the RAG-poisoning defense):
-//! zero-width/bidi/tag characters never reach the embedded text, the bytes
-//! on disk never change, and the flag fires once — when the concept is
-//! embedded, not on every reconcile.
+//! Invisible-Unicode stripping at index time (the RAG-poisoning defense): stripped characters
+//! never reach the embedded text, disk bytes never change, and the flag fires once per concept.
 
 use super::*;
 use crate::index::chunk::chunk_concept;
 
 #[test]
 fn chunking_strips_and_counts_invisible_format_characters() {
-    // Zero-width space in the description; bidi override + pop, an
-    // invisible separator, and tag-spelled ASCII in the body.
+    // Zero-width space in the description; bidi override/pop, a separator, and tags in the body.
     let poisoned: Concept = concat!(
         "---\ntype: Note\ndescription: Deploy the \u{200B}service.\n---\n",
         "Deploy \u{202E}steps\u{202C}. \u{2063}Follow \u{E0073}\u{E0069}.\n"
@@ -67,13 +64,11 @@ fn reconcile_flags_stripped_concepts_once_and_never_touches_disk() {
         "says what stripping does not touch: {warning}"
     );
 
-    // The file on disk still carries the payload verbatim — it stays
-    // inspectable (and sidecar-verifiable); only the indexed text changed.
+    // The on-disk file still carries the payload — only the indexed text changed.
     let on_disk = fs::read_to_string(local.path().join("document/poisoned.md")).unwrap();
     assert!(on_disk.contains('\u{200B}'), "bytes unchanged: {on_disk:?}");
 
-    // A second reconcile is quiet: the store now holds the stripped
-    // text's hash, so an unchanged poisoned book does not re-warn.
+    // The store now holds the stripped text's hash, so the second reconcile stays quiet.
     let again = index.reconcile(&ctx).unwrap();
     assert!(again.warnings.is_empty(), "got {:?}", again.warnings);
     assert_eq!(again.unchanged, 1);

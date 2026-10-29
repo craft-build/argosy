@@ -123,9 +123,7 @@ fn ask_fails_open_when_the_endpoint_errors() {
 
 #[test]
 fn ask_candidates_collapse_passages_to_one_per_concept() {
-    // A long document splits into many passages; without collapsing, one
-    // document could fill the whole candidate list and the decision
-    // endpoint (which picks a *document*) would see duplicate options.
+    // Without collapsing, one long document could fill the list with duplicate options.
     let rig = rig();
     let root = rig._local.path().to_path_buf();
     let filler = "quasar telemetry handshake protocol ".repeat(60);

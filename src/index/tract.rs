@@ -1,10 +1,7 @@
 //! The tract-backed default [`EmbeddingProvider`], gated behind the
-//! `default-index` Cargo feature. The model runs natively in Rust through the
-//! `tract-onnx` crates — no ONNX runtime shared library; downloads use rustls,
-//! and the tokenization this provider performs uses the pure-Rust
-//! `fancy-regex` backend, with no live network needed except the first
-//! construction, which downloads the ONNX model (~90 MB) into a user-level
-//! cache ([`model_cache_dir`]); later runs load from the cache offline.
+//! `default-index` Cargo feature. The first construction downloads the ONNX
+//! model (~90 MB) into [`model_cache_dir`]; later runs load from the cache
+//! offline.
 
 use std::ffi::OsString;
 use std::fs;
@@ -22,35 +19,24 @@ use crate::error::{EmbeddingSnafu, IndexSnafu, IoSnafu, Result};
 
 use super::EmbeddingProvider;
 
-/// The Hugging Face repo holding the weights. Mirrors fastembed's prescribed
-/// default (`all-MiniLM-L6-v2`, 384-dim) so search behavior carries over
-/// unchanged across the backend swap.
+/// The Hugging Face repo holding the default MiniLM model's weights.
 const MODEL_REPO: &str = "sentence-transformers/all-MiniLM-L6-v2";
 
-/// The exact weights revision downloaded from [`MODEL_REPO`]. Pinning the
-/// commit keeps downloads — and therefore embeddings — reproducible even if
-/// the repo's `main` branch moves; bump it (and re-run a full index build,
-/// which the identity mismatch below forces) to take a new revision.
+/// The exact weights revision downloaded from [`MODEL_REPO`].
 const MODEL_REVISION: &str = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41";
 
-/// The ONNX graph file within [`MODEL_REPO`]; tract parses and optimizes this
-/// directly. Exported by sentence-transformers and emitting the encoder's
-/// `last_hidden_state` `(batch, seq, 384)` — pooling is applied in Rust below,
-/// exactly as the sentence-transformers pipeline does.
+/// The ONNX graph file within [`MODEL_REPO`]; it emits the encoder's raw
+/// `last_hidden_state` `(batch, seq, 384)` — pooling is applied in Rust.
 const MODEL_ONNX_FILE: &str = "onnx/model.onnx";
 
-/// The backend-major token carried in `model_id()` — the tract pin and
-/// [`MODEL_REVISION`] move together with it. Numeric drift within the same
-/// major is reported identically (mismatch is detected only at this
-/// granularity).
+/// The backend-major token carried in `model_id()`; the tract pin and
+/// [`MODEL_REVISION`] move together with it.
 const TRACT_BACKEND_VERSION: &str = "1";
 
-/// sentence-transformers' configured `max_seq_length` for this model
-/// (`sentence_bert_config.json`); texts are truncated to it.
+/// The MiniLM model's configured `max_seq_length` (`sentence_bert_config.json`).
 const MAX_SEQ_TOKENS: usize = 256;
 
-/// Texts per forward pass. Bounds peak memory; MiniLM-L6 is small enough
-/// that 32 keeps the CPU busy without ballooning activations.
+/// Texts per forward pass; 32 bounds peak memory while keeping the CPU busy.
 const EMBED_BATCH: usize = 32;
 
 /// all-MiniLM-L6-v2's vector width (the BERT `hidden_size`).
@@ -59,24 +45,20 @@ const MODEL_DIMENSIONS: usize = 384;
 /// The Hugging Face repo of the BGE-small model in the registry.
 const BGE_SMALL_REPO: &str = "BAAI/bge-small-en-v1.5";
 
-/// The exact weights revision of [`BGE_SMALL_REPO`]; same pinning contract
-/// as [`MODEL_REVISION`].
+/// The exact weights revision of [`BGE_SMALL_REPO`].
 const BGE_SMALL_REVISION: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 
 /// bge-small-en-v1.5's `max_seq_length`.
 const BGE_SMALL_MAX_SEQ_TOKENS: usize = 512;
 
 /// The instruction prefixed to *query-side* text for the BGE v1.5 family
-/// (documents are embedded bare) — the asymmetry the model was trained
-/// with; omitting it on queries silently degrades recall.
+/// (documents are embedded bare); omitting it silently degrades recall.
 const BGE_QUERY_INSTRUCTION: &str = "represent this sentence for searching relevant passages: ";
 
 /// bge-small-en-v1.5's vector width (same BERT hidden size as MiniLM).
 const BGE_SMALL_DIMENSIONS: usize = 384;
 
-/// How one sequence's embedding is derived from the encoder's
-/// `last_hidden_state` — the sentence-transformers post-processing each
-/// model family prescribes.
+/// How one sequence's embedding is derived from the encoder's `last_hidden_state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pooling {
     /// Attention-mask-weighted mean over token positions, then L2 norm.
@@ -93,24 +75,15 @@ fn embedding_failed(source: impl std::fmt::Display) -> crate::error::Error {
     .build()
 }
 
-/// The stable identity of a model —
-/// `tract/<repo>@tract-<backend-major>` (e.g. `...@tract-1`), derived from
-/// static metadata only: read-only callers like the CLI's `index status` can
-/// compare a store's recorded identity against the current model without
-/// loading (or downloading) it.
-///
-/// A vetted embedding model the default index can use. Selected by name
-/// from user configuration ([`ModelSpec::from_name`]); every property is
-/// compile-time pinned so embeddings stay reproducible and comparable
-/// within one `model_id`.
+/// A vetted embedding model the default index can use, selected by name
+/// ([`ModelSpec::from_name`]); every property is compile-time pinned so
+/// embeddings stay comparable within one `model_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelSpec {
-    /// `sentence-transformers/all-MiniLM-L6-v2` at the pinned revision:
-    /// 384-dim, ~90 MB, the long-standing default.
+    /// `sentence-transformers/all-MiniLM-L6-v2` at the pinned revision: 384-dim, ~90 MB.
     #[default]
     AllMinilmL6V2,
-    /// `BAAI/bge-small-en-v1.5` at the pinned revision: 384-dim with
-    /// CLS pooling — stronger retrieval per byte than MiniLM.
+    /// `BAAI/bge-small-en-v1.5` at the pinned revision: 384-dim, CLS pooling.
     BgeSmallEnV15,
 }
 
@@ -173,8 +146,7 @@ impl ModelSpec {
         }
     }
 
-    /// The instruction prefixed to query-side text, if the model is
-    /// asymmetric (document-side text is never prefixed).
+    /// The instruction prefixed to query-side text, if the model is asymmetric.
     fn query_instruction(self) -> Option<&'static str> {
         match self {
             ModelSpec::AllMinilmL6V2 => None,
@@ -182,14 +154,13 @@ impl ModelSpec {
         }
     }
 
-    /// The stable identity recorded in (and compared against) index
-    /// stores — see the backend-version caveat above.
+    /// The stable identity recorded in (and compared against) index stores:
+    /// `tract/<repo>@tract-<backend-major>`; same-major drift is not detected.
     pub fn model_id(self) -> String {
         format!("tract/{}@tract-{TRACT_BACKEND_VERSION}", self.repo())
     }
 
-    /// Resolves a configuration name to a spec; unknown names are the
-    /// caller's error to report (with [`ModelSpec::ALL`] as the valid set).
+    /// Resolves a configuration name to a spec; unknown names are the caller's error.
     pub fn from_name(name: &str) -> Option<Self> {
         ModelSpec::ALL
             .iter()
@@ -198,8 +169,7 @@ impl ModelSpec {
     }
 }
 
-/// The tokenizer plus the loaded, runnable ONNX encoder, bundled so the
-/// provider can own them under one mutex-guarded slot.
+/// The tokenizer plus the loaded, runnable ONNX encoder.
 struct Model {
     tokenizer: Tokenizer,
     encoder: Arc<Runnable>,
@@ -217,21 +187,17 @@ struct EmbedTimings {
 }
 
 impl Model {
-    /// Downloads any missing model files into `cache` (module docs), then
-    /// builds the tokenizer and the runnable encoder from the cached files.
+    /// Downloads missing model files into `cache`, then builds the tokenizer
+    /// and the runnable encoder.
     fn load(cache: &std::path::Path, spec: ModelSpec) -> Result<Self> {
-        // hf-hub 1.0: the sync client is `HFClientSync` (feature `blocking`);
-        // it owns its own background runtime, so calls from inside another
-        // tokio runtime (the MCP blocking pool) are safe. The revision is a
-        // per-download argument now, not a property of the repo handle.
+        // hf-hub's sync client owns its own background runtime, so calls
+        // from inside another tokio runtime (the MCP blocking pool) are safe.
         let client = hf_hub::HFClient::builder()
             .cache_dir(cache)
             .build_sync()
             .map_err(embedding_failed)?;
         let (owner, name) = hf_hub::split_id(spec.repo());
         let repo = client.model(owner, name);
-        // Cache-first lookups (default: `force_download` off): every file
-        // resolves offline once downloaded.
         let download = |file: &'static str| {
             repo.download_file()
                 .filename(file)
@@ -251,9 +217,8 @@ impl Model {
             .map_err(embedding_failed)?;
         tokenizer.with_padding(Some(PaddingParams::default()));
 
-        // Parse, optimize, and freeze the ONNX graph for the CPU runtime. The
-        // graph's batch/sequence axes stay symbolic, so every batch size and
-        // padded length runs against the same plan.
+        // The graph's batch/sequence axes stay symbolic, so every batch size
+        // and padded length runs against the same plan.
 
         let model = tract::onnx()
             .map_err(embedding_failed)?
@@ -302,15 +267,16 @@ impl Model {
     }
 
     /// Embeds one batch: tokenize (truncate to [`MAX_SEQ_TOKENS`], pad to the
-    /// batch longest), run the encoder, mean-pool over unmasked token
-    /// positions, L2-normalize.
+    /// batch longest), run the encoder, then pool and L2-normalize.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.embed_timed(texts, None)
     }
 
-    /// Avoid padding short concepts to the longest concept in the incoming
-    /// reconcile batch. Keep the returned vectors in their original order;
-    /// the index pairs each vector with its source concept by position.
+    /// Groups texts by token length so short ones are not padded to the
+    /// batch's longest.
+    ///
+    /// Returned vectors keep input order: the index pairs each vector with
+    /// its source concept by position.
     fn embed_grouped(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         const INFERENCE_BATCH: usize = 8;
         if texts.len() <= INFERENCE_BATCH {
@@ -413,11 +379,8 @@ impl Model {
     }
 }
 
-/// Sentence-transformers pooling: the attention-mask-weighted mean of the
-/// token positions, followed by L2 normalization — the exact post-processing
-/// the `all-MiniLM-L6-v2` pipeline applies to the encoder output. `hidden` is
-/// `(seq, hidden)` for one sequence, `mask` is `(seq,)` of 0/1; the result is
-/// `(hidden,)`.
+/// Masked mean over `hidden` `(seq, hidden)` with `mask` `(seq,)` of 0/1,
+/// then L2-normalized, as the sentence-transformers pipeline does.
 fn mean_pool_normalize(hidden: &[f32], mask: &[i64], seq: usize, dims: usize) -> Vec<f32> {
     let mut pooled = vec![0f32; dims];
     let mut count = 0f32;
@@ -450,9 +413,7 @@ fn cls_pool_normalize(cls: &[f32]) -> Vec<f32> {
     cls.iter().map(|x| x / norm).collect()
 }
 
-/// A local tract [`EmbeddingProvider`]: BERT text embeddings with no remote
-/// service (see module docs for the dependency posture and the
-/// first-run-download tolerance).
+/// A local tract [`EmbeddingProvider`]: BERT text embeddings with no remote service.
 pub struct TractProvider {
     model: Mutex<Model>,
     model_id: String,
@@ -469,15 +430,13 @@ impl TractProvider {
         ModelSpec::default().model_id()
     }
 
-    /// Creates a provider over the pinned default model. Downloads the model
-    /// on first use (module docs).
+    /// Creates a provider over the pinned default model.
     pub fn new_default() -> Result<Self> {
         Self::new_default_in(None)
     }
 
-    /// [`TractProvider::new_default`] with an explicit model-cache
-    /// directory (hosts pass a configured path); `None` resolves the cache
-    /// from the environment ([`model_cache_dir`]).
+    /// [`TractProvider::new_default`] with an explicit model-cache directory;
+    /// `None` resolves the cache from the environment ([`model_cache_dir`]).
     pub fn new_default_in(cache: Option<&Path>) -> Result<Self> {
         Self::new(ModelSpec::default(), cache)
     }
@@ -485,9 +444,8 @@ impl TractProvider {
     /// Creates a provider over a selected [`ModelSpec`], with the same
     /// cache resolution as [`TractProvider::new_default_in`].
     pub fn new(spec: ModelSpec, cache: Option<&Path>) -> Result<Self> {
-        // `$ARGOSY_EMBED_CACHE_DIR` / `$FASTEMBED_CACHE_DIR` outrank the
-        // caller's explicit path: an env-pinned cache must never be
-        // silently relocated by configuration.
+        // `$ARGOSY_EMBED_CACHE_DIR` / `$FASTEMBED_CACHE_DIR` outrank the caller's
+        // explicit path: an env-pinned cache must never be silently relocated.
         let cache = if env_cache_dir().is_some() {
             model_cache_dir()?
         } else {
@@ -510,11 +468,10 @@ impl TractProvider {
     }
 }
 
-/// Where the model weights are cached. One shared user-level cache:
-/// `$ARGOSY_EMBED_CACHE_DIR` when set (the now-legacy `$FASTEMBED_CACHE_DIR`
-/// is still honored), else `$XDG_CACHE_HOME/argosy/embeddings` (falling back
-/// to `~/.cache/argosy/embeddings`; on Windows the per-user cache lives
-/// under `AppData\Local`).
+/// Where the model weights are cached: `$ARGOSY_EMBED_CACHE_DIR` (the legacy
+/// `$FASTEMBED_CACHE_DIR` is still honored), else
+/// `$XDG_CACHE_HOME/argosy/embeddings`, else `~/.cache/argosy/embeddings`
+/// (`AppData\Local` on Windows).
 pub fn model_cache_dir() -> Result<PathBuf> {
     cache_dir_from(
         env_cache_dir(),
@@ -563,11 +520,11 @@ fn cache_dir_from(
     Ok(base.join("argosy").join("embeddings"))
 }
 
-/// A [`TractProvider`] that defers model construction — and the first-run
-/// ~90 MB download — to the first [`EmbeddingProvider::embed`] call. Identity
-/// and dimensionality derive from static metadata, so hash-diff previews
-/// never load the model and a serving process starts instantly;
-/// embedding-dependent ops fail with an actionable hint.
+/// A [`TractProvider`] that defers construction — and the first-run ~90 MB
+/// download — to the first [`EmbeddingProvider::embed`] call.
+///
+/// Identity and dimensions derive from static metadata, so a serving process
+/// starts instantly; embedding-dependent ops fail with an actionable hint.
 pub struct LazyTractProvider {
     model_id: String,
     dimensions: usize,
@@ -577,14 +534,12 @@ pub struct LazyTractProvider {
 }
 
 impl LazyTractProvider {
-    /// A lazy provider over the pinned default model. Never downloads or
-    /// constructs anything until the first `embed`.
+    /// A lazy provider over the pinned default model.
     pub fn new_default() -> Result<Self> {
         Self::new_default_in(None)
     }
 
-    /// [`LazyTractProvider::new_default`] with an explicit model-cache
-    /// directory used at first-`embed` load time.
+    /// [`LazyTractProvider::new_default`] with an explicit model-cache directory.
     pub fn new_default_in(cache: Option<PathBuf>) -> Result<Self> {
         Self::new(ModelSpec::default(), cache)
     }
@@ -603,7 +558,6 @@ impl LazyTractProvider {
 
 impl EmbeddingProvider for LazyTractProvider {
     fn model_id(&self) -> &str {
-        // Static metadata: no model load, works offline.
         &self.model_id
     }
 
@@ -700,11 +654,10 @@ impl EmbeddingProvider for TractProvider {
 mod tests {
     use super::*;
 
-    /// Reproducible opt-in inference microbenchmark. Example:
+    /// Opt-in inference microbenchmark. Example:
     /// `ARGOSY_BENCH_DOCS=.lab/workspace/.../document ARGOSY_BENCH_BATCH=16
     ///  ARGOSY_BENCH_GROUP=1 cargo test --release --lib
     ///  index::tract::tests::embedding_batch_benchmark -- --ignored --nocapture`
-    /// Pair with `/usr/bin/time -l` on macOS to capture peak resident memory.
     #[test]
     #[ignore = "loads model; explicitly opt in for inference benchmarking"]
     fn embedding_batch_benchmark() {
@@ -796,110 +749,8 @@ mod tests {
         assert!(minimum_cosine > 0.9999, "embedding drift after regrouping");
     }
 
-    // /// Compare an alternate graph or truncation limit against the default
-    // /// provider on a small corpus. This is a smoke test, not a quality gate.
-    // #[test]
-    // #[ignore = "set ARGOSY_BENCH_ONNX or ARGOSY_BENCH_TRUNCATE"]
-    // fn candidate_onnx_smoke_test() {
-    //     let path = std::env::var("ARGOSY_BENCH_ONNX").ok();
-    //     let truncation = std::env::var("ARGOSY_BENCH_TRUNCATE")
-    //         .ok()
-    //         .map(|value| value.parse::<usize>().unwrap());
-    //     assert!(
-    //         path.is_some() ^ truncation.is_some(),
-    //         "choose one candidate"
-    //     );
-    //     let baseline = Model::load(&model_cache_dir().unwrap()).unwrap();
-    //     let start = Instant::now();
-    //     let encoder = match &path {
-    //         Some(path) => tract_onnx::onnx()
-    //             .model_for_path(path)
-    //             .unwrap()
-    //             .into_optimized()
-    //             .unwrap()
-    //             .into_runnable()
-    //             .unwrap(),
-    //         None => baseline.encoder.clone(),
-    //     };
-    //     let preparation = start.elapsed();
-    //     let mut alternate = Model {
-    //         tokenizer: baseline.tokenizer.clone(),
-    //         encoder,
-    //     };
-    //     if let Some(max_length) = truncation {
-    //         assert!(max_length > 0 && max_length < MAX_SEQ_TOKENS);
-    //         alternate
-    //             .tokenizer
-    //             .with_truncation(Some(TruncationParams {
-    //                 max_length,
-    //                 ..Default::default()
-    //             }))
-    //             .unwrap();
-    //     }
-    //     let docs = std::env::var("ARGOSY_BENCH_DOCS").expect("set ARGOSY_BENCH_DOCS");
-    //     let mut paths: Vec<_> = fs::read_dir(docs)
-    //         .unwrap()
-    //         .map(|item| item.unwrap().path())
-    //         .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-    //         .collect();
-    //     paths.sort();
-    //     let texts: Vec<_> = paths
-    //         .iter()
-    //         .map(|path| {
-    //             fs::read_to_string(path)
-    //                 .unwrap()
-    //                 .splitn(3, "---\n")
-    //                 .nth(2)
-    //                 .unwrap()
-    //                 .to_string()
-    //         })
-    //         .collect();
-    //     let reference = baseline.embed_grouped(&texts).unwrap();
-    //     let start = Instant::now();
-    //     let vectors = alternate.embed_grouped(&texts).unwrap();
-    //     let elapsed = start.elapsed();
-    //     let minimum_cosine = vectors
-    //         .iter()
-    //         .zip(&reference)
-    //         .map(|(actual, expected)| actual.iter().zip(expected).map(|(a, b)| a * b).sum::<f32>())
-    //         .fold(1.0f32, f32::min);
-    //     let nearest = |all: &[Vec<f32>], index: usize| {
-    //         let mut ranked: Vec<_> = (0..all.len()).filter(|&i| i != index).collect();
-    //         ranked.sort_by(|&a, &b| {
-    //             let score = |i: usize| {
-    //                 all[index]
-    //                     .iter()
-    //                     .zip(&all[i])
-    //                     .map(|(x, y)| x * y)
-    //                     .sum::<f32>()
-    //             };
-    //             score(b).total_cmp(&score(a)).then_with(|| a.cmp(&b))
-    //         });
-    //         ranked.truncate(5);
-    //         ranked
-    //     };
-    //     let overlap: usize = (0..texts.len())
-    //         .map(|i| {
-    //             let actual = nearest(&vectors, i);
-    //             let expected = nearest(&reference, i);
-    //             actual.iter().filter(|item| expected.contains(item)).count()
-    //         })
-    //         .sum();
-    //     let top5_overlap = overlap as f64 / (texts.len() * 5) as f64;
-    //     println!(
-    //         "CANDIDATE path={} truncation={:?} concepts={} prepare_ms={:.2} embed_ms={:.2} \
-    //          min_cosine={minimum_cosine:.7} top5_overlap={top5_overlap:.4}",
-    //         path.as_deref().unwrap_or("default"),
-    //         truncation,
-    //         texts.len(),
-    //         preparation.as_secs_f64() * 1e3,
-    //         elapsed.as_secs_f64() * 1e3
-    //     );
-    // }
-
     #[test]
     fn cache_dir_precedence_and_fallbacks() {
-        // An explicit `$ARGOSY_EMBED_CACHE_DIR` wins and is honored verbatim.
         assert_eq!(
             cache_dir_from(
                 Some("/ec".into()),
@@ -909,12 +760,10 @@ mod tests {
             .unwrap(),
             PathBuf::from("/ec")
         );
-        // XDG next, namespaced under argosy/embeddings.
         assert_eq!(
             cache_dir_from(None, Some("/xdg".into()), Some("/home".into())).unwrap(),
             PathBuf::from("/xdg/argosy/embeddings")
         );
-        // HOME fallback when XDG_CACHE_HOME is unset.
         assert_eq!(
             cache_dir_from(None, None, Some("/home".into())).unwrap(),
             PathBuf::from("/home/.cache/argosy/embeddings")
@@ -934,15 +783,12 @@ mod tests {
 
     #[test]
     fn mean_pooling_masks_padding_and_normalizes() {
-        // Two positions of a 2-dim hidden state; the second is padding.
         let hidden = [1.0f32, 1.0, 2.0, 2.0];
         let mask = [1i64, 0];
         let out = mean_pool_normalize(&hidden, &mask, 2, 2);
-        // Masked mean [1, 1], L2-normalized to 1/sqrt(2).
         let unit = 1.0 / 2.0f32.sqrt();
         assert!((out[0] - unit).abs() < 1e-6 && (out[1] - unit).abs() < 1e-6);
 
-        // All positions unmasked: mean [0, 2/3], L2-normalized to [0, 1].
         let hidden = [-1.0f32, 1.0, 0.0, 0.0, 1.0, 1.0];
         let mask = [1i64, 1, 1];
         let out = mean_pool_normalize(&hidden, &mask, 3, 2);
@@ -979,8 +825,7 @@ mod tests {
         assert_eq!(bge.pooling(), Pooling::Cls);
         assert!(bge.model_id().contains("bge-small-en-v1.5"));
         assert_ne!(bge.model_id(), ModelSpec::default().model_id());
-        // Query-side asymmetry: BGE prefixes an instruction on queries;
-        // symmetric MiniLM does not.
+        // Query-side asymmetry: BGE prefixes an instruction, MiniLM does not.
         let instruction = bge
             .query_instruction()
             .expect("bge queries carry an instruction");
@@ -997,8 +842,7 @@ mod tests {
         assert_eq!(zero, vec![0.0, 0.0]);
     }
 
-    /// The single model test: needs network on a cold model cache, so it
-    /// never runs in default `cargo test`.
+    /// Needs network on a cold model cache, so it never runs in default `cargo test`.
     #[test]
     #[ignore = "downloads the model weights; run with --ignored"]
     fn default_model_embeds_384_dims_and_reports_a_stable_identity() {
@@ -1014,8 +858,7 @@ mod tests {
         let vectors = a.embed(&["borrow checker basics".to_string()]).unwrap();
         assert_eq!(vectors.len(), 1);
         assert_eq!(vectors[0].len(), 384);
-        // Normalized output: unit L2 norm (sentence-transformers pipelines
-        // normalize, and the cosine search on top of it assumes it).
+        // Unit L2 norm: the downstream cosine search assumes it.
         let norm: f32 = vectors[0].iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-3,

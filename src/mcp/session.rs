@@ -26,27 +26,23 @@ use super::{
     DEFAULT_PROJECT_TTL, UNVERIFIED,
 };
 
-/// One opened project: its argosy set and its index (hybrid retrieval),
-/// reconciled after every mutating tool — a written or deleted concept is
-/// visible to `search`/`search_rules` in the same session.
+/// One opened project: its argosy set and index, kept reconciled so writes and deletes
+/// are immediately visible to search.
 pub struct ProjectSession<P: EmbeddingProvider, S: VectorStore> {
     /// The active argosys: one local (writable) plus imported (read-only).
     pub context: ProjectContext,
     /// The hybrid index backing `search`/`search_rules`.
     pub index: Index<P, S>,
-    /// The hit count when a search tool call omits `k` (user
-    /// configuration; defaults to [`super::DEFAULT_K`]).
+    /// The hit count when a search tool call omits `k`.
     pub default_k: usize,
-    /// Provenance trust policy: the maximum tier each imported argosy may
-    /// carry (user configuration; empty means every import reads as
-    /// `unverified` whatever its concepts claim — see [`crate::trust`]).
+    /// The maximum tier each imported argosy may carry; empty reads every import as
+    /// `unverified`.
     pub trust: TrustPolicy,
 }
 
-/// Opens the [`ProjectSession`] for a project root: context discovery,
-/// index store, embedding provider, and first-open reconciliation.
-/// Returning `Err` fails only that tool call — the failed root is never
-/// cached, so a later `argosy init` is picked up by the next call.
+/// Opens the [`ProjectSession`] for a project root.
+///
+/// A failed open is never cached, so a later `argosy init` is picked up by the next call.
 pub type SessionFactory<P, S> = Arc<dyn Fn(&Path) -> Result<ProjectSession<P, S>> + Send + Sync>;
 
 /// One cached project session plus its recency stamp.
@@ -56,9 +52,8 @@ struct CachedSession<P: EmbeddingProvider, S: VectorStore> {
     touched: Instant,
 }
 
-/// Everything the server serves: one cached [`ProjectSession`] per project
-/// root, opened on first use through the [`SessionFactory`] and bounded by
-/// TTL/LRU. Mutations reconcile their session's index in place.
+/// Everything the server serves: one cached [`ProjectSession`] per project root, opened
+/// on first use and bounded by TTL/LRU.
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     factory: SessionFactory<P, S>,
     sessions: HashMap<PathBuf, CachedSession<P, S>>,
@@ -66,24 +61,18 @@ pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     session_ttl: Duration,
     /// Project-session cap.
     max_sessions: usize,
-    /// Overrides the argosy state root the `argosy://catalog` resource scans
-    /// (tests inject a tempdir; production resolves [`crate::pull::state_dir`]).
+    /// Overrides the argosy state root the `argosy://catalog` resource scans.
     catalog_state_root: Option<PathBuf>,
-    /// Overrides home redaction for the `argosy://catalog` resource. `None`
-    /// derives it from user configuration (see [`Self::with_catalog_state_root`]
-    /// usage and `read_catalog`).
+    /// Overrides home redaction for the `argosy://catalog` resource; `None` derives it
+    /// from user configuration.
     catalog_redact_home: Option<bool>,
-    /// The process-global decision endpoint, shared across every project
-    /// session (one user, one endpoint). [`crate::decision::Disabled`] until
-    /// configured via [`Self::with_decision`].
+    /// The process-global decision endpoint.
     #[cfg(feature = "decision")]
     decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
-    /// A session over an already-opened context and index. The session
-    /// factory normally runs [`Index::reconcile`] first, and every mutating
-    /// tool re-reconciles before returning.
+    /// A session over an already-opened context and index.
     pub fn new(context: ProjectContext, index: Index<P, S>) -> Self {
         Self {
             context,
@@ -99,26 +88,21 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         self
     }
 
-    /// Overrides the provenance trust policy (from user configuration —
-    /// see [`crate::config::Config::trust_policy`]). The default caps
-    /// every import at `unverified`.
+    /// Overrides the provenance trust policy; the default caps every import at `unverified`.
     pub fn with_trust_policy(mut self, trust: TrustPolicy) -> Self {
         self.trust = trust;
         self
     }
 
-    /// The effective trust tier of a concept in argosy `name`: verbatim
-    /// claims for the local book, configuration-capped for imports
-    /// ([`TrustPolicy::effective`]).
+    /// The effective trust tier of a concept: verbatim for the local book, capped for imports.
     fn verified_tier(&self, name: &str, concept: &Concept) -> String {
         let (_, origin) = self.origin_of(name);
         self.trust.effective_for(origin, name, concept)
     }
 
-    /// Which kind of argosy `name` is, as both the wire spelling
-    /// (`"local"`/`"imported"`) and the [`Origin`] the trust policy
-    /// wants. An unknown name reads as imported: like
-    /// [`ProjectContext::argosy_named`], the conservative answer.
+    /// The kind of argosy `name` is, as the wire spelling and the trust policy's [`Origin`].
+    ///
+    /// An unknown name reads as imported.
     fn origin_of(&self, name: &str) -> (&'static str, Origin) {
         match self.context.argosy_named(name) {
             Some(crate::context::ArgosyRef::Local(_)) => ("local", Origin::Local),
@@ -126,15 +110,14 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
     }
 
-    /// The source commit hits and reads report for argosy `name`:
-    /// the import's checkout commit, `None` for the local book.
+    /// The import's checkout commit for argosy `name`; `None` for the local book.
     fn source_commit(&self, name: &str) -> Option<String> {
         self.context.import_commit(name).map(str::to_string)
     }
 
-    /// Brings the index back in line with disk after a mutation. The write
-    /// already succeeded, so a failure here is reported, never fatal:
-    /// `Err` text goes to the caller's report as `index_error`.
+    /// Re-reconciles the index with disk after a mutation.
+    ///
+    /// The write already succeeded, so a failure is reported as `index_error`, never fatal.
     fn reindex(&mut self) -> std::result::Result<(), String> {
         self.index
             .reconcile(&self.context)
@@ -147,12 +130,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             })
     }
 
-    /// One index hit as the wire shape, tagged with its provenance
-    /// (`kind`, `trust`, `source_commit`) and its matched passage. The tier
-    /// needs the concept's own `verified` claim, so this reads the concept —
-    /// tolerantly, like the `search_rules` enrichment: a hit whose concept
-    /// can no longer be read (deleted mid-flight) keeps its index facets
-    /// with the floor trust tier rather than failing the whole search.
+    /// One index hit as the wire shape, tagged with its provenance and matched passage.
+    ///
+    /// A hit whose concept was deleted mid-flight keeps its index facets with the floor
+    /// trust tier rather than failing the whole search.
     fn hit_out(&self, hit: crate::index::SearchHit) -> SearchHitOut {
         let uri = hit.concept.to_uri();
         let argosy = hit.concept.argosy;
@@ -164,12 +145,9 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             .map(|c| self.verified_tier(&argosy, &c))
             .unwrap_or_else(|| UNVERIFIED.to_string());
         let source_commit = self.source_commit(&argosy);
-        // Bound the inline passage: a long section must not blow the tool
-        // result (or the `ask` candidate payload) up. The line range stays
-        // exact, so `read` is always the expansion path.
+        // Long passages must not blow up the tool result; the line range lets `read` expand.
         let passage = cap_chars(&hit.passage, MAX_PASSAGE_CHARS);
-        // Imported passages are free text from a shared book — the same
-        // untrusted-content delimiters full bodies get (SEC-1).
+        // Imported passages get the same untrusted-content delimiters as full bodies (SEC-1).
         let passage = if kind == "imported" {
             untrusted_wrap(&uri, &argosy, &trust, &passage)
         } else {
@@ -200,17 +178,15 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
     }
 
-    /// Hybrid search (BM25 + vector similarity, RRF-fused) across every
-    /// active argosy and indexed namespace. `argosy` is validated against
-    /// the active set and `namespaces` against the indexed names: an
-    /// unknown spelling of either errors rather than silently returning
+    /// Hybrid search (BM25 + vector similarity, RRF-fused) across every active
+    /// argosy and indexed namespace.
+    ///
+    /// An unknown `argosy` or `namespaces` spelling errors rather than silently returning
     /// nothing.
     pub fn search(&self, params: SearchParams) -> Result<SearchReport> {
         if let Some(names) = &params.namespaces {
             for name in names {
-                // Custom namespaces are not indexed, so anything outside the
-                // reserved set can never match — a typo must error, not
-                // return empty.
+                // Custom namespaces are not indexed: a typo must error, not return empty.
                 if !Namespace::RESERVED.contains(&name.as_str()) {
                     return Err(Error::Validation {
                         reason: format!(
@@ -246,9 +222,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         })
     }
 
-    /// The review-flow query: hybrid search restricted to styleguide
-    /// rules, optionally narrowed by `language`/`category` facets. Each hit
-    /// carries the rule body's `## Good` / `## Bad` sections when present.
+    /// The review-flow query: hybrid search over styleguide rules, narrowed by
+    /// `language`/`category` facets.
+    ///
+    /// Each hit carries the rule body's `## Good` / `## Bad` sections when present.
     pub fn search_rules(&self, params: RulesParams) -> Result<SearchReport> {
         let mut report = self.search(SearchParams {
             cwd: params.cwd,
@@ -262,9 +239,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             category: params.category,
         })?;
         for hit in &mut report.hits {
-            // Tolerant like rule listing: a hit whose concept can no longer
-            // be read (deleted mid-flight) keeps its index facets without
-            // examples rather than failing the whole search.
+            // A hit whose concept was deleted mid-flight keeps its facets, without examples.
             let Ok(concept) = self.context.read_uri(&hit.uri) else {
                 continue;
             };
@@ -272,9 +247,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                 continue;
             };
             let rule = crate::styleguide::StyleguideRule::from_parts(id, concept);
-            // Imported Good/Bad excerpts are free text from a shared book —
-            // the same untrusted-content delimiters full bodies get, so a
-            // crafted example cannot pose as reviewer instructions.
+            // Imported excerpts are wrapped: a crafted example cannot pose as instructions.
             let wrap = |section: Option<&str>| {
                 section.map(|text| {
                     if hit.kind == "imported" {
@@ -290,12 +263,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         Ok(report)
     }
 
-    /// Retrieval augmented by the decision endpoint: embed the question,
-    /// retrieve the top candidates, then, when a decision endpoint is
-    /// enabled, ask it which candidate (if any) answers the question. When
-    /// decisions are disabled, the endpoint is unavailable, or no candidate
-    /// matches, returns the embedding hits alone (`mode: "search"`); a
-    /// decision failure never fails the call.
+    /// Decision-augmented retrieval: the endpoint picks which candidate answers the question.
+    ///
+    /// When the endpoint is disabled, unavailable, finds no match, or fails, the embedding
+    /// hits alone are returned (`mode: "search"`).
     #[cfg(feature = "decision")]
     pub fn ask(
         &self,
@@ -304,8 +275,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     ) -> Result<AskReport> {
         use std::collections::BTreeMap;
 
-        // The endpoint's `choice` degrades past ~20 options; keep the
-        // candidate set small.
+        // The endpoint's `choice` degrades past ~20 options.
         const MAX_ASK_OPTIONS: usize = 10;
 
         let k = params.k.unwrap_or(self.default_k).max(1);
@@ -315,10 +285,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             filter: Filter::default(),
         };
         let hits = self.index.search(&self.context, &query)?;
-        // Passage-level hits: several chunks of one concept can be in the
-        // top-k. The decision endpoint asks "which document answers", so
-        // collapse to the best-ranked passage per concept first — otherwise
-        // one long document crowds out the rest of the candidate set.
+        // The endpoint asks "which document answers", so collapse to the best-ranked
+        // passage per concept; otherwise one long document crowds out the candidate set.
         let mut seen = std::collections::HashSet::new();
         let candidates: Vec<SearchHitOut> = hits
             .into_iter()
@@ -345,8 +313,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             });
         }
 
-        // Neutral option labels; the concept's URI and description carry the
-        // meaning the model reads.
+        // Neutral labels; the URI and description carry the meaning.
         let mut labels: Vec<(String, String)> = Vec::new();
         let mut criteria: BTreeMap<String, String> = BTreeMap::new();
         for (index, hit) in candidates.iter().take(MAX_ASK_OPTIONS).enumerate() {
@@ -418,9 +385,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
     }
 
-    /// Every skill across all active argosys, shadowed ones annotated, each
-    /// with origin and trust tier. (`params` carries only `cwd`, resolved
-    /// by [`McpState`] before dispatch.)
+    /// Every skill across all active argosys, shadowed ones annotated, each with origin
+    /// and trust tier.
     pub fn list_skills(&self, _params: ListSkillsParams) -> Result<SkillsReport> {
         let skills = self
             .context
@@ -452,8 +418,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         Ok(SkillsReport { skills })
     }
 
-    /// One skill by name, resolved by precedence across argosies, with its
-    /// entry-point content. Unknown names are errors, not empty results.
+    /// One skill by name, resolved by precedence across argosies, with its entry-point content.
     pub fn get_skill(&self, params: GetSkillParams) -> Result<SkillContent> {
         let Some(listing) = self.context.resolve_skill(&params.name)? else {
             return Err(Error::ConceptNotFound {
@@ -468,10 +433,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         let concept = self.context.resolve(&qid)?;
         let verified = self.verified_tier(&listing.argosy, &concept);
         let (kind, _) = self.origin_of(&listing.argosy);
-        // An imported skill's body is instructions from a shared book:
-        // delivered inside the untrusted-content delimiters so the client
-        // harness brackets it as data (SEC-1) behind its own confirmation
-        // policy (SEC-3).
+        // An imported skill's body is instructions from a shared book: wrapped
+        // as untrusted data (SEC-1), behind the client's confirmation policy (SEC-3).
         let content = if kind == "imported" {
             untrusted_wrap(
                 &qid.to_uri(),
@@ -496,30 +459,23 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         })
     }
 
-    /// Direct read of a concept in the local argosy by bundle-relative path.
-    /// Works for any namespace, used by harnesses for `memory/`.
+    /// Direct read of a concept in the local argosy by bundle-relative path (any namespace).
     pub fn read_memory(&self, params: ReadPathParams) -> Result<UriContent> {
         let name = self.context.local().manifest().name().to_string();
         let uri = format!("argosy://{name}/{}", params.path);
         let concept = self.context.read_uri(&uri)?;
         Ok(UriContent {
             uri,
-            // Local by construction: `read_memory` reads the writable book.
             kind: "local",
             trust: self.verified_tier(&name, &concept),
             content: concept.to_string(),
         })
     }
 
-    /// Direct read of a concept from any active argosy by bundle-relative
-    /// path — the read path for imported argosys, which the resource
-    /// surface cannot serve (the resource protocol carries no `cwd`).
-    /// A search hit from an imported argosy is fetched with `argosy` set to
-    /// the hit's `argosy` name. Imported content is untrusted input (SEC-1).
+    /// Direct read of a concept from any active argosy by bundle-relative path.
     ///
-    /// `start_line`/`end_line` slice the *body* (frontmatter excluded, 1-based)
-    /// for small-to-big expansion of a passage hit: a ranged read returns the
-    /// body slice alone, tagged with the range it covers.
+    /// `start_line`/`end_line` slice the *body* (frontmatter excluded, 1-based); a ranged
+    /// read returns the body slice alone, tagged with the range it covers.
     pub fn read_concept(&self, params: ReadParams) -> Result<ConceptContent> {
         let (name, kind) = match params.argosy.as_deref() {
             None => (self.context.local().manifest().name().to_string(), "local"),
@@ -541,9 +497,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             Some((slice, range)) => (slice, Some(range)),
             None => (concept.to_string(), None),
         };
-        // Imported bodies are wrapped in the untrusted-content delimiters
-        // (SEC-1); the local book is the user's own writing and is served
-        // as-is.
+        // Imported bodies are wrapped (SEC-1); the local book is served as-is.
         let content = if kind == "imported" {
             untrusted_wrap(&uri, &name, &trust, &raw)
         } else {
@@ -560,52 +514,44 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         })
     }
 
-    /// Writes a memory concept (full markdown with frontmatter) to the local
-    /// argosy, then reconciles the index so the concept is immediately
-    /// searchable. A missing or empty frontmatter `type` is auto-filled as
-    /// `type: Memory`. Overwrites report `action: "updated"` so silent
-    /// destruction is never silent. Only the local argosy is writable.
+    /// Writes a memory concept to the local argosy and reconciles the index.
+    ///
+    /// A missing or empty frontmatter `type` is auto-filled as `type: Memory`; overwrites
+    /// report `action: "updated"`.
     pub fn write_memory(&mut self, params: WriteParams) -> Result<WriteReport> {
         self.write_ns(params, LocalArgosy::write_memory)
     }
 
-    /// Deletes a memory concept from the local argosy, then reconciles the
-    /// index so the deletion is immediately reflected in search.
+    /// Deletes a memory concept from the local argosy and reconciles the index.
     pub fn delete_memory(&mut self, params: ReadPathParams) -> Result<WriteReport> {
         self.delete_ns(params, LocalArgosy::delete_memory)
     }
 
-    /// Writes a styleguide rule to the local argosy, enabling user rule
-    /// extension, then reconciles the index. The namespace contract is
-    /// validated by the library before anything touches disk.
+    /// Writes a styleguide rule to the local argosy and reconciles the index.
+    ///
+    /// Rule content is validated before anything touches disk.
     pub fn write_rule(&mut self, params: WriteParams) -> Result<WriteReport> {
         self.write_ns(params, LocalArgosy::write_rule)
     }
 
-    /// Deletes a styleguide rule from the local argosy, then reconciles the
-    /// index.
+    /// Deletes a styleguide rule from the local argosy and reconciles the index.
     pub fn delete_rule(&mut self, params: ReadPathParams) -> Result<WriteReport> {
         self.delete_ns(params, LocalArgosy::delete_rule)
     }
 
-    /// Writes a document concept (full markdown with frontmatter) to the
-    /// local argosy, then reconciles the index so the document is
-    /// immediately searchable. Overwrites report `action: "updated"`.
-    /// Only the local argosy is writable.
+    /// Writes a document concept to the local argosy and reconciles the index.
+    ///
+    /// Overwrites report `action: "updated"`.
     pub fn write_document(&mut self, params: WriteParams) -> Result<WriteReport> {
         self.write_ns(params, LocalArgosy::write_document)
     }
 
-    /// Deletes a document concept from the local argosy, then reconciles
-    /// the index so the deletion is immediately reflected in search.
+    /// Deletes a document concept from the local argosy and reconciles the index.
     pub fn delete_document(&mut self, params: ReadPathParams) -> Result<WriteReport> {
         self.delete_ns(params, LocalArgosy::delete_document)
     }
 
-    /// The shared write path behind the three write tools: identical
-    /// except for the [`LocalArgosy`] method each namespace delegates to,
-    /// so the id parsing, `created`/`updated` detection, and reporting
-    /// cannot drift between them.
+    /// The shared write path behind the three write tools; only the [`LocalArgosy`] method varies.
     fn write_ns(
         &mut self,
         params: WriteParams,
@@ -631,8 +577,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         Ok(self.deleted_report(params.path))
     }
 
-    /// True iff a concept file already exists at `id` — distinguishes
-    /// `created` from `updated` in write reports.
+    /// True iff a concept file already exists at `id`.
     fn existed(&self, id: &ConceptId) -> bool {
         self.context
             .local()
@@ -641,10 +586,9 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             .is_file()
     }
 
-    /// Promotes a memory concept to a curated target, then reconciles the
-    /// index so the new concept is immediately searchable. The outcome
-    /// carries the untouched source and the drafted concept for the
-    /// client's confirmation step.
+    /// Promotes a memory concept to a curated target and reconciles the index.
+    ///
+    /// The report carries the untouched source and the drafted concept for client confirmation.
     pub fn promote(&mut self, params: PromoteParams) -> Result<PromoteReport> {
         let source = concept_id(&params.source_path)?;
         let new_id = concept_id(&params.new_path)?;
@@ -685,9 +629,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         id: &ConceptId,
     ) -> WriteReport {
         let index_result = self.reindex();
-        // The file's real size, not the input's: the library may transform
-        // the concept on write (memory auto-fills `type: Memory`). An
-        // unreadable size is omitted rather than reported as 0.
+        // The file's real size, not the input's — the library may transform the concept.
         let bytes = std::fs::metadata(self.context.local().root().join(id.to_relative_path()))
             .ok()
             .map(|m| m.len());
@@ -711,9 +653,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
     }
 
-    /// Reads an `argosy://` resource: any concept in any active argosy via
-    /// [`ProjectContext::read_uri`], plus the pseudo-resources
-    /// [`ARGOSYS_URI`] and `argosy://<name>/_index`.
+    /// Reads an `argosy://` resource: any concept in any active argosy, plus the
+    /// pseudo-resources [`ARGOSYS_URI`] and `argosy://<name>/_index`.
     pub fn read_resource(&self, uri: &str) -> Result<ResourceBody> {
         if uri == ARGOSYS_URI {
             let infos = self.argosy_infos();
@@ -747,9 +688,8 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         }
         let concept = self.context.read_uri(uri)?;
         let qid = QualifiedConceptId::from_uri(uri).ok();
-        // Same provenance tagging and delimiters as the tool reads: the
-        // resource surface serves imported books too, and its text is the
-        // rawest channel an imported book has.
+        // Same provenance tagging and delimiters as the tool reads — the rawest channel
+        // an imported book has.
         let (text, meta) = match &qid {
             Some(q) => {
                 let (kind, _) = self.origin_of(&q.argosy);
@@ -791,8 +731,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             crate::context::ArgosyRef::Imported(argosy) => (argosy.root().to_path_buf(), false),
         };
         let path = root.join("index.md");
-        // The walk never follows symlinks (`SEC` containment policy); reads
-        // enforce the same: a symlinked root index.md is invisible, not read.
+        // Like the walk, reads never follow symlinks: a symlinked root index.md is invisible.
         let meta = std::fs::symlink_metadata(&path);
         let is_file = meta.as_ref().is_ok_and(|m| m.is_file());
         let is_symlink = meta.as_ref().is_ok_and(|m| m.file_type().is_symlink());
@@ -813,10 +752,11 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
         })
     }
 
-    /// The resources clients can browse statically: the argosys listing and
-    /// every bundle's root `_index`. Concepts themselves are too numerous to
-    /// enumerate; clients discover them via `_index` listings and resource
-    /// templates.
+    /// The resources clients can browse statically: the argosys listing and every bundle's
+    /// root `_index`.
+    ///
+    /// Concepts are too numerous to enumerate; clients discover them via `_index` listings
+    /// and resource templates.
     pub fn list_resources(&self) -> Result<Vec<ResourceDescriptor>> {
         let mut resources = vec![
             ResourceDescriptor {
@@ -866,8 +806,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             argosy_version: local.manifest().argosy_version().to_string(),
             okf_version: local.manifest().okf_version().map(str::to_string),
             kind: "local",
-            // The local book has no cap: each of its concepts relays its
-            // own `verified` claim verbatim.
+            // No argosy-level cap locally: each concept relays its own `verified` claim.
             trust: None,
             source_commit: None,
         }];
@@ -878,8 +817,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
                 argosy_version: imported.manifest().argosy_version().to_string(),
                 okf_version: imported.manifest().okf_version().map(str::to_string),
                 kind: "imported",
-                // The argosy-level statement of provenance trust: every
-                // concept in this book is held at or below this tier.
+                // The argosy-level cap: every concept in this book is at or below this tier.
                 trust: Some(self.trust.cap(name).as_str().to_string()),
                 source_commit: self.source_commit(name),
             });
@@ -917,10 +855,9 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self
     }
 
-    /// Forces home redaction for the `argosy://catalog` resource on,
-    /// overriding user configuration. There is deliberately no way to
-    /// force it off: the config is the only path to disabling redaction,
-    /// so an embedding host cannot leak absolute home paths by mistake.
+    /// Forces home redaction for the `argosy://catalog` resource on.
+    ///
+    /// There is deliberately no force-off; user config is the only path to disabling it.
     pub fn force_catalog_redaction(mut self) -> Self {
         self.catalog_redact_home = Some(true);
         self
@@ -943,8 +880,6 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// The session for `cwd` (the project root), opening it on first use.
-    /// The cache key is the canonicalized path; a failed open is never
-    /// cached. Idle sessions expire and reopen; the cap evicts the LRU.
     pub fn session(&mut self, cwd: impl AsRef<Path>) -> Result<&mut ProjectSession<P, S>> {
         let as_ref = cwd.as_ref();
         let key = as_ref
@@ -984,8 +919,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         Ok(&mut cached.session)
     }
 
-    /// The session for the process working directory — the project the
-    /// resource surface serves (the MCP resource protocol carries no cwd).
+    /// The session for the process working directory — the resource protocol carries no `cwd`.
     fn spawn_session(&mut self) -> Result<&mut ProjectSession<P, S>> {
         let cwd = std::env::current_dir().map_err(|source| Error::Io {
             path: ".".into(),
@@ -994,16 +928,15 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.session(cwd)
     }
 
-    /// Hybrid search (BM25 + vector similarity, RRF-fused) across every
-    /// active argosy of the project named by `params.cwd`. Unknown `argosy`
-    /// names error rather than silently returning nothing.
+    /// Hybrid search across every active argosy of the project named by `params.cwd`.
     pub fn search(&mut self, params: SearchParams) -> Result<SearchReport> {
         self.session(&params.cwd)?.search(params)
     }
 
-    /// The review-flow query for the project named by `params.cwd`. When a
-    /// decision endpoint is enabled, candidate rules are reranked by
-    /// applicability (advisory; a failure leaves the embedding order).
+    /// The review-flow query for the project named by `params.cwd`.
+    ///
+    /// With a decision endpoint enabled, rules are reranked by applicability; failures
+    /// leave the embedding order.
     pub fn search_rules(&mut self, params: RulesParams) -> Result<SearchReport> {
         #[cfg(feature = "decision")]
         let query = params.query.clone();
@@ -1030,8 +963,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.session(&params.cwd)?.list_skills(params)
     }
 
-    /// One skill of the project named by `params.cwd`, resolved by
-    /// precedence across argosies, with its entry-point content.
+    /// One skill of the project named by `params.cwd`.
     pub fn get_skill(&mut self, params: GetSkillParams) -> Result<SkillContent> {
         self.session(&params.cwd)?.get_skill(params)
     }
@@ -1042,8 +974,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.session(&params.cwd)?.read_memory(params)
     }
 
-    /// Direct read of a concept from any active argosy of the project named
-    /// by `params.cwd` (local by default, an import by manifest name).
+    /// Direct read of a concept from any active argosy of the project named by `params.cwd`.
     pub fn read(&mut self, params: ReadParams) -> Result<ConceptContent> {
         self.session(&params.cwd)?.read_concept(params)
     }
@@ -1099,11 +1030,10 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
         self.spawn_session()?.read_resource(uri)
     }
 
-    /// Builds the global catalog and renders it as markdown. Best-effort
-    /// configuration: a malformed config still yields a catalog (without a
-    /// model-mismatch check). Home paths are redacted per user configuration
-    /// — failing closed to redaction when the config cannot be read, since
-    /// served text is the channel most likely to be pasted to a third party.
+    /// Builds the global catalog and renders it as markdown.
+    ///
+    /// A malformed config still yields a catalog; home-path redaction fails closed when
+    /// the config cannot be read, since served text is the likeliest path to a third party.
     fn read_catalog(&self, uri: &str) -> Result<ResourceBody> {
         let state_root = match &self.catalog_state_root {
             Some(root) => root.clone(),
@@ -1139,21 +1069,17 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 }
 
-/// Wraps imported free text in the paired untrusted-content delimiters
-/// every imported surface uses (SEC-1). The attributes name the source —
-/// which book the bytes came from, at what effective trust tier — so an
-/// agent (or a person auditing a transcript) can weigh them, and the
-/// explicit open/close tags give the consuming model a bracket for
-/// content it must treat as data, never as instructions.
+/// Wraps imported free text in the untrusted-content delimiters (SEC-1).
+///
+/// The tags bracket content the consuming model must treat as data, never as instructions.
 pub(crate) fn untrusted_wrap(uri: &str, argosy: &str, trust: &str, body: &str) -> String {
     format!(
         "<untrusted-content argosy=\"{argosy}\" uri=\"{uri}\" trust=\"{trust}\">\n{body}\n</untrusted-content>"
     )
 }
 
-/// Inline passage cap for search hits: long enough for a full section,
-/// small enough that a k=8 result (or an `ask` candidate list) stays
-/// bounded. The line range is always exact, so `read` can widen.
+/// Inline passage cap for search hits: long enough for a full section, small enough to
+/// keep a k=8 result (or an `ask` candidate list) bounded.
 pub(crate) const MAX_PASSAGE_CHARS: usize = 2_000;
 
 /// Truncates to at most `max` characters (not bytes), appending an
@@ -1170,9 +1096,9 @@ pub(crate) fn cap_chars(text: &str, max: usize) -> String {
 }
 
 /// Slices a concept body to 1-based inclusive lines for a ranged `read`.
-/// `Ok(None)` means "no range requested — return the whole concept".
-/// Validation is actionable: a zero line, a reversed range, or a start past
-/// the body's end is an argument error, never a silent empty read.
+///
+/// A zero line, a reversed range, or a start past the body's end is an argument error,
+/// never a silent empty read.
 fn slice_body(
     concept: &Concept,
     start: Option<u32>,
@@ -1212,10 +1138,9 @@ fn slice_body(
     Ok(Some((slice, LineRange { start, end })))
 }
 
-/// Reorders styleguide hits by a decision endpoint's applicability score
-/// (advisory): one `noul` question per candidate over a shared state, so all
-/// candidates are scored in one forward pass. On any failure the embedding
-/// order is left untouched.
+/// Reorders styleguide hits by a decision endpoint's applicability score (advisory).
+///
+/// On any failure the embedding order is left untouched.
 #[cfg(feature = "decision")]
 fn rerank_rules(
     decision: &dyn crate::decision::DecisionProvider,

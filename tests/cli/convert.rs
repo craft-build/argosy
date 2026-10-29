@@ -64,7 +64,6 @@ fn convert_styleguide_imports_then_skips_on_rerun() {
             .is_file()
     );
 
-    // Re-runnable: everything already exists, nothing is overwritten.
     argosy_bin()
         .args(["convert", "styleguide", &yaml, &argosy_path])
         .assert()
@@ -97,8 +96,7 @@ fn convert_styleguide_fails_with_findings_on_malformed_rules() {
 
 #[test]
 fn convert_styleguide_without_yaml_files_warns_on_stderr() {
-    // Regression: a directory with no .yaml/.yml files (typo'd path) used
-    // to look like a clean no-op success.
+    // A directory with no .yaml/.yml files (typo'd path) must warn, not look like a no-op success.
     let scratch = TempDir::new().unwrap();
     let target = fixture_copy("valid-acme-billing", &scratch);
     let yaml_dir = scratch.path().join("yaml");
@@ -121,8 +119,6 @@ fn convert_styleguide_without_yaml_files_warns_on_stderr() {
 #[test]
 fn convert_styleguide_defaults_to_project_argosy() {
     let scratch = TempDir::new().unwrap();
-    // A project in the standard layout: rules land in the project's
-    // `default` bundle under the state dir when no argosy path is passed.
     let project = scratch.path().join("project");
     fs::create_dir_all(&project).unwrap();
     let xdg = xdg_state_home(&scratch);
@@ -171,10 +167,8 @@ fn convert_styleguide_without_project_argosy_fails() {
         .stderr(predicate::str::contains("argosy init"));
 }
 
-/// The index reconciles on every write, and an import is a bulk write:
-/// after `convert styleguide` the new rules must be searchable without a
-/// manual `index build`. Needs the model weights — run with
-/// `cargo test --test cli -- --ignored convert_import_reconciles_the_index`.
+/// The index reconciles on every write: converted rules are searchable
+/// without a manual `index build`.
 #[cfg(feature = "default-index")]
 #[test]
 #[ignore = "downloads the tract model weights (needs network on first run)"]
@@ -204,7 +198,6 @@ fn convert_import_reconciles_the_index() {
         .success()
         .stdout(predicate::str::contains("index reconciled: 1 upserted"));
 
-    // Searchable immediately, no `index build` in between.
     let output = argosy_bin()
         .args(["--json", "index", "query", "never call unwrap", "-k", "5"])
         .current_dir(&project)
@@ -221,5 +214,3 @@ fn convert_import_reconciles_the_index() {
     });
     assert!(found, "imported rule must be searchable: {hits}");
 }
-
-// -------------------------------------------------------------------- pull

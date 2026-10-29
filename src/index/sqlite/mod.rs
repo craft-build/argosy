@@ -1,14 +1,10 @@
-//! The `sqlite-vec`-backed default [`VectorStore`], gated behind the
-//! `default-index` Cargo feature: one `.argosy/index.db` file spanning all
-//! active argosys (`meta` model row, `units` facet rows, `unit_vectors`
-//! vec0 keyed by units rowid, `unit_fts` an FTS5 BM25 index over the units
-//! rows kept in sync by INSERT/DELETE triggers). Vector-leg scores are
-//! `-distance`, lexical-leg scores are `-bm25`; only the ordering within a
-//! leg is load-bearing — [`Index::search`](crate::index::Index::search)
-//! fuses the legs with reciprocal rank fusion. Filtered queries rank the
-//! full corpus (vec0 applies filters after its top-k, so `search` raises
-//! the SQL-side k to the row count and truncates after filtering — exact,
-//! at no asymptotic cost). v1 limit: single-process writers only.
+//! The `sqlite-vec`-backed default [`VectorStore`] behind the
+//! `default-index` feature: one index database at `.argosy/index.db`
+//! holding the `units` rows plus a vec0 vector table and an FTS5 BM25
+//! index over them.
+//!
+//! Filtered queries rank the full corpus — vec0 applies filters after its
+//! top-k. Single-process writers only.
 
 use std::ffi::{c_char, c_int};
 use std::fs;
@@ -30,11 +26,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-/// Schema generation (`PRAGMA user_version`); bump with a migration when the
-/// layout changes. v2 adds passage columns (`heading_path`, `start_line`,
-/// `end_line`, `passage`) and real multi-chunk concepts. v3 adds the
-/// `unit_fts` FTS5 BM25 index (external content over `units`, trigger
-/// maintained) — the lexical leg of hybrid search.
+/// Schema generation (`PRAGMA user_version`); bump when the layout changes.
 const SCHEMA_VERSION: i32 = 3;
 
 /// Pointer signature SQLite expects for an extension init function.
@@ -46,9 +38,8 @@ type SqliteExtensionInit = unsafe extern "C" fn(
 
 static REGISTER_EXTENSION: Once = Once::new();
 
-/// Registers sqlite-vec as an auto-extension so every subsequently opened
-/// connection sees `vec0` virtual tables. Idempotent; must run before the
-/// first [`Connection::open`].
+/// Registers sqlite-vec as an auto-extension; must run before the first
+/// [`Connection::open`].
 fn register_extension() {
     REGISTER_EXTENSION.call_once(|| {
         // SAFETY: `sqlite3_vec_init` has the C signature SQLite requires of
@@ -66,16 +57,13 @@ fn register_extension() {
     });
 }
 
-/// Serializes a float vector into the native-byte-order blob the vec0
-/// extension stores and matches against.
+/// Serializes a float vector into the vec0 native-byte-order blob format.
 pub(super) fn vec_to_bytes(vector: &[f32]) -> Vec<u8> {
     vector.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
 /// A [`VectorStore`] on a local `sqlite-vec` database file — the default
-/// backend of the binary and MCP server behind `default-index`.
-///
-/// See the module docs for the schema, scoring convention, and limitations.
+/// backend behind `default-index`.
 pub struct SqliteVecStore {
     path: PathBuf,
     conn: Connection,
@@ -84,10 +72,10 @@ pub struct SqliteVecStore {
 }
 
 impl SqliteVecStore {
-    /// Opens (creating on first use) the store at `path`, creating parent
-    /// directories as needed. Reopening an existing store restores the
-    /// recorded `model_id` and vector dimensionality from `meta`, which is
-    /// what lets a subsequent reconcile reuse the index with zero re-embeds.
+    /// Opens (creating on first use) the store at `path`.
+    ///
+    /// Reopening restores the recorded model and dimensions, so a later
+    /// reconcile reuses the index with zero re-embeds.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         register_extension();
         let path = path.as_ref();
@@ -99,8 +87,7 @@ impl SqliteVecStore {
         let conn = Connection::open(path).context(SqliteSnafu {
             path: path.to_path_buf(),
         })?;
-        // WAL: crash-safe single-writer operation (module docs: no
-        // multi-process guarantees).
+        // WAL: crash-safe single-writer operation.
         conn.pragma_update(None, "journal_mode", "WAL")
             .context(SqliteSnafu {
                 path: path.to_path_buf(),
@@ -109,17 +96,13 @@ impl SqliteVecStore {
             .context(SqliteSnafu {
                 path: path.to_path_buf(),
             })?;
-        // Wait briefly instead of failing instantly when another process
-        // (e.g. `argosy index build` while `argosy mcp` serves) holds the
-        // write lock: "database is locked" after 0 ms is cryptic, after
-        // 5 s it means something is genuinely stuck.
+        // Brief wait: another process (e.g. a parallel build) may hold the
+        // write lock.
         conn.pragma_update(None, "busy_timeout", 5_000)
             .context(SqliteSnafu {
                 path: path.to_path_buf(),
             })?;
-        // Stamp the schema version on fresh databases only; refuse dbs from a
-        // newer argosy rather than silently misreading their layout (and
-        // never clobber a higher version, so a future migration can notice).
+        // Stamp fresh databases only — never clobber a newer version.
         let existing_version = Self::check_schema_version(&conn, path)?;
         if existing_version == 0 {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -127,9 +110,8 @@ impl SqliteVecStore {
                     path: path.to_path_buf(),
                 })?;
         } else if existing_version < SCHEMA_VERSION as i64 {
-            // The index is a derived artifact (spec §3.1, IDX-1): the
-            // cheapest correct migration is to drop the old layout and let
-            // the next reconcile rebuild it from the bundles.
+            // A derived artifact: drop the old layout and let reconcile
+            // rebuild it from the bundles.
             conn.execute_batch(
                 "DROP TABLE IF EXISTS unit_fts;
                  DROP TABLE IF EXISTS unit_vectors; DROP TABLE IF EXISTS units;",
@@ -179,15 +161,10 @@ impl SqliteVecStore {
         .context(SqliteSnafu {
             path: path.to_path_buf(),
         })?;
-        // The lexical leg: one FTS5 BM25 index over the same rows the
-        // vector leg embeds. External content — the indexed text is read
-        // through from `units` on demand, so nothing is stored twice, and
-        // `units`-row lifecycles stay the single source of truth through
-        // the two triggers below: every upsert/delete/clear writes
-        // `units`, so the FTS index never drifts. `concept_id` is indexed
-        // alongside the passage so exact rule/document ids stay
-        // lexical-queryable even when the passage text never spells them
-        // out in full.
+        // External-content FTS5: the indexed text lives only in `units`,
+        // kept in sync by the triggers below. `concept_id` is indexed so
+        // exact ids stay lexical-queryable even when the passage omits
+        // them.
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(
                 passage, concept_id,
@@ -220,14 +197,11 @@ impl SqliteVecStore {
         })
     }
 
-    /// Opens the store strictly read-only (the CLI's `index status`): no
-    /// parent-directory creation, no WAL pragma, no schema DDL — the
-    /// database must already exist and remain untouched. This lets
-    /// `status` answer on a read-only or permission-locked index where
-    /// [`Self::open`] would fail before reading a single row.
+    /// Opens the store strictly read-only; the database must already exist.
     ///
-    /// A database from an older schema cannot be migrated without writing:
-    /// it fails with the rebuild hint instead of misreading columns.
+    /// Answers where [`Self::open`] would fail — a read-only or
+    /// permission-locked index (e.g. the CLI's `index status`). An older
+    /// schema fails with the rebuild hint instead of misreading columns.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         register_extension();
         let path = path.as_ref();
@@ -259,8 +233,8 @@ impl SqliteVecStore {
         })
     }
 
-    /// Refuses databases stamped with a newer schema than this build; returns
-    /// the on-disk `user_version` otherwise (read-only).
+    /// Returns the on-disk `user_version`, refusing a database from a newer
+    /// schema than this build.
     fn check_schema_version(conn: &Connection, db: &Path) -> Result<i64> {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -278,8 +252,7 @@ impl SqliteVecStore {
         Ok(version)
     }
 
-    /// Reads the recorded model identity and vector dimensionality from
-    /// `meta` (read-only).
+    /// Reads the recorded model identity and dimensionality from `meta`.
     fn read_meta(conn: &Connection, db: &Path) -> Result<(Option<String>, Option<usize>)> {
         conn.query_row(
             "SELECT model_id, dimensions FROM meta WHERE id = 1",
@@ -299,8 +272,9 @@ impl SqliteVecStore {
     }
 }
 
-/// Creates the `unit_vectors` vec0 table if absent. `dims` is an internal
-/// usize, never user input, so interpolation is safe here.
+/// Creates the `unit_vectors` vec0 table if absent.
+///
+/// `dims` is internal, never user input, so interpolation is safe.
 pub(super) fn ensure_vec_table(conn: &Connection, db: &Path, dims: usize) -> Result<()> {
     let exists: i64 = conn
         .query_row(
@@ -322,11 +296,12 @@ pub(super) fn ensure_vec_table(conn: &Connection, db: &Path, dims: usize) -> Res
     Ok(())
 }
 
-/// Forces a complete `TRUNCATE` WAL checkpoint on the store at `path`, so
-/// a raw file copy (`package --include-index`) snapshots the full state
-/// instead of a pre-checkpoint main file plus torn sidecars (excluded from
-/// the copy). A no-op on missing or non-database files (magic-checked);
-/// an incomplete checkpoint errors rather than packaging silently.
+/// Forces a complete `TRUNCATE` WAL checkpoint so a raw file copy
+/// (`package --include-index`) snapshots the full state instead of a main
+/// file plus torn sidecars.
+///
+/// A no-op on missing or non-database files; an incomplete checkpoint
+/// errors rather than packaging silently.
 pub fn checkpoint_wal(path: &Path) -> Result<()> {
     use std::io::Read as _;
 
@@ -341,8 +316,7 @@ pub fn checkpoint_wal(path: &Path) -> Result<()> {
     let conn = Connection::open(path).context(SqliteSnafu {
         path: path.to_path_buf(),
     })?;
-    // `(busy, wal frames, checkpointed frames)`; `-1` log/ckpt = not a WAL
-    // database (nothing to move, the copy is complete by definition).
+    // `(busy, log frames, checkpointed)`; `-1` means not a WAL database.
     let (busy, log, checkpointed): (i64, i64, i64) = conn
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -363,7 +337,7 @@ pub fn checkpoint_wal(path: &Path) -> Result<()> {
 }
 
 /// Rebuilds the [`QualifiedConceptId`] of a `units` row, failing loudly on
-/// a corrupt (unparseable) stored id rather than dropping the row silently.
+/// a corrupt stored id.
 fn row_key(argosy: String, namespace: String, concept_id: String) -> Result<QualifiedConceptId> {
     let id: ConceptId = concept_id.parse().map_err(|_| -> Error {
         IndexSnafu {
@@ -378,8 +352,8 @@ fn row_key(argosy: String, namespace: String, concept_id: String) -> Result<Qual
     })
 }
 
-/// True iff any filter field constrains the result set — the signal that
-/// `search` must rank the full corpus rather than trust vec0's top-k.
+/// True iff any filter is set — the signal to rank the full corpus rather
+/// than trust vec0's top-k.
 fn filter_is_active(filter: &Filter) -> bool {
     filter.namespaces.is_some()
         || filter.argosies.is_some()
@@ -390,10 +364,9 @@ fn filter_is_active(filter: &Filter) -> bool {
 }
 
 impl SqliteVecStore {
-    /// Shared read-side vec-table check (kept separate from `ensure_vec_table`
-    /// so `search` can stay `&self`). A zero-dimension store — the
-    /// lexical-only index built with `LexicalOnlyProvider` — never has a
-    /// vec0 table, and its vector leg is empty by construction.
+    /// Read-side vec-table check, separate from [`ensure_vec_table`] so
+    /// `search` stays `&self`; a zero-dimension (lexical-only) store never
+    /// has a vec0 table.
     fn ensure_vec_table_read(&self) -> Result<()> {
         let Some(dimensions) = self.dimensions else {
             return IndexSnafu {

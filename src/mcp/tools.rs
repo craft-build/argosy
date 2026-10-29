@@ -1,7 +1,6 @@
-//! The advertised tool set: definitions written for LLM consumers — what
-//! the tool does, when to reach for it, and on every mutating tool that
-//! imported argosys are read-only. Every argosy tool names its project with
-//! `cwd` (the project root).
+//! The advertised tool set, written for LLM consumers. Every argosy tool
+//! names its project with `cwd` (the project root); mutating tools touch
+//! only the local argosy, since imports are read-only.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -107,12 +106,10 @@ pub fn tool_definitions() -> Vec<Tool> {
     tools
 }
 
-/// The code-intelligence tool set (ported from Craft): filesystem-oriented
-/// companions to the knowledge tools, operating on the workspace directory
-/// the server was spawned in — every path parameter is confined to it.
-/// `astgrep` (with `apply`) and `conflicts` (with `resolve`) are the only
-/// ones that ever write, and both refuse to write a file that was not
-/// first read through these tools in the same session.
+/// The code-intelligence tools, confined to the workspace directory the
+/// server was spawned in. Only `astgrep` (with `apply`) and `conflicts`
+/// (with `resolve`) ever write, and both refuse to write a file not
+/// first read through these tools in this session.
 #[cfg(feature = "code-tools")]
 fn code_tool_definitions() -> Vec<Tool> {
     vec![

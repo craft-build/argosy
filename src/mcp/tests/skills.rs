@@ -16,7 +16,6 @@ fn trusted_rig() -> Rig {
 #[test]
 fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
     let mut rig = trusted_rig();
-    // A local skill shadowing the imported one by name.
     let shadow: Concept = ("---\n\
          type: Skill\n\
          description: Local override of the shared audit.\n\
@@ -40,7 +39,7 @@ fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
         .state
         .list_skills(ListSkillsParams { cwd: project() })
         .unwrap();
-    // 2 fixture skills + imported shared-audit + the local shadow just written.
+    // 2 fixture skills + imported shared-audit + the local shadow.
     assert_eq!(report.skills.len(), 4);
     let shared: Vec<_> = report
         .skills
@@ -66,7 +65,7 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
         cwd: project(),
         name: "shared-audit".to_string(),
     });
-    // No local override yet: the import wins and carries its tier.
+    // No local override yet: the import wins.
     let out = match out {
         Ok(out) => out,
         Err(e) => panic!("unexpected: {e}"),
@@ -74,8 +73,7 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
     assert_eq!(out.skill.argosy, "acme-shared");
     assert_eq!(out.skill.kind, "imported");
     assert_eq!(out.skill.verified, "machine-confirmed");
-    // An imported skill's body arrives inside the untrusted-content
-    // delimiters — instructions to bracket as data, not to follow.
+    // The body arrives in untrusted-content delimiters — data to bracket, not to follow.
     assert!(
         out.content.starts_with(
             "<untrusted-content argosy=\"acme-shared\" \
@@ -124,8 +122,7 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
 
 #[test]
 fn imported_tier_defaults_to_unverified_without_configured_trust() {
-    // The default rig has no `trust` configuration, so the import's
-    // `verified: machine-confirmed` self-claim must not relay.
+    // No `trust` configuration, so the `machine-confirmed` self-claim must not relay.
     let mut rig = rig();
     let report = rig
         .state
@@ -175,9 +172,7 @@ fn configured_cap_below_the_claim_caps_the_reported_tier() {
 
 #[test]
 fn local_claims_are_never_capped_by_the_import_policy() {
-    // A local skill that claims `human-reviewed` relays verbatim even when
-    // the trust section caps the local manifest name at `unverified`:
-    // caps apply to imports only — the local book is the user's own hand.
+    // Caps apply to imports only — the local book is the user's own hand.
     let mut rig = rig_with_trust(crate::trust::TrustPolicy::from_caps(
         [("acme-billing".to_string(), TrustTier::Unverified)]
             .into_iter()

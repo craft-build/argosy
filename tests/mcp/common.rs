@@ -1,7 +1,6 @@
-//! Shared fixtures and backend doubles for the MCP integration tests:
-//! a real rmcp client over a real rmcp `ServerHandler`, with local
-//! public-trait doubles (the crate's `pub(crate)` doubles are invisible
-//! from an integration test).
+//! Shared fixtures and backend doubles for the MCP integration tests: a real
+//! rmcp client over a real rmcp `ServerHandler`, plus local public-trait doubles
+//! (the crate's `pub(crate)` doubles are invisible from an integration test).
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,14 +14,11 @@ use argosy::mcp::{McpState, ProjectSession, SessionFactory};
 use argosy::{Concept, LocalArgosy, Result};
 use tempfile::TempDir;
 
-// --- Public-trait backend doubles (no model, no SQLite) -------------------
-
 pub(crate) const DIM: usize = 64;
 
-/// Deterministic token-bucket embedder: normalized tokens hash into
-/// dimensions, so overlapping texts score positively under cosine, like the
-/// crate's `MockEmbedder` (duplicated here because test doubles are
-/// `pub(crate)`).
+/// Deterministic token-bucket embedder: normalized tokens hash into dimensions.
+///
+/// Overlapping texts score positively under cosine similarity.
 pub(crate) struct FakeEmbedder;
 
 impl FakeEmbedder {
@@ -190,10 +186,7 @@ impl VectorStore for MemVec {
     }
 }
 
-// --- Fixtures --------------------------------------------------------------
-
-/// Copies a shared fixture into a fresh tempdir — tests must never mutate
-/// `tests/fixtures/` directly.
+/// Copies a shared fixture into a fresh tempdir: tests must never mutate `tests/fixtures/`.
 pub(crate) fn fixture_copy(name: &str) -> TempDir {
     fn copy_dir_all(src: &Path, dst: &Path) {
         for entry in fs::read_dir(src).unwrap() {
@@ -241,8 +234,7 @@ pub(crate) fn import_fixture() -> TempDir {
 pub(crate) struct Rig {
     pub(crate) _local: TempDir,
     pub(crate) _imported: TempDir,
-    /// The cwd tool calls name: the local fixture's path (the factory maps
-    /// any root to the fixture session, so this is a stand-in root).
+    /// The cwd passed to tool calls (any root maps to the fixture session).
     pub(crate) cwd: PathBuf,
     pub(crate) state: McpState<FakeEmbedder, MemVec>,
 }
@@ -253,10 +245,7 @@ pub(crate) fn rig() -> Rig {
     let factory: SessionFactory<FakeEmbedder, MemVec> = {
         let local_root = local.path().to_path_buf();
         let imported_root = imported.path().to_path_buf();
-        // The e2e double of the CLI's config-derived policy: the user has
-        // granted `acme-shared` exactly the tier its skill claims, so the
-        // wire tests see the granted tier relay (an unconfigured import
-        // would read as `unverified` whatever it claims).
+        // Grants the import its claimed tier; an unconfigured import reads `unverified`.
         let trust = argosy::trust::TrustPolicy::from_caps(
             [(
                 "acme-shared".to_string(),
@@ -280,18 +269,13 @@ pub(crate) fn rig() -> Rig {
     }
 }
 
-// --- Structural invariants -------------------------------------------------
-
-// --- Call helpers shared by the wire tests ---
-
 pub(crate) fn call(name: &str, arguments: serde_json::Value) -> rmcp::model::CallToolRequestParams {
     let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
     params.arguments = Some(arguments.as_object().expect("object args").clone());
     params
 }
 
-/// Unwraps a completed tool result; MRTR task/input outcomes are never
-/// emitted by this server.
+/// Unwraps a completed tool result; this server never emits MRTR task/input outcomes.
 pub(crate) fn complete(response: rmcp::model::CallToolResponse) -> rmcp::model::CallToolResult {
     match response {
         rmcp::model::CallToolResponse::Complete(result) => result,

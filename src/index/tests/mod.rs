@@ -1,6 +1,5 @@
-//! Test doubles and fixtures for the index: `MockEmbedder` + `MemStore`
-//! prove the provider/store traits with no model and no SQLite. `pub(crate)`
-//! so other modules' tests (sqlite, mcp) reuse the same doubles.
+//! Test doubles and fixtures for the index: `MockEmbedder` and `MemStore` prove the
+//! provider/store traits with no model and no SQLite. `pub(crate)` so other tests reuse them.
 
 mod chunk;
 mod reconcile;
@@ -19,14 +18,11 @@ use crate::concept::Concept;
 use crate::context::ProjectContext;
 use crate::error::Error;
 
-// --- Test doubles: MockEmbedder + MemStore prove trait sufficiency with
-// no model and no SQLite. ---
+// --- Test doubles ---
 
-/// Deterministic provider: every text maps to a normalized 128-dim
-/// vector by hashing its tokens into dims, so identical texts always
-/// score 1.0 against each other and overlapping texts score positively.
-// `pub(crate)` so the default backend's tests (`sqlite.rs`) can use
-// the same double against a real store.
+/// Deterministic provider: every text maps to a normalized 128-dim vector by hashing its tokens.
+///
+/// Identical texts score 1.0 against each other; overlapping texts score positively.
 pub(crate) struct MockEmbedder {
     model_id: String,
     dimension: usize,
@@ -74,10 +70,7 @@ impl EmbeddingProvider for MockEmbedder {
             .map(|text| {
                 let mut v = vec![0.0f32; self.dimension];
                 for token in text.split_whitespace() {
-                    // Word-like normalization (lowercase, punctuation
-                    // stripped) so prose tokens match query tokens; then
-                    // FNV-1a over the token, folded into one dim with a
-                    // deterministic sign and magnitude.
+                    // Lowercase and strip punctuation so prose tokens match query tokens.
                     let token = token
                         .trim_matches(|c: char| !c.is_alphanumeric())
                         .to_lowercase();
@@ -112,15 +105,13 @@ impl EmbeddingProvider for MockEmbedder {
     }
 }
 
-/// HashMap-backed store with brute-force cosine search honoring every
-/// `Filter` field, plus bookkeeping (`clears`, `removals`) for
-/// assertions. Implements the filter-then-truncate contract verbatim —
-/// the reference semantics the sqlite backend must match.
+/// HashMap-backed store with brute-force cosine search and assertion bookkeeping.
+///
+/// Implements the filter-then-truncate contract the sqlite backend must match.
 pub(crate) struct MemStore {
     model_id: Option<String>,
     dimensions: Option<usize>,
-    /// Keyed by concept plus chunk ordinal, so a multi-chunk concept keeps
-    /// every passage.
+    /// Keyed by concept plus chunk ordinal, so multi-chunk concepts keep every passage.
     units: HashMap<(QualifiedConceptId, u32), EmbeddingUnit>,
     clears: usize,
     removals: Vec<QualifiedConceptId>,
@@ -137,8 +128,7 @@ impl MemStore {
         }
     }
 
-    /// Pretends the store's contents were embedded at `dims` wide (the
-    /// model-switch read-path guard).
+    /// Pretends the store's contents were embedded at `dims` wide (the model-switch guard).
     pub(crate) fn with_recorded_dimensions(mut self, dims: usize) -> Self {
         self.dimensions = Some(dims);
         self
@@ -191,8 +181,7 @@ impl VectorStore for MemStore {
                 self.dimensions = Some(unit.vector.len());
             }
         }
-        // Replace the concept's units wholesale, like the sqlite store:
-        // collect the batch's concepts, drop their existing rows, insert.
+        // Replace each concept's units wholesale, like the sqlite store.
         let replaced: std::collections::HashSet<&QualifiedConceptId> =
             units.iter().map(|u| &u.concept).collect();
         self.units.retain(|(qid, _), _| !replaced.contains(qid));
@@ -254,9 +243,7 @@ impl VectorStore for MemStore {
                 passage: unit.passage.clone(),
             })
             .collect();
-        // Descending similarity. Ties keep whatever order the
-        // filter walk produced — never an argosy-precedence order,
-        // because the store never sees precedence.
+        // Descending similarity; ties keep walk order — the store never sees precedence.
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(k);
         Ok(hits)
@@ -301,8 +288,9 @@ fn filter_matches(unit: &EmbeddingUnit, filter: &Filter) -> bool {
 
 // --- Fixtures ---
 
-/// Writes a minimal openable argosy (manifest + the given files) into a
-/// fresh tempdir. `files` are `(bundle-relative path, file content)`.
+/// Writes a minimal openable argosy (manifest + the given files) into a fresh tempdir.
+///
+/// Each entry of `files` is `(bundle-relative path, file content)`.
 pub(crate) fn make_argosy(name: &str, files: &[(&str, &str)]) -> TempDir {
     let dir = TempDir::new().unwrap();
     let manifest = format!(
@@ -329,9 +317,8 @@ const MEMORY_GOTCHAS: &str =
 const RULE_CASE: &str = "---\ntype: Styleguide Rule\ndescription: Naming case.\nlanguage: rust\ncategory: naming\ntags: [style]\n---\n## Good\n```\nfoo\n```\n";
 const DOC_LOCKING: &str = "---\ntype: Note\ndescription: Database locking.\ntags: [database]\n---\nLock ordering and retries.\n";
 
-/// The standard fixture: a local argosy with one concept per default
-/// namespace, plus an imported one adding a document and — deliberately —
-/// a `memory/` entry that the default walk must skip.
+/// The standard fixture: one concept per default namespace, plus an imported argosy whose
+/// `memory/` entry the default walk must skip.
 pub(crate) fn fixture() -> (TempDir, TempDir, ProjectContext) {
     let local = make_argosy(
         "local",

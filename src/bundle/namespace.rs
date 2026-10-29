@@ -24,8 +24,7 @@ impl Namespace {
     /// The four reserved top-level namespace directory names.
     pub const RESERVED: [&'static str; 4] = ["document", "skill", "memory", "styleguide"];
 
-    /// Filenames that are reserved everywhere in a bundle: the root
-    /// manifest plus OKF's listing and change-history files.
+    /// Filenames reserved everywhere: the root manifest and OKF's listing/history files.
     pub const RESERVED_FILENAMES: [&'static str; 3] = ["argosy.md", "index.md", "log.md"];
 
     /// The directory name this namespace occupies under the bundle root.
@@ -46,8 +45,8 @@ impl Namespace {
 
     /// Classifies a top-level directory name: reserved names map to their
     /// variants, anything else to [`Namespace::Custom`].
-    /// Validity of the name itself (a directory called `index.md`, say) is a
-    /// separate question answered by validation.
+    ///
+    /// Validity of the name itself is a separate question answered by validation.
     pub fn from_dir_name(name: &str) -> Self {
         match name {
             "document" => Self::Document,
@@ -59,10 +58,7 @@ impl Namespace {
     }
 
     /// Builds a [`Namespace::Custom`] after validating the name is a single
-    /// safe path component — empty names, `.`/`..`, and separators are
-    /// rejected, since anything else could traverse out of the bundle root
-    /// when joined under it. (`from_dir_name` needs no check: it classifies
-    /// names from `read_dir`, which are single components by construction.)
+    /// safe path component, so joining it cannot traverse out of the bundle.
     pub fn custom(name: &str) -> Result<Self> {
         ensure!(
             is_safe_component(name),
@@ -73,16 +69,14 @@ impl Namespace {
         Ok(Self::Custom(name.to_string()))
     }
 
-    /// `index.md` or `log.md` — OKF listing/history files that never count as
-    /// concepts.
+    /// `index.md` or `log.md` — OKF listing/history files, never concepts.
     pub(crate) fn is_listing_file(name: &str) -> bool {
         name == "index.md" || name == "log.md"
     }
 }
 
 impl serde::Serialize for Namespace {
-    /// Serializes as the directory name (`document`, `custom-name`,...) so
-    /// machine consumers see the spelling used on disk and in URIs.
+    /// Serializes as the directory name, the spelling used on disk and in URIs.
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,

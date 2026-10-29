@@ -1,5 +1,4 @@
-//! The rmcp wrapper: the [`ServerHandler`] over [`McpState`]. Dispatch
-//! only — argument parsing, outcome serialization, error mapping.
+//! The rmcp wrapper: the [`ServerHandler`] over [`McpState`], dispatch only.
 
 use std::sync::Arc;
 
@@ -26,23 +25,20 @@ use super::prompts::{get_prompt_result, prompt_definitions};
 use super::session::McpState;
 use super::tools::tool_definitions;
 
-// SEP-2549 cache hints: `ttlMs`/`cacheScope` are REQUIRED on list/read
-// results under protocol `2026-07-28`; omitting them fails strict clients.
-// Static listings cache publicly for an hour; per-user resource listings
-// and reads stay private and never fresh from cache.
+// SEP-2549: `ttlMs`/`cacheScope` are required on list/read results under
+// protocol `2026-07-28` — omitting them fails strict clients. Static
+// listings cache publicly for an hour; dynamic results never do.
 const STATIC_LIST_TTL_MS: u64 = 3_600_000;
 const DYNAMIC_RESULT_TTL_MS: u64 = 0;
 
-/// The rmcp [`ServerHandler`] over [`McpState`]. Dispatch only: argument
-/// parsing, outcome serialization, error mapping. State sits behind a
+/// The rmcp [`ServerHandler`] over [`McpState`]. State sits behind a
 /// shared [`Mutex`] because backends are `Send`-but-not-`Sync` while
-/// `ServerHandler` requires `Sync`; requests execute serially — also the
-/// only sane order for mutating tools over a single WAL database.
+/// `ServerHandler` requires `Sync`; serial execution is also what the
+/// mutating tools need over the single WAL database.
 pub struct ArgosyMcpServer<P: EmbeddingProvider, S: VectorStore> {
     /// The handler state, shared across sessions; locked per request.
     pub state: Arc<Mutex<McpState<P, S>>>,
-    /// Shared code-tool state (stale-read tracker + per-root repomap
-    /// caches). Code-tool dispatch never takes the `state` lock.
+    /// Shared code-tool state; its dispatch never takes the `state` lock.
     #[cfg(feature = "code-tools")]
     pub code: Arc<CodeTools>,
 }
@@ -58,12 +54,10 @@ impl<P: EmbeddingProvider, S: VectorStore> Clone for ArgosyMcpServer<P, S> {
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
-    /// Wraps multi-project state for serving. Code tools get a fresh
-    /// [`CodeTools`] anchored to the process cwd; override for tests
-    /// with [`Self::with_code_tools`].
+    /// Wraps multi-project state for serving; code tools anchor to the
+    /// process cwd ([`Self::with_code_tools`] overrides).
     pub fn new(state: McpState<P, S>) -> Self {
-        // The decision endpoint is shared: the review tools score findings
-        // with the same provider the knowledge tools rerank/ask through.
+        // The decision endpoint is shared with the knowledge tools' rerank/ask.
         #[cfg(feature = "code-tools")]
         let code = {
             #[allow(unused_mut)]
@@ -81,8 +75,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
         }
     }
 
-    /// Overrides the code-tool state (tests inject a known cwd/tracker;
-    /// `argosy mcp` applies the user's `code_tools` configuration here).
+    /// Overrides the code-tool state; `argosy mcp` applies user config here.
     #[cfg(feature = "code-tools")]
     pub fn with_code_tools(mut self, code: Arc<CodeTools>) -> Self {
         self.code = code;
@@ -94,8 +87,7 @@ fn tool_error(err: &Error) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(err.to_string())])
 }
 
-/// Base server instructions: the knowledge-tool posture (also the full
-/// text when the `code-tools` feature is compiled out).
+/// Base server instructions (the full text when `code-tools` is compiled out).
 const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concepts via argosy:// resources; \
                  the argosy://catalog resource lists every project under the state dir (roots, \
                  imports, counts, index status). manage documents, memory, and styleguide rules \
@@ -125,8 +117,7 @@ const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concep
                  verification and is not served. Confirmation policy is your \
                  decision.";
 
-/// The full `instructions`, extended with the decision and code-tools
-/// sentences when their features are compiled in.
+/// The full `instructions`, extended per compiled-in features.
 fn server_instructions() -> String {
     let mut text = INSTRUCTIONS_BASE.to_string();
     #[cfg(feature = "decision")]
@@ -152,9 +143,7 @@ fn server_instructions() -> String {
     text
 }
 
-/// Maps a successful, serde-serializable outcome to a structured tool
-/// result (structuredContent plus the same JSON as text, for clients that
-/// don't read structured output).
+/// Serializes a successful outcome to structuredContent plus the same JSON as text.
 fn structured<T: Serialize>(out: &T) -> CallToolResult {
     let value = serde_json::to_value(out).expect("tool outcome serializes");
     CallToolResult::structured(value)
@@ -166,11 +155,10 @@ fn invalid_params(err: serde_json::Error) -> CallToolResult {
     ))])
 }
 
-// Parses arguments, runs the handler on the blocking pool with the state
-// lock held, and renders the outcome. Argosy handlers block by nature
-// (argosy walks, SQLite, model inference), so they must not sit on an
-// async runtime worker; `blocking_lock` keeps requests serialized.
-// Actionable failures are tool-level errors (`isError`), never protocol ones.
+// Handlers block by nature (argosy walks, SQLite, model inference), so
+// they must not sit on an async runtime worker; `blocking_lock` keeps
+// requests serialized. Actionable failures are tool-level (`isError`),
+// never protocol errors.
 macro_rules! dispatch {
     ($state:expr, $args:expr, $method:ident : $ty:ty) => {{
         match serde_json::from_value::<$ty>($args) {
@@ -194,9 +182,8 @@ macro_rules! dispatch {
     }};
 }
 
-/// The code-tool sibling of [`dispatch`]: handlers are synchronous and
-/// walk directories / parse grammars, so they run on the blocking pool.
-/// Errors stay tool-level (`isError`), exactly like the argosy tools.
+/// The code-tool sibling of [`dispatch`]; sync handlers run on the
+/// blocking pool, errors stay tool-level.
 #[cfg(feature = "code-tools")]
 macro_rules! dispatch_code {
     ($code:expr, $args:expr, $handler:expr, $ty:ty) => {{
@@ -217,9 +204,8 @@ macro_rules! dispatch_code {
     }};
 }
 
-/// Routes a code-tool call to its sync handler. `None` when the name is
-/// not a code tool (fall through to the argosy tools). Kept in one place
-/// next to the name filter in `call_tool` so the two cannot drift.
+/// Routes a code-tool call to its sync handler; `None` when not a code
+/// tool. Pairs with the name filter in `call_tool` so they cannot drift.
 #[cfg(feature = "code-tools")]
 async fn dispatch_code_tool(
     code: Arc<CodeTools>,
@@ -336,8 +322,7 @@ where
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = std::result::Result<ListPromptsResult, McpError>> + '_
     {
-        // Static definitions, so no state lock is needed here — unlike
-        // call_tool, whose handlers reconcile the index.
+        // Static definitions, so no state lock is needed here.
         std::future::ready(Ok(ListPromptsResult::with_all_items(prompt_definitions())
             .with_ttl_ms(STATIC_LIST_TTL_MS)
             .with_cache_scope(CacheScope::Public)))
@@ -350,9 +335,8 @@ where
     ) -> impl std::future::Future<Output = std::result::Result<GetPromptResponse, McpError>> + '_
     {
         match get_prompt_result(&request.name, request.arguments.as_ref()) {
-            // An unknown prompt name is unroutable — the same policy as
-            // call_tool's unknown tool name. Invalid or missing arguments are
-            // request errors so clients can correct their prompt invocation.
+            // Unknown names are unroutable (call_tool's policy); bad
+            // arguments are request errors so clients can correct them.
             Ok(None) => {
                 std::future::ready(Err(McpError::method_not_found::<GetPromptRequestMethod>()))
             }
@@ -375,8 +359,7 @@ where
         let code = Arc::clone(&self.code);
         async move {
             // Code tools first: they share no state with the argosy tools,
-            // so they run on the blocking pool without the state lock — no
-            // contention with index operations. The name filter mirrors
+            // so they skip the state lock. The name filter mirrors
             // `dispatch_code_tool` (one test per tool pins the pairing).
             #[cfg(feature = "code-tools")]
             if matches!(
@@ -398,9 +381,8 @@ where
                     .expect("the name filter mirrors dispatch_code_tool");
                 return Ok(result.into());
             }
-            // Mutating tools take `&mut self` (they reconcile the index
-            // after writing); read tools borrow through the same guard.
-            // Both run on the blocking pool — see `dispatch`.
+            // Mutating tools reconcile the index after writing; both kinds
+            // run under the state lock via `dispatch`.
             let known = match name.as_str() {
                 "search" => Some(dispatch!(lock, args, search : SearchParams)),
                 "list_skills" => Some(dispatch!(lock, args, list_skills : ListSkillsParams)),
@@ -420,8 +402,8 @@ where
                 _ => None,
             };
             match known {
-                // An unknown tool name is unroutable — the one protocol
-                // error call_tool legitimately returns.
+                // An unknown tool name is unroutable — the only protocol
+                // error call_tool returns.
                 None => Err(McpError::method_not_found::<
                     rmcp::model::CallToolRequestMethod,
                 >()),
@@ -438,8 +420,7 @@ where
     {
         let lock = Arc::clone(&self.state);
         async move {
-            // Same discipline as tool dispatch: the handler walks argosys
-            // (and may open a session), so it runs on the blocking pool.
+            // The handler walks argosys (may open a session): blocking pool.
             let descriptors = tokio::task::spawn_blocking(move || {
                 let state = &mut *lock.blocking_lock();
                 state.list_resources()
@@ -474,9 +455,7 @@ where
         let uri = request.uri;
         let lock = Arc::clone(&self.state);
         async move {
-            // Same discipline as tool dispatch: reading a concept (and
-            // possibly opening the session that first reconciles) is
-            // blocking work.
+            // Reading may first-open the session that reconciles: blocking pool.
             let body = tokio::task::spawn_blocking(move || {
                 let state = &mut *lock.blocking_lock();
                 state.read_resource(&uri)
@@ -501,9 +480,8 @@ where
     }
 }
 
-/// Unknown argosy/concept/URI spellings — and a spawn directory with no
-/// argosy at all (the resource surface's project) — are
-/// resource-not-found; anything else (I/O, YAML) is an internal error.
+/// Unknown argosy/concept/URI spellings (and a spawn directory with no
+/// argosy) are resource-not-found; anything else is an internal error.
 fn resource_error(err: Error) -> McpError {
     match err {
         Error::UnknownArgosy { .. }

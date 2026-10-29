@@ -1,26 +1,9 @@
-//! Workspace code-intelligence tools, ported from Craft: `outline`, `zoom`,
-//! `astgrep`, `conflicts`, `inspect`, `callgraph`, `repomap`, and in-process
-//! review sessions.
+//! Workspace code-intelligence tools: `outline`, `zoom`, `astgrep`, `conflicts`,
+//! `inspect`, `callgraph`, `repomap`, and review sessions.
 //!
-//! These tools know nothing about argosy bundles — they operate on the
-//! workspace filesystem the host process was spawned in, which makes them a
-//! natural companion to the knowledge tools for any coding harness. Handlers
-//! are **synchronous, unit-testable functions** of `(&CodeTools, Params)`
-//! (the same layering discipline as `McpState`); the MCP layer in
-//! [`crate::mcp`] dispatches them on the blocking pool.
-//!
-//! **Path containment**: unless opted out via user configuration
-//! (`code_tools.allow_external_paths`), every path parameter resolves
-//! inside the workspace root — the same defensive discipline as the
-//! knowledge write layer in `crate::local::ops`.
-//!
-//! **stdout discipline**: when served over MCP, stdout is the protocol
-//! channel. These modules never print; the only diagnostics are `tracing`
-//! calls, which are no-ops without a subscriber.
-//!
-//! Port notes: Craft's async `FsBackend` indirection, permission scopes, and
-//! tool registry are dropped; everything else keeps Craft's structure and
-//! names so future diffs stay readable.
+//! Handlers are synchronous (the MCP layer dispatches them on the blocking
+//! pool), every path parameter stays inside the workspace root unless the user
+//! opts out, and these modules never print — stdout is the MCP protocol channel.
 
 pub mod astgrep;
 pub mod callgraph;
@@ -42,8 +25,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::error::{Error, Result};
 
-/// Process cwd, captured once at first use — the anchor for relative paths
-/// and for display-shortening (Craft does the same).
+/// Process cwd captured once at first use: the anchor for relative paths and display shortening.
 static CWD: LazyLock<Option<PathBuf>> = LazyLock::new(|| env::current_dir().ok());
 
 /// `$HOME`, for `~` expansion and `~/` display shortening.
@@ -53,33 +35,21 @@ static HOME: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
         .map(PathBuf::from)
 });
 
-/// Shared state for the code tools: the stale-read guard, one cached
-/// [`RepoMap`] per root, and the workspace-root containment boundary.
-/// Everything is interior-mutable, so a single `Arc<CodeTools>` is shared
-/// by every tool call without locking the argosy state.
+/// Shared state for the code tools: the stale-read guard, cached
+/// [`RepoMap`]s, and the workspace-root containment boundary.
 pub struct CodeTools {
-    /// Files read through these tools, by (canonical path, mtime). A write
-    /// (`astgrep` apply, `conflicts` resolve) is refused when the file
-    /// changed since the last read — or was never read at all.
+    /// Files read through these tools; a write is refused if the file is stale or unread.
     tracker: FileReadTracker,
-    /// One `RepoMap` per canonical root so the tags/render caches survive
-    /// across calls (they are signature-checked against disk mtimes anyway).
+    /// One cached `RepoMap` per canonical root.
     repo_maps: Mutex<HashMap<PathBuf, RepoMap>>,
-    /// Serializes mutating runs (`astgrep` apply, `conflicts` resolve). The
-    /// stale-read guard alone is check-then-act over shared files: two
-    /// concurrent applies both pass the check and the second write silently
-    /// wins. Holding this lock across a whole mutating run closes that
-    /// window; read-only runs never take it.
+    /// Serializes mutating runs (`astgrep` apply, `conflicts` resolve): the
+    /// stale-read guard alone is check-then-act, so two applies could both pass.
     write_lock: Mutex<()>,
-    /// Diff snapshots and findings, keyed by the opaque id returned to the
-    /// MCP caller.
+    /// Diff snapshots and findings, keyed by the opaque id returned to the caller.
     reviews: review::ReviewManager,
-    /// The workspace root every resolved path must stay inside
-    /// (canonical; defaults to the process cwd) — the containment
-    /// boundary for all path parameters.
+    /// Canonical workspace root (the process cwd by default) that every path must stay inside.
     root: PathBuf,
-    /// User-config opt-out from root confinement
-    /// (`code_tools.allow_external_paths`).
+    /// User-config opt-out from root confinement (`code_tools.allow_external_paths`).
     allow_external_paths: bool,
 }
 
@@ -96,8 +66,7 @@ impl Default for CodeTools {
     }
 }
 
-/// The containment root: the process cwd, canonicalized so symlinked
-/// spellings of the same directory compare equal.
+/// The containment root: the process cwd, canonicalized so symlinked spellings compare equal.
 fn default_root() -> PathBuf {
     env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
@@ -106,8 +75,7 @@ fn default_root() -> PathBuf {
 
 impl CodeTools {
     /// Anchors the tools at `root` (canonicalized): relative paths resolve
-    /// against it and absolute paths must stay inside it. The default root
-    /// is the process cwd; tests use this to confine a tempdir workspace.
+    /// against it and absolute paths must stay inside it.
     pub fn with_root(mut self, root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
         self.root = root.canonicalize().unwrap_or(root);
@@ -119,8 +87,7 @@ impl CodeTools {
         &self.root
     }
 
-    /// Opts in to resolving paths outside the workspace root (user config
-    /// `code_tools.allow_external_paths`).
+    /// Opts in to resolving paths outside the workspace root.
     pub fn with_external_paths(mut self, allow: bool) -> Self {
         self.allow_external_paths = allow;
         self
@@ -132,12 +99,9 @@ impl CodeTools {
         self
     }
 
-    /// Resolves a user-supplied path for a code tool: `~` expansion, then
-    /// relative paths are anchored to the workspace root, then containment
-    /// — the resolved path must stay inside the root unless
-    /// [`Self::with_external_paths`] opted out. The returned path is the
-    /// anchored form, not the canonical one, so display forms are
-    /// unchanged.
+    /// Resolves a user-supplied path (`~` expansion, root anchoring, then
+    /// containment unless [`Self::with_external_paths`] opted out), returning
+    /// the anchored form rather than the canonical one.
     pub(crate) fn resolve_path(&self, path: &str) -> Result<String> {
         let expanded = expand_tilde(path)?;
         let resolved = if Path::new(&expanded).is_relative() {
@@ -148,10 +112,8 @@ impl CodeTools {
         if self.allow_external_paths {
             return Ok(resolved.to_string_lossy().into_owned());
         }
-        // Canonicalize the longest existing prefix (a symlink inside the
-        // root could point outside it, and a not-yet-existing path under
-        // a symlinked root must still compare against the canonical
-        // root), then normalize any leftover `..`/`.` in the tail so a
+        // Canonicalize the longest existing prefix — a symlink inside the root
+        // could point outside it — then normalize leftover `..`/`.` so a
         // lexical escape cannot hide behind a missing mid-component.
         let check = lexical_normalize(&canonicalize_prefix(&resolved));
         if !check.starts_with(&self.root) {
@@ -170,27 +132,22 @@ impl CodeTools {
         self.tracker.record_read(path);
     }
 
-    /// Refuses an edit of `path` when it changed since the last recorded
-    /// read, or when it was never read through these tools (fail closed).
-    /// Only a file that does not exist is allowed unread: the write
-    /// creates it, so there is nothing to clobber.
+    /// Refuses an edit of a stale or never-read file (fail closed); a missing file may be written.
     pub fn check_before_edit(&self, path: &Path) -> Result<()> {
         self.tracker
             .check_before_edit(path)
             .map_err(|message| Error::CodeTool { message })
     }
 
-    /// Takes the mutating-run lock for the duration of the returned guard —
-    /// mutating handlers call this before touching files so concurrent
-    /// mutating runs serialize instead of racing their check-then-write.
+    /// Takes the mutating-run lock for the duration of the returned guard.
     pub(crate) fn begin_write(&self) -> std::sync::MutexGuard<'_, ()> {
         self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The cached [`RepoMap`] for `root`, creating it on first use. A
-    /// non-default `max_tokens` budget returns an uncached instance (the
-    /// cache is budget-less); `refresh` drops the cached instance's caches
-    /// first.
+    /// The cached [`RepoMap`] for `root`, creating it on first use.
+    ///
+    /// A non-default `max_tokens` returns an uncached instance; `refresh`
+    /// drops the cached instance's caches first.
     pub fn repomap_for_root(&self, root: &Path, max_tokens: Option<u32>, refresh: bool) -> RepoMap {
         if let Some(max_tokens) = max_tokens {
             return RepoMap::new(root).with_max_tokens(max_tokens);
@@ -224,8 +181,7 @@ pub(crate) fn tool_error(message: impl Into<String>) -> Error {
     }
 }
 
-/// Expands a leading `~`/`~/` to `$HOME`. Ported from Craft's
-/// `tools::resolve_path`.
+/// Expands a leading `~`/`~/` to `$HOME`.
 fn expand_tilde(path: &str) -> Result<String> {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = HOME
@@ -242,10 +198,8 @@ fn expand_tilde(path: &str) -> Result<String> {
     }
 }
 
-/// Canonicalizes the longest existing prefix of `path`, keeping the
-/// (missing) remainder as a tail: existing paths resolve fully (symlinks
-/// included), while a not-yet-existing path still compares equal to its
-/// on-disk spelling.
+/// Canonicalizes the longest existing prefix of `path`, keeping the missing
+/// remainder as a tail so the result still compares against on-disk spellings.
 fn canonicalize_prefix(path: &Path) -> PathBuf {
     let mut existing = path.to_path_buf();
     let mut tail = PathBuf::new();
@@ -256,8 +210,7 @@ fn canonicalize_prefix(path: &Path) -> PathBuf {
             }
             return canonical.join(&tail);
         }
-        // Pop one component onto the front of the tail; stop at the root
-        // (no file_name to pop) with the path verbatim.
+        // Stop at the root (no file_name to pop) with the path verbatim.
         let Some(name) = existing.file_name().map(PathBuf::from) else {
             return path.to_path_buf();
         };
@@ -266,17 +219,15 @@ fn canonicalize_prefix(path: &Path) -> PathBuf {
     }
 }
 
-/// Best-effort `.`/`..` normalization without touching the filesystem —
-/// the containment check for path tails that cannot be resolved on disk
-/// (`canonicalize` needs every component to exist).
+/// Best-effort `.`/`..` normalization without touching the filesystem, for
+/// tails `canonicalize` cannot resolve (it needs every component to exist).
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {
-                // Pop when there is a component to pop; otherwise keep the
-                // `..` (nothing above the root to remove).
+                // Keep a leading `..` — nothing above the root to remove.
                 if !out.pop() {
                     out.push("..");
                 }
@@ -287,9 +238,8 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Display form of a path: cwd-relative when inside it, `~/`-relative when
-/// inside home, verbatim otherwise. Ported from Craft's
-/// `tools::relative_path`.
+/// Display form of a path: cwd-relative when inside it, `~/`-relative inside
+/// home, verbatim otherwise.
 pub(crate) fn relative_path(path: &str) -> String {
     let p = Path::new(path);
     if let Some(cwd) = CWD.as_deref()
@@ -314,8 +264,7 @@ fn format_rel(prefix: &str, fallback: &str, rel: &Path) -> String {
     }
 }
 
-/// `.git` is always excluded, even when `gitignore` is false. Ported from
-/// Craft's `tools::walk_builder_opts`.
+/// `.git` is always excluded, even when `gitignore` is false.
 pub(crate) fn walk_builder_opts(
     root: &str,
     patterns: &[&str],
@@ -404,8 +353,7 @@ mod tests {
         );
     }
 
-    /// A symlink inside the root pointing outside it must not carry reads
-    /// (or writes) past the boundary.
+    /// A symlink inside the root pointing outside it must not escape containment.
     #[test]
     #[cfg(unix)]
     fn resolve_path_rejects_symlink_escape() {
@@ -450,7 +398,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = tools.repomap_for_root(dir.path(), None, false);
         let b = tools.repomap_for_root(dir.path(), None, false);
-        // Same cached instance (Arc-shared caches): equal render for equal input.
+        // Same cached instance (Arc-shared caches).
         let text_a = a.get_repo_map(&[], &[], "query");
         let text_b = b.get_repo_map(&[], &[], "query");
         assert_eq!(text_a, text_b);

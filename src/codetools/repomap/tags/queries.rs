@@ -91,8 +91,7 @@ static TS_TAGS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
     )
 });
 
-// Same query source against the TSX grammar: JSX files parse with it, and
-// the captured node kinds are shared with plain TypeScript.
+// The TS query source works unchanged against the TSX grammar: shared node kinds.
 static TSX_TAGS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
     build_tags_query(
         "tsx",
@@ -314,12 +313,9 @@ const FISH_TAGS_SRC: &str = r#"
 static FISH_TAGS_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_tags_query("fish", &tree_sitter_fish::language(), FISH_TAGS_SRC));
 
-// SQL DDL: surface the names of schema objects an agent would navigate by.
-// DML (select/insert/update/delete) and ALTER/DROP are intentionally not
-// matched, so they contribute no tags -- same noise filtering as other
-// extractors that ignore usage nodes.
-// Note: tree-sitter-sequel as published has no `create_procedure` node, so
-// procedures are not captured here either.
+// DML and ALTER/DROP are deliberately unmatched; same noise filtering as the
+// other extractors. tree-sitter-sequel as published has no
+// `create_procedure` node, so procedures are not captured.
 const SQL_TAGS_SRC: &str = r#"
 (create_table (object_reference) @name.definition.class) @definition.class
 (create_view (object_reference) @name.definition.class) @definition.class

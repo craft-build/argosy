@@ -28,8 +28,7 @@ fn help_documents_the_catalog_write_target_and_redaction() {
 #[cfg(feature = "mcp")]
 #[test]
 fn help_documents_the_mcp_stdio_transport_and_model_download() {
-    // The model download fires on `mcp` first runs too, not just
-    // `index build` — the help must say so.
+    // The model download fires on `mcp` first runs too, not just `index build`.
     argosy_bin()
         .args(["mcp", "--help"])
         .assert()

@@ -47,7 +47,6 @@ fn long_concepts_split_by_heading_with_breadcrumbs_and_line_ranges() {
     let chunks = chunk_concept(&c, "arch", ChunkConfig { max_tokens: 80 });
 
     assert!(chunks.len() >= 4, "one chunk per section: {chunks:#?}");
-    // Ordinals are dense and sequential.
     for (index, chunk) in chunks.iter().enumerate() {
         assert_eq!(chunk.ordinal as usize, index);
         assert!(
@@ -56,7 +55,6 @@ fn long_concepts_split_by_heading_with_breadcrumbs_and_line_ranges() {
             chunk.ordinal,
             estimate_tokens(&chunk.text)
         );
-        // The shared prefix names the concept in every passage.
         assert!(chunk.text.starts_with("Concept: Architecture"));
     }
     let breadcrumbs: Vec<&str> = chunks.iter().map(|c| c.heading_path.as_str()).collect();
@@ -67,8 +65,6 @@ fn long_concepts_split_by_heading_with_breadcrumbs_and_line_ranges() {
     );
     assert!(breadcrumbs.contains(&"Architecture › Storage"));
 
-    // Line ranges are exact: joining the passages in order covers the body,
-    // and each range is inside the body's line count.
     let body_lines: Vec<&str> = c.body().lines().collect();
     let mut covered = 0u32;
     for chunk in &chunks {
@@ -115,8 +111,6 @@ fn an_over_long_section_splits_at_paragraphs_not_mid_paragraph() {
     let c = concept(&body, None);
     let chunks = chunk_concept(&c, "setup", ChunkConfig { max_tokens: 60 });
     assert!(chunks.len() >= 2, "{chunks:#?}");
-    // Every chunk's passage text begins with the paragraph opener — the
-    // splitter never cut inside one.
     for chunk in &chunks {
         assert!(chunk.text.contains("alpha beta gamma"), "{chunk:?}");
         assert_eq!(chunk.heading_path, "Setup");
@@ -136,8 +130,7 @@ fn title_falls_back_to_description_then_id() {
 
 #[test]
 fn a_smaller_budget_rechunks_and_changes_the_concept_hash() {
-    // The same concept under two budgets must produce different chunkings,
-    // which is what makes a budget change re-embed through the diff.
+    // A budget change must flow into the concept hash, so it re-embeds through the diff.
     let body = long_body();
     let c = concept(&body, None);
     let tight = chunk_concept(&c, "arch", ChunkConfig { max_tokens: 60 });
@@ -148,8 +141,7 @@ fn a_smaller_budget_rechunks_and_changes_the_concept_hash() {
 
 #[test]
 fn every_non_blank_body_line_is_covered_exactly_once() {
-    // A mixed body: prose, nested headings, an empty section, a code fence
-    // with a `#` comment, and paragraphs long enough to split.
+    // A mixed body: prose, nested headings, an empty section, a code-fence `#`, long paragraphs.
     let body = format!(
         "Intro paragraph.\n\n\
          ## Empty Section\n\n\
@@ -165,7 +157,6 @@ fn every_non_blank_body_line_is_covered_exactly_once() {
     assert!(chunks.len() >= 4, "{chunks:#?}");
 
     let lines: Vec<&str> = c.body().lines().collect();
-    // Ranges ascend and never overlap.
     let mut previous_end = 0u32;
     for chunk in &chunks {
         assert!(
@@ -174,7 +165,6 @@ fn every_non_blank_body_line_is_covered_exactly_once() {
         );
         previous_end = chunk.end_line;
     }
-    // Every non-blank line falls inside exactly one range.
     for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -189,9 +179,7 @@ fn every_non_blank_body_line_is_covered_exactly_once() {
             "line {line_no} (#{line:?}) covered {covering} times"
         );
     }
-    // The empty section's heading is folded into the next passage, and the
-    // trailing heading joins the section before it, so no chunk is a bare
-    // heading.
+    // No chunk is a bare heading: empty sections fold forward, trailing headings fold back.
     for chunk in &chunks {
         let body = chunk
             .text

@@ -17,25 +17,19 @@ use crate::local::LocalArgosy;
 pub struct ImportReport {
     /// Rule concepts successfully written this run.
     pub written: usize,
-    /// Rule ids whose target concept already existed and were therefore left
-    /// untouched — imports are additive and re-runnable; silently overwriting
-    /// user edits is how you lose trust.
+    /// Rule ids whose target concept already existed; imports never overwrite.
     pub skipped_existing: Vec<String>,
-    /// Rules that could not be converted or written. The batch never aborts
-    /// on one bad rule; callers treat a non-empty vec as
-    /// failure after the fact.
+    /// Rules that could not be converted or written; the batch never aborts on one.
     pub findings: Vec<Finding>,
-    /// YAML files the import considered. Zero means the directory held no
-    /// `.yaml`/`.yml` files at all — almost always a wrong path spelling,
-    /// which must not look like a clean no-op success.
+    /// YAML files the import considered; zero usually means a wrong path, not a clean no-op.
     pub yaml_files_seen: usize,
 }
 
 /// Imports Craft YAML rule sets into the local argosy's `styleguide/`
-/// namespace: one concept per rule at `styleguide/<language or "general">/
-/// <category or "misc">/<RULE-ID>.md` via [`LocalArgosy::write_concept`].
-/// A file-level `metadata:` block supplies default `language`/`category`;
-/// examples nest or stay flat; `warning`→`warn`; tags carry over.
+/// namespace.
+///
+/// One concept per rule at
+/// `styleguide/<language or "general">/<category or "misc">/<RULE-ID>.md`.
 pub fn import_styleguide_yaml(local: &LocalArgosy, yaml_dir: &Path) -> Result<ImportReport> {
     let mut report = ImportReport::default();
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(yaml_dir)
@@ -87,9 +81,10 @@ pub fn import_styleguide_yaml(local: &LocalArgosy, yaml_dir: &Path) -> Result<Im
     Ok(report)
 }
 
-/// Converts every rule object in one decoded YAML file. Accepts a bare
-/// sequence or a mapping with a `rules:` sequence (the two observed Craft
-/// shapes); anything else is one file-level finding.
+/// Converts every rule object in one decoded YAML file.
+///
+/// Accepts a bare sequence or a mapping with a `rules:` sequence; anything
+/// else is one file-level finding.
 fn import_rule_file(local: &LocalArgosy, value: &Value, file: &Path, report: &mut ImportReport) {
     let rules = match value {
         Value::Sequence(items) => Some(items.clone()),
@@ -123,11 +118,10 @@ fn import_rule_file(local: &LocalArgosy, value: &Value, file: &Path, report: &mu
     }
 }
 
-/// File-level facet defaults from a rule set's `metadata:` block: the Craft
-/// schema puts `language`/`category` on the file, and every rule in it
-/// inherits them unless the rule carries its own. A malformed block is a
-/// finding, not an abort — the rules still import with whatever facets they
-/// carry themselves.
+/// File-level facet defaults from a rule set's `metadata:` block.
+///
+/// Rules inherit them unless they carry their own; a malformed block is a
+/// finding, not an abort.
 fn file_defaults(value: &Value, file: &Path, report: &mut ImportReport) -> FileDefaults {
     let mut defaults = FileDefaults {
         language: None,
@@ -174,8 +168,7 @@ struct FileDefaults {
     category: Option<String>,
 }
 
-/// Converts one decoded rule object: `Err(String)` carries the human-readable
-/// reason the rule cannot become a finding-free concept.
+/// Converts one decoded rule object; `Err(String)` carries the reason it cannot become a concept.
 fn rule_to_concept(
     rule: &Mapping,
     defaults: &FileDefaults,
@@ -185,8 +178,7 @@ fn rule_to_concept(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "rule has no `id`".to_string())?;
-    // A facet the rule carries itself beats the file-level default it
-    // inherits; an empty/whitespace value counts as absent either way.
+    // A rule's own facet beats the file default; empty values count as absent either way.
     let facet = |key: &str, default: &Option<String>| {
         get_str(key)
             .map(str::trim)
@@ -194,10 +186,7 @@ fn rule_to_concept(
             .or(default.as_deref())
             .map(str::to_string)
     };
-    // Examples preserve the YAML form: sequences render as `- ` bullets,
-    // bare strings verbatim; non-string items are reported, never silently
-    // dropped. Nested (`examples.good`/`examples.bad`) and flat
-    // (`good:`/`bad:`) shapes are both read; nested wins when both appear.
+    // Nested `examples:` and flat `good:`/`bad:` shapes are both read; nested wins.
     let get_examples = |key: &str| -> std::result::Result<(Vec<String>, bool), String> {
         if let Some(nested) = rule.get("examples")
             && !matches!(nested, Value::Null)
@@ -221,9 +210,7 @@ fn rule_to_concept(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("rule `{id}`: missing required `description`"))?;
-    // Non-string scalars in the string fields would otherwise be silently
-    // dropped (`priority: 1` imports without its priority); report them the
-    // same way an invalid priority value is.
+    // Non-string scalars in the string fields would otherwise drop silently; report them.
     for key in ["language", "category", "priority"] {
         if let Some(value) = rule.get(key)
             && !matches!(value, Value::String(_) | Value::Null)
@@ -347,9 +334,8 @@ fn rule_to_concept(
     Ok((id.to_string(), concept))
 }
 
-/// One `good:`/`bad:` example value in either shape: a sequence of strings
-/// (rendered as bullets) or one bare string (rendered verbatim). Anything
-/// else is an error, not a silent drop.
+/// One `good:`/`bad:` example value: a bare string or a sequence of
+/// strings; anything else is an error.
 fn example_items(
     value: &Value,
     id: &str,

@@ -4,9 +4,7 @@ use super::*;
 
 #[test]
 fn package_tar_gz_refuses_an_existing_destination() {
-    // Regression: Directory mode refused non-empty destinations, but a
-    // second tar.gz run silently clobbered the first artifact (and
-    // errored on Windows instead). Both formats refuse now.
+    // Regression: a second tar.gz run used to silently clobber the first artifact.
     let dir = TempDir::new().unwrap();
     let root = fixture_argosy(&dir);
     let dest = dir.path().join("bundle.tar.gz");
@@ -28,8 +26,7 @@ fn package_tar_gz_refuses_an_existing_destination() {
 
 #[test]
 fn import_of_a_directory_with_no_yaml_reports_zero_files_seen() {
-    // A wrong path spelling must not look like a clean no-op success:
-    // the report records that no YAML files were even considered.
+    // A wrong path spelling must not look like a clean no-op success.
     let dir = TempDir::new().unwrap();
     let local = import_fixture(&dir);
     let yaml_dir = dir.path().join("not-yaml");
@@ -107,10 +104,8 @@ fn include_index_packages_a_checkpointed_snapshot_of_a_live_database() {
 
     let dir = TempDir::new().unwrap();
     let root = fixture_argosy(&dir);
-    // A live writer holds the index open with committed-but-uncheckpointed
-    // WAL content — the state an MCP server leaves the store in. (The
-    // bundle fixture's placeholder file is not a real database; start
-    // from a fresh one the store creates.)
+    // A live writer leaves committed-but-uncheckpointed WAL content; the
+    // fixture placeholder is not a real database, so start fresh.
     fs::remove_file(root.join(".argosy/index.db")).unwrap();
     let mut store = SqliteVecStore::open(root.join(".argosy/index.db")).unwrap();
     store.set_model_id("mock-embedder@1").unwrap();
@@ -125,11 +120,10 @@ fn include_index_packages_a_checkpointed_snapshot_of_a_live_database() {
     package(&argosy, &dest, &opts).unwrap();
     drop(store);
 
-    // The sidecars are excluded...
+    // The sidecars are excluded: the main file alone carries the checkpointed state.
     assert!(dest.join(".argosy/index.db").is_file());
     assert!(!dest.join(".argosy/index.db-wal").exists());
     assert!(!dest.join(".argosy/index.db-shm").exists());
-    //...because the main file alone carries the checkpointed state.
     let copied = SqliteVecStore::open_read_only(dest.join(".argosy/index.db")).unwrap();
     assert_eq!(copied.model_id(), Some("mock-embedder@1"));
     validate_integrity(&dest).unwrap();
@@ -214,7 +208,6 @@ fn integrity_sidecar_matches_recomputation() {
         lines[0].ends_with("  argosy.md"),
         "manifest first: {lines:?}"
     );
-    // Spot-check one file against an independent recomputation.
     let (hash, rel) = lines[1].split_once("  ").unwrap();
     let bytes = fs::read(dest.join(rel)).unwrap();
     assert_eq!(hash, sha256_hex(&bytes));
@@ -257,8 +250,6 @@ fn validate_integrity_rejects_escaping_sidecar_paths() {
     let argosy = Argosy::open(&root).unwrap();
     package(&argosy, &dest, &PackageOptions::default()).unwrap();
 
-    // An attacker-controlled sidecar must not make the validator hash
-    // files outside the bundle (containment).
     fs::write(dest.join(INTEGRITY_FILENAME), "deadbeef  ../outside.txt\n").unwrap();
     let err = validate_integrity(&dest).unwrap_err();
     assert!(
@@ -281,9 +272,8 @@ fn validate_integrity_refuses_symlinked_dirs_pointing_outside() {
     let argosy = Argosy::open(&root).unwrap();
     package(&argosy, &dest, &PackageOptions::default()).unwrap();
 
-    // Every component is a Normal name, so the textual check passes — it
-    // is the canonicalize in `read_bundle_file` that must catch the
-    // symlinked intermediate directory.
+    // Every component is a Normal name, so the textual check passes; the
+    // canonicalize in `read_bundle_file` must catch this one.
     let outside = dir.path().join("outside");
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("secret.txt"), "do not read").unwrap();
@@ -312,8 +302,7 @@ fn bundle_content_hash_changes_with_content_and_is_stable_across_a_copy() {
     let after = bundle_content_hash(&root).unwrap();
     assert_ne!(before, after);
 
-    // Packaging excludes memory/ and.argosy/, so a packaged copy hashes
-    // the same as its source — the hash covers distributable content.
+    // The exclusions are what make a packaged copy hash the same as its source.
     let dest = dir.path().join("out");
     let argosy = Argosy::open(&root).unwrap();
     package(&argosy, &dest, &PackageOptions::default()).unwrap();

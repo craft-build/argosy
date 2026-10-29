@@ -8,14 +8,11 @@ use yaml_serde::{Mapping, Value};
 
 use crate::error::{Error, IoSnafu, MissingFrontmatterSnafu, Result, ValidationSnafu, YamlSnafu};
 
-/// Maximum frontmatter nesting depth `Concept::new` accepts. Exceeding the YAML
-/// emitter's recursion limit would make `to_string` panic, so construction enforces it.
+/// Maximum frontmatter nesting depth; deeper YAML would panic `to_string`'s emitter.
 const MAX_FRONTMATTER_DEPTH: usize = 100;
 
 fn yaml_depth(value: &Value) -> usize {
-    /// Recursion is bounded so adversarially deep YAML cannot overflow the
-    /// stack here (the YAML parser has its own limit, but this stays safe
-    /// regardless); anything at or past the cap reads as the cap.
+    /// Recursion is capped so adversarially deep YAML cannot overflow the stack.
     fn go(value: &Value, remaining: usize) -> usize {
         if remaining == 0 {
             return MAX_FRONTMATTER_DEPTH + 1;
@@ -31,9 +28,7 @@ fn yaml_depth(value: &Value) -> usize {
 
 /// One markdown-plus-frontmatter document.
 ///
-/// The frontmatter is kept as an ordered [`Mapping`] so unknown keys survive a
-/// parse → serialize round-trip untouched; no argosy-typed schema is
-/// imposed at this layer.
+/// Frontmatter stays an ordered [`Mapping`] so unknown keys survive round-trips.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Concept {
     frontmatter: Mapping,
@@ -43,8 +38,7 @@ pub struct Concept {
 impl Concept {
     /// Builds a concept directly from its parts.
     ///
-    /// Rejects frontmatter nested too deeply for the YAML emitter, so the
-    /// infallible `to_string`/`to_file` contract below is genuinely upheld.
+    /// Rejects frontmatter the YAML emitter cannot handle, keeping `to_string` infallible.
     pub fn new(frontmatter: Mapping, body: String) -> Result<Self> {
         let depth = yaml_depth(&Value::Mapping(frontmatter.clone()));
         ensure!(
@@ -68,8 +62,8 @@ impl Concept {
         &self.body
     }
 
-    /// Parses a concept from a string. A leading `---` line opens the
-    /// frontmatter block; anything else makes the whole input the body.
+    /// Parses a concept from a string: a leading `---` line opens the frontmatter
+    /// block; otherwise the whole input is the body.
     // Inherent companion to the `FromStr` impl — allows calling without importing the trait.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(input: &str) -> Result<Self> {
@@ -86,8 +80,7 @@ impl Concept {
     }
 
     fn parse(input: &str, path: Option<PathBuf>) -> Result<Self> {
-        // Tolerate a UTF-8 BOM (Windows editors) rather than losing the
-        // frontmatter entirely.
+        // Tolerate a UTF-8 BOM (Windows editors), which would otherwise hide the frontmatter.
         let input = input.strip_prefix('\u{feff}').unwrap_or(input);
         let first_line = input.lines().next().unwrap_or("");
         if first_line.trim_end_matches(['\r', '\n']) != "---" {
@@ -97,7 +90,6 @@ impl Concept {
             });
         }
 
-        // Start of the YAML block: just past the first line's newline.
         let fm_start = input.find('\n').map(|i| i + 1).unwrap_or(input.len());
         let rest = &input[fm_start..];
 
@@ -119,47 +111,37 @@ impl Concept {
                         })?;
                     match value {
                         Value::Mapping(m) => m,
-                        // A scalar or sequence block is malformed frontmatter.
                         _ => return MissingFrontmatterSnafu { path }.fail(),
                     }
                 };
-                // Route through `new` so parsed concepts get the same
-                // frontmatter depth guard as constructed ones — `to_string`'s
-                // infallible contract depends on it.
+                // Route through `new` for the depth guard that keeps `to_string` infallible.
                 return Self::new(frontmatter, body);
             }
             offset += line.len();
         }
 
-        // Opener without a closing delimiter.
         MissingFrontmatterSnafu { path }.fail()
     }
 
-    /// Serializes back to the markdown-plus-frontmatter form. Unknown keys and
-    /// the body round-trip untouched; YAML block formatting may normalize.
+    /// Serializes back to the markdown-plus-frontmatter form.
+    ///
+    /// Unknown keys and the body round-trip untouched; YAML formatting may normalize.
     // Inherent `to_string` is the serialization API; no `Display` impl is wanted.
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         if self.frontmatter.is_empty() {
             return self.body.clone();
         }
-        // Cannot fail: every construction path (`new`, `parse`) depth-checks
-        // the frontmatter against the emitter's recursion limit.
+        // Cannot fail: every construction path depth-checks the frontmatter.
         let yaml = yaml_serde::to_string(&self.frontmatter)
             .expect("frontmatter depth is validated at construction");
         format!("---\n{yaml}---\n{}", self.body)
     }
 
-    /// Writes the serialized concept to a file, crash-atomically: the
-    /// content is staged to a sibling temp file and renamed into place, so
-    /// a crash mid-write can never leave a truncated concept where a valid
-    /// one stood. The same-directory rename also replaces an existing
-    /// target atomically (the deliberate edit path).
+    /// Writes the concept to a file, crash-atomically via a sibling temp file
+    /// and rename.
     pub fn to_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        /// Distinguishes concurrent `to_file` calls on the same target
-        /// within one process (two MCP tool calls, say): a per-call nonce
-        /// keeps each staging file distinct so neither write can truncate
-        /// the other's temp mid-flight.
+        /// Per-call nonce so concurrent same-target writes stage to distinct files.
         static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = path.as_ref();
         let file_name = path
@@ -175,8 +157,7 @@ impl Concept {
         let tmp = path.with_file_name(tmp_name);
         let write =
             std::fs::write(&tmp, self.to_string()).and_then(|()| std::fs::rename(&tmp, path));
-        // A failed write or rename must not litter the staging file
-        // behind; cleanup is best-effort next to the real error.
+        // Best-effort cleanup: a failed write must not litter the staging file.
         if write.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -205,9 +186,9 @@ impl Concept {
         self.get_str("description")
     }
 
-    /// The frontmatter `tags` field, accepting a YAML sequence or a single
-    /// string. Absent or ill-typed values yield an empty vec; non-string
-    /// items inside a sequence are skipped.
+    /// The frontmatter `tags` field, from a sequence or a single string.
+    ///
+    /// Absent or ill-typed values yield an empty vec; non-string items are skipped.
     pub fn tags(&self) -> Vec<&str> {
         match self.get("tags") {
             Some(Value::Sequence(items)) => items.iter().filter_map(Value::as_str).collect(),
@@ -216,8 +197,7 @@ impl Concept {
         }
     }
 
-    /// True iff frontmatter exists with a non-empty `type` — the only hard OKF
-    /// concept requirement argosy depends on.
+    /// True iff frontmatter has a non-empty `type`: argosy's only hard OKF requirement.
     pub fn is_okf_conformant(&self) -> bool {
         !self.frontmatter.is_empty() && self.concept_type().is_some_and(|t| !t.trim().is_empty())
     }
@@ -231,9 +211,8 @@ impl FromStr for Concept {
     }
 }
 
-/// A concept's identity within one bundle: its path relative to the bundle
-/// root, `.md` stripped, forward-slash separated (e.g.
-/// `document/decisions/2026-05-caching`).
+/// A concept's identity within one bundle: its forward-slash path from the
+/// bundle root, `.md` stripped (e.g. `document/decisions/2026-05-caching`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConceptId(String);
 
@@ -290,9 +269,7 @@ impl FromStr for ConceptId {
                     }
                     .fail();
                 }
-                // The walk skips `.argosy/` at every depth, so an id with
-                // such a segment would write a concept no read path can
-                // ever see — listing, validation, and the index all miss it.
+                // The walk skips `.argosy/` at every depth; such an id would be unreadable.
                 ".argosy" => {
                     return ValidationSnafu {
                         reason: format!(
@@ -411,14 +388,12 @@ mod tests {
         let input = "---\ntype: Decision\ncustom_field: keepme\nnested:\n  deep: [1, 2]\n---\n# Body\nexact bytes\n";
         let concept = Concept::from_str(input).unwrap();
 
-        // In-memory round trip.
         let serialized = concept.to_string();
         let reparsed = Concept::from_str(&serialized).unwrap();
         assert_eq!(reparsed.get_str("custom_field"), Some("keepme"));
         assert_eq!(reparsed.get("nested"), concept.get("nested"));
         assert_eq!(reparsed.body(), concept.body());
 
-        // Through the filesystem.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("concept.md");
         concept.to_file(&path).unwrap();
@@ -444,8 +419,7 @@ mod tests {
         assert!(leftovers.is_empty(), "staging file must not linger");
     }
 
-    /// Concurrent writes to one target stage through distinct temp files,
-    /// so the surviving content is always one complete concept.
+    /// Distinct staging files mean concurrent writes can never truncate each other.
     #[test]
     fn concurrent_to_file_on_one_target_never_tears() {
         let dir = tempfile::tempdir().unwrap();
@@ -531,8 +505,7 @@ mod tests {
         assert!("a:b".parse::<ConceptId>().is_err());
     }
 
-    /// `.argosy` segments would write concepts the walk can never list
-    /// (it skips `.argosy/` at every depth), so they are rejected up front.
+    /// `.argosy` segments would write concepts the walk can never list.
     #[test]
     fn concept_id_rejects_argosy_segments() {
         assert!("document/.argosy/foo".parse::<ConceptId>().is_err());
@@ -580,8 +553,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_infeasibly_deep_frontmatter_so_serialization_cannot_panic() {
-        // The same guard `Concept::new` enforces must apply to parsed input —
-        // otherwise `to_string` would panic on a bundle-provided file.
+        // Parsed input gets the same depth guard, or `to_string` could panic.
         let mut yaml = "v".to_string();
         for _ in 0..(MAX_FRONTMATTER_DEPTH + 10) {
             yaml = format!("{{a: {yaml}}}");

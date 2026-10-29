@@ -8,8 +8,8 @@ use predicates::prelude::*;
 
 use super::common::*;
 
-/// Initializes `project` as the default project slot under `xdg`, recording
-/// its canonical root. Returns the project directory.
+/// Initializes `project` as the default slot under `xdg`, recording its
+/// canonical root; returns the project directory.
 fn init_project(scratch: &TempDir, xdg: &Path, name: &str) -> std::path::PathBuf {
     let project = scratch.path().join(name);
     fs::create_dir_all(&project).unwrap();
@@ -113,8 +113,7 @@ fn catalog_redact_home_rewrites_the_project_root_prefix() {
     let scratch = TempDir::new().unwrap();
     let home = scratch.path().join("home");
     fs::create_dir_all(&home).unwrap();
-    // Put state and project under a fake HOME so redaction has something to
-    // strip; both XDG_STATE_HOME and HOME are set.
+    // A fake HOME so redaction has something to strip.
     let xdg = home.join(".local/state");
     fs::create_dir_all(&xdg).unwrap();
     init_project_under(&xdg, &home, "redactproj");
@@ -129,8 +128,7 @@ fn catalog_redact_home_rewrites_the_project_root_prefix() {
         .stdout(predicate::str::contains("~/.local/state/argosy"));
 }
 
-/// Like [`init_project`] but the project lives under `home`, with `HOME`
-/// injected alongside `XDG_STATE_HOME`.
+/// Like [`init_project`] but the project lives under `home`, with `HOME` injected too.
 fn init_project_under(xdg: &Path, home: &Path, name: &str) -> std::path::PathBuf {
     let project = home.join(name);
     fs::create_dir_all(&project).unwrap();

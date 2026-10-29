@@ -57,19 +57,16 @@ impl Finding {
 }
 
 /// The outcome of structurally validating a bundle: structural requirements,
-/// generic `type` conformance under reserved namespaces, and the
-/// `skill`/`styleguide` contracts. Deeper OKF conformance (link integrity,
-/// listing contents) is out of scope.
+/// reserved-namespace `type` conformance, and the `skill`/`styleguide`
+/// contracts. Deeper OKF conformance is out of scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ValidationReport {
     findings: Vec<Finding>,
 }
 
 impl ValidationReport {
-    /// Builds a report directly from findings — how callers holding a
-    /// `Vec<Finding>` ([`Argosy::validate_skills`],
-    /// [`Argosy::validate_styleguide`]) produce the same report shape as
-    /// [`Argosy::validate`] for JSON output and exit-code logic.
+    /// Builds a report directly from findings, for callers that want the
+    /// same report shape as [`Argosy::validate`].
     pub fn from_findings(findings: Vec<Finding>) -> Self {
         Self { findings }
     }

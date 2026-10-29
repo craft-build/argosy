@@ -7,16 +7,16 @@ use std::path::{Path, PathBuf};
 pub(crate) struct WalkEntry {
     pub(crate) rel: PathBuf,
     pub(crate) is_dir: bool,
-    /// True for symlink entries (to files or directories): the walk never
-    /// resolves them, and readers use this to skip them so bundle content
+    /// True for symlink entries, which readers must skip so bundle content
     /// cannot live outside — or leak in from outside — the bundle root.
     pub(crate) is_symlink: bool,
 }
 
-/// The outcome of a recursive walk: the entries found, plus every directory
-/// that could not be read. Per-directory read failures are collected rather
-/// than aborting the walk, so validation can report them precisely (with the
-/// offending path) and still run its other checks.
+/// The outcome of a recursive walk: the entries found plus every directory
+/// that could not be read.
+///
+/// Read failures are collected, not fatal, so validation can report each one
+/// and still run its other checks.
 #[derive(Default)]
 pub(crate) struct WalkResult {
     pub(crate) entries: Vec<WalkEntry>,
@@ -25,14 +25,11 @@ pub(crate) struct WalkResult {
     pub(crate) unreadable: Vec<(PathBuf, std::io::Error)>,
 }
 
-/// Recursively collects every entry under `root.join(rel)`. `.argosy/` index
-/// directories and `.git/` repositories are skipped entirely: both are
-/// derivative metadata, not bundle content — skipping `.git` is also what
-/// lets a *clone* of a packaged book verify against the packaged sidecar
-/// (`validate_integrity` checks completeness against this same walk) and
-/// keeps `bundle_content_hash` identical across clones of one tree.
-/// Directory symlinks are not followed
-/// (`file_type`, not `metadata`), so cycles are impossible.
+/// Recursively collects every entry under `root.join(rel)`.
+///
+/// Skips `.argosy/` and `.git/` (derivative metadata); skipping `.git` also
+/// keeps `bundle_content_hash` identical across clones. Directory symlinks
+/// are never followed, so cycles are impossible.
 pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
     let rd = match fs::read_dir(root.join(rel)) {
         Ok(rd) => rd,
@@ -76,8 +73,7 @@ pub(crate) fn walk_bundle(root: &Path, rel: &Path, walk: &mut WalkResult) {
     }
 }
 
-/// Walks `root.join(rel)`, returning entries and read failures both sorted
-/// deterministically by relative path.
+/// Walks `root.join(rel)`, returning entries and read failures sorted by relative path.
 pub(crate) fn sorted_walk(root: &Path, rel: &Path) -> WalkResult {
     let mut walk = WalkResult::default();
     walk_bundle(root, rel, &mut walk);
