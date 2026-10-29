@@ -36,6 +36,59 @@ pub(super) struct PullArgs {
     pub(super) global: Option<bool>,
 }
 
+/// Move one import's pin to what its tracked ref resolves to now, after
+/// reviewing the `skill/` and `styleguide/` diff.
+#[derive(Args)]
+pub(super) struct UpdateArgs {
+    /// The checkout name to update.
+    pub(super) name: String,
+
+    /// Operate on the user-wide global store instead of this project's
+    /// (default: the configured `pull.default_global`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) global: Option<bool>,
+
+    /// Follow this branch or tag instead of the recorded one; the pin keeps
+    /// following it afterwards.
+    #[arg(long)]
+    pub(super) reference: Option<String>,
+
+    /// Show the change and exit without moving the pin.
+    #[arg(long)]
+    pub(super) dry_run: bool,
+
+    /// Apply without asking (required when stdin is not a terminal).
+    #[arg(long)]
+    pub(super) yes: bool,
+}
+
+/// Remove one pulled import from the store: its checkout and its pin.
+#[derive(Args)]
+pub(super) struct RemoveArgs {
+    /// The checkout name to remove.
+    pub(super) name: String,
+
+    /// Operate on the user-wide global store instead of this project's
+    /// (default: the configured `pull.default_global`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) global: Option<bool>,
+}
+
+/// Bring the store in line with its pins: clone missing checkouts at their
+/// pinned commit, report checkouts that drifted.
+#[derive(Args)]
+pub(super) struct SyncArgs {
+    /// Operate on the user-wide global store instead of this project's
+    /// (default: the configured `pull.default_global`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub(super) global: Option<bool>,
+
+    /// Adopt pins from this lockfile first (for example one carried over
+    /// from another machine); its entries replace matching local pins.
+    #[arg(long)]
+    pub(super) from: Option<PathBuf>,
+}
+
 /// Create a new, empty argosy: the `argosy.md` manifest plus the reserved
 /// namespace directories.
 #[derive(Args)]

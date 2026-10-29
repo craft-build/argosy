@@ -17,6 +17,7 @@ pub mod harness;
 mod hash;
 pub mod index;
 pub mod local;
+pub mod lockfile;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod package;

@@ -351,6 +351,13 @@ Three independent version numbers can describe a given argosy at rest, and confl
 
 - **DIST-6**: A harness **SHOULD** be able to detect whether an argosy's content has changed since it was last read (for example, by comparing a content hash of the bundle, or of individual concepts) independent of whether `argosy_version` was bumped, since a version bump is a producer's responsibility and cannot be relied on alone to signal every change.
 
+### 8.6 Pinned Updates
+
+Imports over a mutable channel (a git remote) can change upstream at any moment; a consumer that verified content once needs a record of exactly which revision it verified.
+
+- **DIST-7**: A consumer that imports argosys over a mutable channel **SHOULD** record, per import, the source URL, the ref it follows, and the exact content-addressed revision whose integrity was verified when the import was accepted, so the same revision can be reproduced later. Reproducing a recorded revision that no longer exists upstream **SHOULD** fail, not fall back to whatever the remote currently serves — silently moving to new content is precisely the supply-chain attack the record exists to catch.
+- **DIST-8**: Moving a recorded revision to a new one **SHOULD** be a distinct, confirmed step that (a) shows the importer what changed — at minimum in the `skill/` and `styleguide/` namespaces, whose content steers harness behavior — and (b) verifies the new revision with the same integrity checks as the original import before replacing the old content.
+
 ---
 
 ## 9. Multi-Argosy Composition
@@ -415,7 +422,7 @@ This section is informative: it walks through the states an argosy moves through
 3. **Build or reconcile the index.** If no index exists, or an existing one is stale (`IDX-11`, `IDX-12`), the harness builds or rebuilds it from the bundle (`IDX-1`).
 4. **Activate.** The argosy becomes queryable (§10) and, if it is the local argosy, writable (`MUL-4`).
 5. **Use.** Over a session, the harness reads via retrieval, writes new memory concepts, and may promote memory into documentation (§6) — all against the local argosy.
-6. **Update.** As the bundle changes (new concepts, edits), the index is incrementally reconciled (`IDX-10`) rather than fully rebuilt, except where a full rebuild is required (`IDX-12`).
+6. **Update.** As the bundle changes (new concepts, edits), the index is incrementally reconciled (`IDX-10`) rather than fully rebuilt, except where a full rebuild is required (`IDX-12`). For an *imported* argosy over a mutable channel, updating is a pinned, reviewed step (`DIST-7`, `DIST-8`, `SEC-6`), not a re-fetch.
 7. **Deactivate.** An argosy drops out of a project context (a session ends, a dependency is removed) without requiring any action on the bundle itself — deactivation is purely a change in what's currently queryable.
 
 ---
@@ -429,6 +436,7 @@ An argosy's content can shape a harness's behavior directly — most sharply in 
 - **SEC-1**: A harness **SHOULD** treat concepts from an imported argosy as untrusted input, not as ground truth, in the same way it treats output from a web fetch or an external tool call. The reference implementation makes the boundary machine-visible: every search hit, read, and skill carries `kind` (`local`/`imported`) and its effective trust tier, and imported free text — bodies, skills, Good/Bad rule excerpts — is delivered inside paired `<untrusted-content …>`/`</untrusted-content>` delimiters whose attributes name the source argosy, URI, and tier. A harness consuming such text **SHOULD** keep the delimiter bracket around it when reasoning, so a crafted body cannot pose as the server's or the harness's own instructions. Invisible format characters (zero-width, bidi, and tag Unicode) **SHOULD** be stripped from indexed text at index time — on-disk bytes stay verbatim — so hidden payload cannot steer retrieval.
 - **SEC-2**: A harness **SHOULD** surface an imported skill's OKF trust tier (unverified, machine-confirmed, or human-reviewed) where it presents that skill, so a person can judge whether to let the harness load and follow it. The tier **SHOULD** be derived from provenance — the importing side's own configuration for that import — and never solely from the `verified` field of the book's own frontmatter: an imported argosy would otherwise be grading its own content. Capping an import's self-declared tier at what the importing user configured (defaulting to unverified), and verifying the bundle's integrity sidecar wherever one is present — remembering, in importer-controlled state, what was verified at import time — are the reference implementation of this requirement. Hits and reads of imported content also carry the checkout's `source_commit`, so a person auditing a transcript can pin exactly which revision of a shared book produced the text.
 - **SEC-3**: A harness **MAY** require explicit confirmation before loading a skill from an imported argosy that carries no `verified` entry at all, since an unreviewed set of instructions from outside the project carries more risk than an unreviewed document meant only to be read.
+- **SEC-6**: Because an imported argosy's `skill/` and `styleguide/` content steers the harness directly, a consumer **SHOULD** treat moving a pinned import to a new revision (`DIST-7`, `DIST-8`) as a trust decision, not a refresh: surface the steering-namespace diff before the pin moves, require explicit confirmation (or an equally deliberate unattended mode), and refuse new content whose integrity cannot be verified. Hash-pinning plus re-review on change is the standard mitigation for upstream rug pulls.
 
 ### 12.2 Promotion Is a Trust-Boundary Crossing
 
@@ -575,6 +583,8 @@ As the project's local argosy, it also has a `memory/` namespace — informal no
 | DIST-4 | 8.3 | Packaging tools should warn on stray `memory/` |
 | DIST-5 | 8.4 | `argosy_version` is the compatibility-relevant version |
 | DIST-6 | 8.5 | Content-hash change detection recommended |
+| DIST-7 | 8.6 | Imports pinned to a verified revision; reproduction fails closed |
+| DIST-8 | 8.6 | Pin moves review the steering-namespace diff and re-verify |
 | MUL-1 | 9.1 | At most one local argosy per project context |
 | MUL-2 | 9.1 | Any number of imported argosys |
 | MUL-3 | 9.2 | No writes to imported argosys |
@@ -594,6 +604,7 @@ As the project's local argosy, it also has a `memory/` namespace — informal no
 | SEC-3 | 12.1 | Confirmation may be required for unverified imported skills |
 | SEC-4 | 12.2 | Human confirmation before external distribution of promoted content |
 | SEC-5 | 12.2 | Memory content surfaced during promotion confirmation |
+| SEC-6 | 12.1 | Moving a pin is a reviewed, confirmed trust decision |
 | NFR-1 | 13 | Portability across machines/harnesses/models |
 | NFR-2 | 13 | Diffability |
 | NFR-3 | 13 | Human-readability without tooling |

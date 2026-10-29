@@ -209,9 +209,23 @@ Imported books are shared content, so they are never taken at their word:
   deleted sidecar, or a rewritten "self-consistent" one all fail closed.
   A tampered import is *excluded* from the session (never served) and
   reported under `excluded` in the `argosy://_argosys` resource and as
-  `INTEGRITY FAILED` in the catalog; remove the checkout and re-pull. A
+  `INTEGRITY FAILED` in the catalog; `argosy remove` it and re-pull. A
   book that ships no sidecar was never packaged and simply has nothing to
   verify.
+- **Pinned, reproducible imports.** Every pull records a pin in
+  `argosy.lock` beside the checkouts — source URL, tracked ref, and the
+  exact commit whose integrity was verified — so a book can never silently
+  change underneath you: re-pulling a pinned import reproduces the pinned
+  commit, and a pin that can no longer be checked out upstream (a rug pull
+  by force-push) fails loudly instead of falling back to the new HEAD.
+  `argosy update` is the only thing that moves a pin, and it shows the
+  unified diff of `skill/` and `styleguide/` — the namespaces that steer
+  agents — plus per-namespace change counts, verifies the new commit with
+  the same pull-time checks, and asks before replacing anything (the old
+  checkout survives any refusal untouched). `argosy sync` materializes a
+  whole lockfile at its pins (from another machine with `--from`), which is
+  how a team reproduces one store on many machines without argosy ever
+  writing into the project tree.
 - **Provenance-capped trust tiers.** A skill's `verified` frontmatter is
   relayed verbatim only for your local book. An import's self-claim is
   capped at what *you* configured for it, defaulting to `unverified` —
@@ -278,7 +292,10 @@ grounding and structured findings.
 |---|---|
 | `argosy init [path]` | Create a bundle (manifest + reserved namespaces). |
 | `argosy validate <path>` | Structural + namespace-contract validation with requirement IDs (`--namespace` scopes one namespace). |
-| `argosy pull <url> <name>` | `git clone` an external argosy into the project's argosy store under the state dir (`--global` for the user-wide store). |
+| `argosy pull <url> <name>` | `git clone` an external argosy into the project's argosy store under the state dir (`--global` for the user-wide store) and record its pin in `argosy.lock`; a pinned-but-missing checkout is re-cloned at its pinned commit, not at whatever the remote serves now. |
+| `argosy update <name>` | Move one import's pin to what its tracked ref resolves to now — after showing the `skill/`/`styleguide/` diff and re-verifying integrity (`--dry-run` previews, `--yes` applies unattended, `--ref` follows another branch or tag). |
+| `argosy remove <name>` | Delete one import's checkout (and its integrity stamp and pin). |
+| `argosy sync` | Bring the store in line with its pins: clone missing checkouts at their pinned commit, report drifted ones (`--from <lockfile>` adopts pins carried from another machine first). |
 | `argosy index build` / `status` / `query` / `eval` | Build/diff/search the hybrid index (BM25 + vectors) at `<state>/projects/<slug>/index.db`; with `index.search_mode = "lexical"` in the user config the model is never downloaded and search is BM25-only. `eval` scores a labeled dataset (recall@k, MRR) and exits 1 below its floors. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |

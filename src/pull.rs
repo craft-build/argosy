@@ -10,6 +10,8 @@ use std::process::Command;
 
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
+use serde::Serialize;
+
 use crate::bundle::Argosy;
 use crate::error::{IoSnafu, NotAnArgosySnafu, Result, ValidationSnafu};
 
@@ -161,8 +163,45 @@ fn git_spawn_error(dest: &Path, err: std::io::Error) -> crate::error::Error {
 /// All-or-nothing: a failed, non-bundle, or integrity-failing clone leaves no
 /// checkout behind.
 pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
-    // The URL reaches `git` verbatim, and this is a public API: option-shaped
-    // URLs (`--upload-pack=<cmd>`, `ext::` transports) execute commands.
+    ensure_checkout_target(url, root, name)?;
+    let dest = root.join(name);
+    clone_url_to(url, &dest)?;
+    accept_checkout(&dest)
+}
+
+/// [`clone_as_checkout`], but checking out `commit` (detached) instead of the
+/// remote's default-branch HEAD: the reproduction path for a pinned import.
+///
+/// All-or-nothing. When `commit` is not reachable in the fresh clone (it was
+/// force-pushed away upstream), the error says so rather than falling back
+/// to whatever the remote now serves.
+pub fn clone_as_checkout_at(url: &str, root: &Path, name: &str, commit: &str) -> Result<Argosy> {
+    ensure_checkout_target(url, root, name)?;
+    ensure_valid_commit_id(commit)?;
+    let dest = root.join(name);
+    clone_url_to(url, &dest)?;
+    // Detach before acceptance, so what is opened, verified, and stamped is
+    // the pinned tree, not the default branch.
+    if let Err(error) = git_in_dir(&dest, &["checkout", "--quiet", "--detach", commit]) {
+        let _ = fs::remove_dir_all(&dest);
+        return match error {
+            crate::error::Error::Validation { reason } => ValidationSnafu {
+                reason: format!(
+                    "pinned commit `{commit}` could not be checked out from `{url}` \
+                     (it may have been force-pushed away upstream): {reason}"
+                ),
+            }
+            .fail(),
+            other => Err(other),
+        };
+    }
+    accept_checkout(&dest)
+}
+
+/// The shared guards of every checkout-creating path: a URL git can take as
+/// a URL (never an option), a name that becomes a safe, non-colliding
+/// directory beside the others in the store, and no checkout there yet.
+fn ensure_checkout_target(url: &str, root: &Path, name: &str) -> Result<()> {
     ensure!(
         !url.is_empty() && !url.starts_with('-'),
         ValidationSnafu {
@@ -187,6 +226,15 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
             )
         }
     );
+    ensure!(
+        name != crate::lockfile::LOCKFILE_NAME,
+        ValidationSnafu {
+            reason: format!(
+                "checkout name `{}` is reserved for the import lockfile",
+                crate::lockfile::LOCKFILE_NAME
+            )
+        }
+    );
     let dest = root.join(name);
     ensure!(
         !dest.exists(),
@@ -197,16 +245,60 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
             )
         }
     );
-    fs::create_dir_all(root).context(IoSnafu {
-        path: root.to_path_buf(),
+    Ok(())
+}
+
+/// True iff `commit` is a 40- or 64-hex-digit object id, so it can never be
+/// parsed by git as an option or a path.
+fn ensure_valid_commit_id(commit: &str) -> Result<()> {
+    let well_formed =
+        (commit.len() == 40 || commit.len() == 64) && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    ensure!(
+        well_formed,
+        ValidationSnafu {
+            reason: format!(
+                "invalid commit id `{commit}`: expected a 40- or 64-hex-digit object id"
+            )
+        }
+    );
+    Ok(())
+}
+
+/// Runs `git` inside `dir`, mapping a non-zero exit to a validation error
+/// that carries git's stderr.
+fn git_in_dir(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|err| git_spawn_error(dir, err))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return ValidationSnafu {
+            reason: format!(
+                "`git {}` failed ({}): {}",
+                args.join(" "),
+                output.status,
+                stderr.trim()
+            ),
+        }
+        .fail();
+    }
+    Ok(output)
+}
+
+/// Clones `url` into `dest`, removing `dest` on failure.
+fn clone_url_to(url: &str, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest.parent().unwrap_or_else(|| Path::new("."))).context(IoSnafu {
+        path: dest.to_path_buf(),
     })?;
     let output = Command::new("git")
         .args(["clone", "--quiet", url])
-        .arg(&dest)
+        .arg(dest)
         .output()
-        .map_err(|err| git_spawn_error(&dest, err))?;
+        .map_err(|err| git_spawn_error(dest, err))?;
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(dest);
         let stderr = String::from_utf8_lossy(&output.stderr);
         return ValidationSnafu {
             reason: format!(
@@ -217,28 +309,35 @@ pub fn clone_as_checkout(url: &str, root: &Path, name: &str) -> Result<Argosy> {
         }
         .fail();
     }
-    match Argosy::open(&dest) {
+    Ok(())
+}
+
+/// Opens a fresh clone as an accepted checkout: it must be an argosy, its
+/// sidecar (when present) must verify, and the pull-time integrity stamp is
+/// written. Any failure removes the clone.
+fn accept_checkout(dest: &Path) -> Result<Argosy> {
+    match Argosy::open(dest) {
         Ok(argosy) => {
             // A missing sidecar is fine: never packaged, nothing to verify.
-            if sidecar_is_regular_file(&dest)
-                && let Err(error) = crate::package::validate_integrity(&dest)
+            if sidecar_is_regular_file(dest)
+                && let Err(error) = crate::package::validate_integrity(dest)
             {
-                let _ = fs::remove_dir_all(&dest);
+                let _ = fs::remove_dir_all(dest);
                 return Err(error);
             }
             // The stamp is what makes a *later* tamper with the cloned tree
             // detectable.
-            if let Err(error) = write_import_integrity_stamp(&dest) {
-                let _ = fs::remove_dir_all(&dest);
+            if let Err(error) = write_import_integrity_stamp(dest) {
+                let _ = fs::remove_dir_all(dest);
                 return Err(error);
             }
             Ok(argosy)
         }
         Err(error) => {
-            let _ = fs::remove_dir_all(&dest);
+            let _ = fs::remove_dir_all(dest);
             NotAnArgosySnafu {
-                path: dest,
-                reason: format!("`{url}` cloned, but the clone is not an argosy: {error:#}"),
+                path: dest.to_path_buf(),
+                reason: format!("the clone is not an argosy: {error:#}"),
             }
             .fail()
         }
@@ -253,6 +352,12 @@ pub fn integrity_status(checkout: &Path) -> &'static str {
     } else {
         "no sidecar"
     }
+}
+
+/// The values [`integrity_status`] can return; also the allowed `integrity`
+/// spellings in an import lockfile entry.
+pub fn integrity_status_strings() -> &'static [&'static str] {
+    &["verified", "no sidecar"]
 }
 
 /// The pull-time stamp path beside a checkout: `<parent>/<name>.import-integrity`.
@@ -342,17 +447,7 @@ pub fn checkout_head_commit(checkout: &Path) -> Option<String> {
         (text.len() == 40 || text.len() == 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
     }
 
-    let git = checkout.join(".git");
-    let metadata = fs::symlink_metadata(&git).ok()?;
-    // A `.git` file points at the real git dir (worktrees, submodules);
-    // `Path::join` keeps an absolute target as-is.
-    let git_dir = if metadata.file_type().is_dir() {
-        git
-    } else {
-        let pointer = fs::read_to_string(&git).ok()?;
-        let target = pointer.strip_prefix("gitdir:")?.trim();
-        checkout.join(target)
-    };
+    let git_dir = git_dir_of(checkout)?;
     let head = fs::read_to_string(git_dir.join("HEAD"))
         .ok()?
         .trim()
@@ -373,6 +468,687 @@ pub fn checkout_head_commit(checkout: &Path) -> Option<String> {
         let (hash, name) = line.split_once(' ')?;
         (name.trim() == ref_name && is_commit_id(hash)).then(|| hash.to_string())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Pinned updates and removal
+//
+
+/// The namespaces whose changes steer agents directly; a pin moves only
+/// after the importer has reviewed the diff of these.
+pub const REVIEW_NAMESPACES: [&str; 2] = ["skill", "styleguide"];
+
+/// File changes by area: the two review namespaces, and everything else,
+/// for the summary `update` prints before asking to move the pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct ChangeCounts {
+    /// Files added, removed, or changed under `skill/`.
+    pub skill: usize,
+    /// Files added, removed, or changed under `styleguide/`.
+    pub styleguide: usize,
+    /// Files changed anywhere else (manifest, documents, sidecar).
+    pub other: usize,
+}
+
+impl ChangeCounts {
+    /// Changes across the whole book.
+    pub fn total(&self) -> usize {
+        self.skill + self.styleguide + self.other
+    }
+}
+
+/// What preparing an update found: the change between the checkout's pinned
+/// commit and what its tracked ref resolves to now, with the diff an
+/// importer must review.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UpdatePlan {
+    /// The checkout name being updated.
+    pub name: String,
+    /// The URL the candidate was cloned from.
+    pub url: String,
+    /// The ref the update followed to find `to_commit`.
+    pub reference: String,
+    /// The checkout's current commit (`None` when it carries no git
+    /// metadata — a plain tree).
+    pub from_commit: Option<String>,
+    /// The commit the tracked ref resolves to now.
+    pub to_commit: String,
+    /// Whether `from_commit` already is `to_commit` (nothing to apply).
+    pub up_to_date: bool,
+    /// Changed-file counts across the whole book.
+    pub counts: ChangeCounts,
+    /// Unified diff of `skill/` and `styleguide/` between the current tree
+    /// and the candidate, with `## …` notes for namespaces that appear on
+    /// only one side; empty when nothing changed.
+    pub review_diff: String,
+}
+
+/// The outcome of [`prepare_update`].
+#[derive(Debug)]
+pub enum PreparedUpdate {
+    /// The tracked ref already resolves to the checkout's commit; the plan
+    /// is filled in but there is nothing to apply.
+    UpToDate(UpdatePlan),
+    /// A verified candidate sits beside the live checkout. Show
+    /// [`Update::plan`], get the importer's confirmation, then
+    /// [`Update::apply`]. Dropping the `Update` without applying it
+    /// deletes the candidate and changes nothing.
+    Ready(Update),
+}
+
+/// A prepared update holding its verified candidate checkout. The live
+/// checkout is never touched until [`Update::apply`] succeeds.
+#[derive(Debug)]
+pub struct Update {
+    root: PathBuf,
+    name: String,
+    candidate: PathBuf,
+    plan: UpdatePlan,
+}
+
+impl Drop for Update {
+    fn drop(&mut self) {
+        // A no-op once `apply` renamed the candidate into place.
+        discard_checkout(&self.candidate);
+    }
+}
+
+/// Best-effort removal of a scratch checkout: its directory and the
+/// integrity stamp written beside it.
+fn discard_checkout(path: &Path) {
+    let _ = fs::remove_dir_all(path);
+    let _ = fs::remove_file(import_integrity_stamp(path));
+}
+
+impl Update {
+    /// The prepared plan: what changed, and the diff to review.
+    pub fn plan(&self) -> &UpdatePlan {
+        &self.plan
+    }
+
+    /// Moves the pin: the live checkout is set aside, the verified
+    /// candidate takes its place, and the pull-time integrity stamp is
+    /// rewritten for the new tree. Any failure restores the previous
+    /// checkout; the candidate is always cleaned up.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`](crate::error::Error) when a swap step fails (the
+    /// previous checkout is restored), or the integrity-stamp write fails.
+    pub fn apply(self) -> Result<UpdatePlan> {
+        let current = self.root.join(&self.name);
+        let backup = self
+            .root
+            .join(format!("{}.replaced-{}", self.name, std::process::id()));
+        // A stale backup from an interrupted run must not block the rename.
+        let _ = fs::remove_dir_all(&backup);
+        fs::rename(&current, &backup).context(IoSnafu {
+            path: current.clone(),
+        })?;
+        if let Err(error) = fs::rename(&self.candidate, &current) {
+            let failure = IoSnafu {
+                path: self.candidate.clone(),
+            }
+            .into_error(error);
+            if fs::rename(&backup, &current).is_ok() {
+                return Err(failure);
+            }
+            return ValidationSnafu {
+                reason: format!(
+                    "swapping the updated checkout in failed and the previous checkout \
+                     could not be restored; both `{}` and `{}` remain on disk — inspect \
+                     them before retrying",
+                    backup.display(),
+                    current.display()
+                ),
+            }
+            .fail();
+        }
+        if let Err(error) = write_import_integrity_stamp(&current) {
+            // The candidate is in place but unstamped; restore the old tree.
+            let _ = fs::remove_dir_all(&current);
+            let _ = fs::rename(&backup, &current);
+            return Err(error);
+        }
+        let _ = fs::remove_dir_all(&backup);
+        // The plan cannot move out of a Drop-holding self.
+        Ok(self.plan.clone())
+    }
+}
+
+/// Prepares an update of the checkout `name` in store `root`: resolves the
+/// tracked `reference` at `url`, clones the candidate beside the live
+/// checkout, verifies it exactly as `pull` would, and diffs the two trees.
+/// Nothing on the live checkout changes until [`Update::apply`].
+///
+/// # Errors
+///
+/// [`Error::Validation`](crate::error::Error) for an unsafe name or URL, an
+/// unresolvable ref, or a candidate that fails the pull-time checks (not an
+/// argosy, integrity mismatch); [`Error::Io`](crate::error::Error) for
+/// filesystem failures.
+pub fn prepare_update(
+    root: &Path,
+    name: &str,
+    url: &str,
+    reference: &str,
+) -> Result<PreparedUpdate> {
+    ensure!(
+        !url.is_empty() && !url.starts_with('-'),
+        ValidationSnafu {
+            reason: format!("invalid url `{url}`: pass a git URL or remote name, not an option"),
+        }
+    );
+    ensure!(
+        !reference.is_empty() && !reference.starts_with('-'),
+        ValidationSnafu {
+            reason: format!(
+                "invalid ref `{reference}`: pass a branch, tag, or `HEAD`, not an option"
+            ),
+        }
+    );
+    ensure!(
+        crate::bundle::is_safe_bundle_name(name) && name != LOCAL_ARGOSY_NAME,
+        ValidationSnafu {
+            reason: format!("invalid checkout name `{name}`")
+        }
+    );
+    let current = root.join(name);
+    ensure!(
+        crate::bundle::is_real_dir(&current),
+        ValidationSnafu {
+            reason: format!("no checkout `{}` in `{}` to update", name, root.display())
+        }
+    );
+    let to_commit = resolve_remote_commit(url, reference)?;
+    let from_commit = checkout_head_commit(&current);
+    let up_to_date = from_commit.as_deref() == Some(to_commit.as_str());
+    let plan_of = |counts: ChangeCounts, review_diff: String| UpdatePlan {
+        name: name.to_string(),
+        url: url.to_string(),
+        reference: reference.to_string(),
+        from_commit: from_commit.clone(),
+        to_commit: to_commit.clone(),
+        up_to_date,
+        counts,
+        review_diff,
+    };
+    if up_to_date {
+        return Ok(PreparedUpdate::UpToDate(plan_of(
+            ChangeCounts::default(),
+            String::new(),
+        )));
+    }
+
+    let candidate = unique_sibling(root, name, ".update-")?;
+    let cleanup_candidate = candidate.clone();
+    let prepared = (|| -> Result<Update> {
+        clone_url_to(url, &candidate)?;
+        let pin = to_commit.as_str();
+        if let Err(error) = git_in_dir(&candidate, &["checkout", "--quiet", "--detach", pin]) {
+            return Err(match error {
+                crate::error::Error::Validation { reason } => ValidationSnafu {
+                    reason: format!(
+                        "commit `{pin}` could not be checked out from `{url}` (it may have \
+                         been force-pushed away upstream): {reason}"
+                    ),
+                }
+                .build(),
+                other => other,
+            });
+        }
+        accept_checkout(&candidate)?;
+        let counts = change_counts(&current, &candidate)?;
+        let review_diff = review_diff(root, name, &candidate)?;
+        Ok(Update {
+            root: root.to_path_buf(),
+            name: name.to_string(),
+            candidate,
+            plan: plan_of(counts, review_diff),
+        })
+    })();
+    match prepared {
+        Ok(update) => Ok(PreparedUpdate::Ready(update)),
+        Err(error) => {
+            discard_checkout(&cleanup_candidate);
+            Err(error)
+        }
+    }
+}
+
+/// A fresh, unclaimed sibling path of `root/<name>`: `<name><suffix><pid>`
+/// (plus a counter on collision), for update candidates and swap backups.
+fn unique_sibling(root: &Path, name: &str, suffix: &str) -> Result<PathBuf> {
+    for counter in 0.. {
+        let candidate = root.join(format!("{name}{suffix}{}", std::process::id() + counter));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("an unclaimed sibling is found within u32 iterations")
+}
+
+/// Resolves `reference` at `url` to a commit id via `git ls-remote`,
+/// preferring `refs/heads/<reference>` over `refs/tags/<reference>` when a
+/// name exists as both, and never returning anything but a verified
+/// hex object id.
+///
+/// # Errors
+///
+/// [`Error::Validation`](crate::error::Error) when the ref cannot be
+/// resolved or resolves to something that is not an object id.
+pub fn resolve_remote_commit(url: &str, reference: &str) -> Result<String> {
+    ensure!(
+        !url.is_empty() && !url.starts_with('-'),
+        ValidationSnafu {
+            reason: format!("invalid url `{url}`: pass a git URL or remote name, not an option"),
+        }
+    );
+    ensure!(
+        !reference.is_empty() && !reference.starts_with('-'),
+        ValidationSnafu {
+            reason: format!(
+                "invalid ref `{reference}`: pass a branch, tag, or `HEAD`, not an option"
+            ),
+        }
+    );
+    let output = Command::new("git")
+        .args(["ls-remote", url, reference])
+        .output()
+        .map_err(|err| git_spawn_error(root_cwd(), err))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return ValidationSnafu {
+            reason: format!(
+                "`git ls-remote {url} {reference}` failed ({}): {}",
+                output.status,
+                stderr.trim()
+            ),
+        }
+        .fail();
+    }
+    // Lines are `<sha>\t<refname>`; `ls-remote` patterns match the ref tail,
+    // so both refs/heads/x and refs/tags/x come back for `x`.
+    let lines = String::from_utf8_lossy(&output.stdout);
+    let mut heads: Option<String> = None;
+    let mut tags: Option<String> = None;
+    let mut exact: Option<String> = None;
+    let mut any: Option<String> = None;
+    for line in lines.lines() {
+        let Some((sha, refname)) = line.split_once('\t') else {
+            continue;
+        };
+        let (sha, refname) = (sha.trim(), refname.trim());
+        if !(sha.len() == 40 || sha.len() == 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        if refname == format!("refs/heads/{reference}") {
+            heads = Some(sha.to_string());
+        } else if refname == format!("refs/tags/{reference}") {
+            tags = Some(sha.to_string());
+        } else if refname == reference {
+            exact = exact.or(Some(sha.to_string()));
+        }
+        any = any.or(Some(sha.to_string()));
+    }
+    heads.or(tags).or(exact).or(any).ok_or_else(|| {
+        ValidationSnafu {
+            reason: format!("`{reference}` does not resolve to a commit at `{url}`"),
+        }
+        .build()
+    })
+}
+
+/// The default branch `url`'s HEAD points at (`"main"`, `"master"`), or
+/// `"HEAD"` when the remote does not say.
+///
+/// # Errors
+///
+/// [`Error::Validation`](crate::error::Error) when `git ls-remote --symref`
+/// fails or git is missing.
+pub fn default_remote_branch(url: &str) -> Result<String> {
+    ensure!(
+        !url.is_empty() && !url.starts_with('-'),
+        ValidationSnafu {
+            reason: format!("invalid url `{url}`: pass a git URL or remote name, not an option"),
+        }
+    );
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref", url, "HEAD"])
+        .output()
+        .map_err(|err| git_spawn_error(root_cwd(), err))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return ValidationSnafu {
+            reason: format!(
+                "`git ls-remote --symref {url} HEAD` failed ({}): {}",
+                output.status,
+                stderr.trim()
+            ),
+        }
+        .fail();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // First line: `ref: refs/heads/main\tHEAD`.
+    for line in stdout.lines() {
+        if let Some(target) = line.trim().strip_prefix("ref:") {
+            let target = target.split('\t').next().unwrap_or(target).trim();
+            if let Some(branch) = target.strip_prefix("refs/heads/") {
+                return Ok(branch.to_string());
+            }
+        }
+    }
+    Ok("HEAD".to_string())
+}
+
+/// A placeholder cwd for git spawn errors that have no natural directory.
+fn root_cwd() -> &'static Path {
+    Path::new("/")
+}
+
+/// The `origin` URL and tracked branch of an existing checkout, read from
+/// git's own files so a checkout pulled before lockfiles existed can be
+/// adopted into one. `None` when the checkout has no git metadata or no
+/// `origin` remote; the ref falls back to `HEAD` for detached checkouts.
+pub fn checkout_remote(checkout: &Path) -> Option<(String, String)> {
+    let git_dir = git_dir_of(checkout)?;
+    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+
+    let mut url: Option<String> = None;
+    let mut merge_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut section = (String::new(), String::new());
+    for line in config.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.split(']').next().unwrap_or(header);
+            // `[remote "origin"]` / `[branch "main"]` / `[core]`
+            let mut parts = header.split_whitespace();
+            section = match (parts.next(), parts.next()) {
+                (Some(kind), Some(labeled)) => {
+                    let label = labeled.trim_matches('"');
+                    (kind.to_string(), label.to_string())
+                }
+                (Some(kind), None) => (kind.to_string(), String::new()),
+                _ => (String::new(), String::new()),
+            };
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let (key, value) = (key.trim(), value.trim());
+            // Strip trailing `;`/`#` comments the way git config allows.
+            let value = value
+                .split([';', '#'])
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .trim_matches('"');
+            match section {
+                (ref kind, ref label) if kind == "remote" && label == "origin" => {
+                    if key == "url" && url.is_none() {
+                        url = Some(value.to_string());
+                    }
+                }
+                (ref kind, _) if kind == "branch" && key == "merge" => {
+                    let branch = section.1.clone();
+                    merge_of.insert(branch, value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    let url = url?;
+    // The ref to follow: the branch HEAD sits on, when it tracks one.
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(ref_name) = head.strip_prefix("ref: ") {
+        let branch = ref_name.trim().strip_prefix("refs/heads/")?;
+        let reference = merge_of
+            .get(branch)
+            .and_then(|merge| merge.strip_prefix("refs/heads/"))
+            .unwrap_or(branch);
+        return Some((url, reference.to_string()));
+    }
+    Some((url, "HEAD".to_string()))
+}
+
+/// The `.git` directory of `checkout` (following one `gitdir:` indirection),
+/// or `None` when it has no git metadata.
+fn git_dir_of(checkout: &Path) -> Option<PathBuf> {
+    let git = checkout.join(".git");
+    let metadata = fs::symlink_metadata(&git).ok()?;
+    if metadata.file_type().is_dir() {
+        Some(git)
+    } else {
+        let pointer = fs::read_to_string(&git).ok()?;
+        let target = pointer.strip_prefix("gitdir:")?.trim();
+        Some(checkout.join(target))
+    }
+}
+
+/// Deletes the checkout `name` from store `root` together with its
+/// integrity stamp, returning the removed path. Works on broken checkouts
+/// too — removing a tampered import to re-pull it is the documented repair
+/// path, so no argosy.md is required.
+///
+/// # Errors
+///
+/// [`Error::Validation`](crate::error::Error) when `name` is unsafe or
+/// reserved, or no such real directory exists.
+pub fn remove_checkout(root: &Path, name: &str) -> Result<PathBuf> {
+    ensure!(
+        crate::bundle::is_safe_bundle_name(name),
+        ValidationSnafu {
+            reason: format!("invalid checkout name `{name}`")
+        }
+    );
+    ensure!(
+        name != LOCAL_ARGOSY_NAME,
+        ValidationSnafu {
+            reason: format!(
+                "`{LOCAL_ARGOSY_NAME}` is the project-local bundle, not an import; \
+                 delete its directory by hand if that is really intended"
+            )
+        }
+    );
+    ensure!(
+        name != crate::lockfile::LOCKFILE_NAME,
+        ValidationSnafu {
+            reason: format!(
+                "`{}` is the import lockfile, not a checkout",
+                crate::lockfile::LOCKFILE_NAME
+            )
+        }
+    );
+    let dest = root.join(name);
+    ensure!(
+        dest.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_dir()),
+        ValidationSnafu {
+            reason: format!(
+                "no checkout `{}` in `{}` (a symlink is never a checkout)",
+                name,
+                root.display()
+            )
+        }
+    );
+    fs::remove_dir_all(&dest).context(IoSnafu { path: dest.clone() })?;
+    let stamp = import_integrity_stamp(&dest);
+    if stamp.exists() {
+        fs::remove_file(&stamp).context(IoSnafu { path: stamp })?;
+    }
+    Ok(dest)
+}
+
+/// Every regular file under `root`, as sorted paths relative to it, with a
+/// content hash per file. `.git/` and `.argosy/` directories are skipped at
+/// any depth: they are git's own state and derived caches.
+fn file_hashes(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+    fn walk(
+        dir: &Path,
+        rel: &Path,
+        out: &mut std::collections::BTreeMap<PathBuf, String>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(dir).context(IoSnafu {
+            path: dir.to_path_buf(),
+        })? {
+            let entry = entry.context(IoSnafu {
+                path: dir.to_path_buf(),
+            })?;
+            let name = entry.file_name();
+            let path = entry.path();
+            let file_type = entry.file_type().context(IoSnafu { path: path.clone() })?;
+            if file_type.is_dir() {
+                if name == ".git" || name == ".argosy" {
+                    continue;
+                }
+                walk(&path, &rel.join(&name), out)?;
+            } else if file_type.is_file() {
+                let bytes = fs::read(&path).context(IoSnafu { path: path.clone() })?;
+                out.insert(rel.join(&name), crate::hash::sha256_hex(&bytes));
+            }
+        }
+        Ok(())
+    }
+    let mut out = std::collections::BTreeMap::new();
+    if root.is_dir() {
+        walk(root, Path::new(""), &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Counts changed files between two trees (added, removed, or content
+/// changed), bucketed by review namespace.
+fn change_counts(old: &Path, new: &Path) -> Result<ChangeCounts> {
+    let old_files = file_hashes(old)?;
+    let new_files = file_hashes(new)?;
+    let mut counts = ChangeCounts::default();
+    for (rel, old_hash) in &old_files {
+        let changed = match new_files.get(rel) {
+            Some(new_hash) => new_hash != old_hash,
+            None => true,
+        };
+        if changed {
+            counts.bump(rel);
+        }
+    }
+    for rel in new_files.keys() {
+        if !old_files.contains_key(rel) {
+            counts.bump(rel);
+        }
+    }
+    Ok(counts)
+}
+
+impl ChangeCounts {
+    /// Counts one changed file into its bucket, by first path component.
+    fn bump(&mut self, rel: &Path) {
+        match rel
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        {
+            Some(first) if first == REVIEW_NAMESPACES[0] => self.skill += 1,
+            Some(first) if first == REVIEW_NAMESPACES[1] => self.styleguide += 1,
+            _ => self.other += 1,
+        }
+    }
+}
+
+/// The unified diff of the review namespaces between the checkout `name`
+/// and the candidate `candidate` (both siblings under `root`), computed
+/// tree against tree so it still works when upstream rewrote history and
+/// the old commit no longer exists in the candidate's object store.
+fn review_diff(root: &Path, name: &str, candidate: &Path) -> Result<String> {
+    let candidate_name = candidate
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| candidate.display().to_string());
+    let mut out = String::new();
+    for ns in REVIEW_NAMESPACES {
+        let old_arg = format!("{name}/{ns}");
+        let new_arg = format!("{candidate_name}/{ns}");
+        let old_dir = root.join(&old_arg);
+        let new_dir = root.join(&new_arg);
+        match (old_dir.is_dir(), new_dir.is_dir()) {
+            (true, true) => {
+                let output = Command::new("git")
+                    .args(["diff", "--no-index"])
+                    .arg(&old_arg)
+                    .arg(&new_arg)
+                    .current_dir(root)
+                    .output()
+                    .context(IoSnafu {
+                        path: root.to_path_buf(),
+                    })?;
+                match output.status.code() {
+                    Some(0) => {}
+                    Some(1) => out.push_str(&normalize_diff_paths(
+                        &String::from_utf8_lossy(&output.stdout),
+                        &old_arg,
+                        &new_arg,
+                        ns,
+                    )),
+                    _ => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return ValidationSnafu {
+                            reason: format!(
+                                "`git diff --no-index {old_arg} {new_arg}` failed: {}",
+                                stderr.trim()
+                            ),
+                        }
+                        .fail();
+                    }
+                }
+            }
+            (false, true) => {
+                let added = file_hashes(&new_dir).map(|files| files.len()).unwrap_or(0);
+                out.push_str(&format!(
+                    "## {ns}/ appears in the new commit and not in the current \
+                     checkout ({added} file{} added wholesale)\n",
+                    if added == 1 { "" } else { "s" }
+                ));
+            }
+            (true, false) => {
+                let removed = file_hashes(&old_dir).map(|files| files.len()).unwrap_or(0);
+                out.push_str(&format!(
+                    "## {ns}/ is removed wholesale in the new commit ({removed} file{})\n",
+                    if removed == 1 { "" } else { "s" }
+                ));
+            }
+            (false, false) => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Rewrites the path spellings of a `git diff --no-index` run into
+/// `a/<ns>/…` / `b/<ns>/…` headers, so the review diff names book paths,
+/// not state-dir scratch directories. Only diff header line shapes are
+/// touched; body lines pass through verbatim.
+fn normalize_diff_paths(diff: &str, old_arg: &str, new_arg: &str, ns: &str) -> String {
+    let header = |line: &str| {
+        line.starts_with("diff --git")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("rename ")
+            || line.starts_with("copy ")
+            || line.starts_with("Binary files")
+    };
+    diff.lines()
+        .map(|line| {
+            if !header(line) {
+                return line.to_string();
+            }
+            // Prefixed forms first; `new_arg` starts with `old_arg`'s name,
+            // so bare forms are replaced newest-first.
+            line.replace(&format!("a/{old_arg}"), &format!("a/{ns}"))
+                .replace(&format!("b/{new_arg}"), &format!("b/{ns}"))
+                .replace(new_arg, ns)
+                .replace(old_arg, ns)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[cfg(test)]
@@ -812,5 +1588,392 @@ mod tests {
         fs::create_dir_all(junk.join(".git")).unwrap();
         fs::write(junk.join(".git/HEAD"), "not a ref\n").unwrap();
         assert_eq!(checkout_head_commit(&junk), None);
+    }
+
+    /// Runs git in `dir`, panicking with git's stderr on failure.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit_all(dir: &Path, message: &str) {
+        run_git(
+            dir,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"],
+        );
+        run_git(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    fn head_sha(dir: &Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A book repo on branch `main` with one commit and a skill file.
+    fn book_repo(dir: &Path) -> String {
+        fs::create_dir_all(dir.join("skill")).unwrap();
+        fs::write(
+            dir.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: remote-rules\nargosy_version: \"1.2.0\"\n---\n# remote-rules\n",
+        )
+        .unwrap();
+        fs::write(dir.join("skill/one.md"), "old line\n").unwrap();
+        run_git(dir, &["init", "--quiet", "-b", "main"]);
+        commit_all(dir, "one");
+        dir.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn update_previews_the_review_diff_and_moves_the_pin() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(&url, &root, "shared").unwrap();
+        let first = head_sha(&repo);
+
+        // Upstream moves: a skill edit, a new rule, and a document change.
+        fs::write(repo.join("skill/one.md"), "new line\n").unwrap();
+        fs::create_dir_all(repo.join("styleguide")).unwrap();
+        fs::write(repo.join("styleguide/rule.md"), "# rule\n").unwrap();
+        fs::write(repo.join("argosy.md.new"), "scratch\n").unwrap();
+        fs::remove_file(repo.join("argosy.md.new")).unwrap();
+        fs::create_dir_all(repo.join("document")).unwrap();
+        fs::write(repo.join("document/guide.md"), "Guide.\n").unwrap();
+        commit_all(&repo, "two");
+        let second = head_sha(&repo);
+
+        let prepared = prepare_update(&root, "shared", &url, "main").unwrap();
+        let PreparedUpdate::Ready(update) = prepared else {
+            panic!("a moved ref must prepare a Ready update");
+        };
+        let plan = update.plan();
+        assert_eq!(plan.from_commit.as_deref(), Some(first.as_str()));
+        assert_eq!(plan.to_commit, second);
+        assert!(!plan.up_to_date);
+        assert_eq!(plan.counts.skill, 1, "{:?}", plan.counts);
+        assert_eq!(plan.counts.styleguide, 1, "{:?}", plan.counts);
+        assert_eq!(plan.counts.other, 1, "{:?}", plan.counts);
+        assert!(
+            plan.review_diff.contains("skill/one.md"),
+            "{}",
+            plan.review_diff
+        );
+        // `styleguide/` did not exist before, so it reports wholesale.
+        assert!(
+            plan.review_diff
+                .contains("## styleguide/ appears in the new commit"),
+            "{}",
+            plan.review_diff
+        );
+        // Headers name book paths, not state-dir scratch directories.
+        assert!(
+            !plan.review_diff.contains(".update-"),
+            "no scratch paths leak into headers: {}",
+            plan.review_diff
+        );
+
+        let applied = update.apply().unwrap();
+        assert_eq!(applied.to_commit, second);
+        assert_eq!(
+            checkout_head_commit(&root.join("shared")).as_deref(),
+            Some(second.as_str())
+        );
+        assert!(verify_import_integrity(&root.join("shared")).is_ok());
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("shared.update-") || n.starts_with("shared.replaced-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no candidate or backup dirs: {leftovers:?}"
+        );
+
+        // The ref has not moved again: preparing once more is UpToDate.
+        match prepare_update(&root, "shared", &url, "main").unwrap() {
+            PreparedUpdate::UpToDate(plan) => assert!(plan.up_to_date),
+            PreparedUpdate::Ready(_) => panic!("no change left to apply"),
+        }
+    }
+
+    #[test]
+    fn dropping_a_prepared_update_changes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(&url, &root, "shared").unwrap();
+        let pinned = head_sha(&repo);
+
+        fs::write(repo.join("skill/one.md"), "new line\n").unwrap();
+        commit_all(&repo, "two");
+
+        let prepared = prepare_update(&root, "shared", &url, "main").unwrap();
+        let PreparedUpdate::Ready(update) = prepared else {
+            panic!("expected a Ready update");
+        };
+        drop(update);
+
+        assert_eq!(
+            checkout_head_commit(&root.join("shared")).as_deref(),
+            Some(pinned.as_str()),
+            "the pin did not move"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("shared.update-") || n.starts_with("shared.replaced-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "candidate cleaned on drop: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn update_refuses_a_tampered_candidate_and_keeps_the_old_checkout() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("pkg-repo");
+        packaged_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(repo.to_str().unwrap(), &root, "shared").unwrap();
+
+        // Upstream commits content that disagrees with its own sidecar.
+        fs::write(repo.join("document/guide.md"), "Injected.\n").unwrap();
+        commit_all(&repo, "tamper");
+
+        let err = prepare_update(&root, "shared", repo.to_str().unwrap(), "main").unwrap_err();
+        assert!(err.to_string().contains("integrity"), "{err}");
+
+        // The live checkout is untouched and still verifies.
+        assert!(verify_import_integrity(&root.join("shared")).is_ok());
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("shared.update-") || n.starts_with("shared.replaced-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "refused candidate removed: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn update_diffs_trees_so_a_force_push_cannot_hide_the_change() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(&url, &root, "shared").unwrap();
+
+        // Rewrite history: the old commit is no longer reachable upstream.
+        fs::write(repo.join("skill/one.md"), "rewritten\n").unwrap();
+        commit_all(&repo, "two");
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "--amend",
+                "-m",
+                "rewritten history",
+            ],
+        );
+
+        let prepared = prepare_update(&root, "shared", &url, "main").unwrap();
+        let PreparedUpdate::Ready(update) = prepared else {
+            panic!("a rewritten remote must still prepare a Ready update");
+        };
+        let plan = update.plan();
+        assert!(
+            plan.review_diff.contains("skill/one.md"),
+            "{}",
+            plan.review_diff
+        );
+        assert_eq!(plan.counts.skill, 1, "{:?}", plan.counts);
+        assert_ne!(plan.from_commit.as_deref(), Some(plan.to_commit.as_str()));
+        update.apply().unwrap();
+        assert!(verify_import_integrity(&root.join("shared")).is_ok());
+    }
+
+    #[test]
+    fn clone_at_a_pin_reproduces_the_pinned_commit() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let first = head_sha(&repo);
+        fs::write(repo.join("skill/one.md"), "second\n").unwrap();
+        commit_all(&repo, "two");
+
+        let root = tmp.path().join("store");
+        let argosy = clone_as_checkout_at(&url, &root, "shared", &first).unwrap();
+
+        assert_eq!(argosy.manifest().name(), "remote-rules");
+        assert_eq!(
+            checkout_head_commit(&root.join("shared")).as_deref(),
+            Some(first.as_str()),
+            "the pin wins over the remote's HEAD"
+        );
+    }
+
+    #[test]
+    fn clone_at_a_vanished_pin_fails_loudly() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let first = head_sha(&repo);
+        // Orphan branch: `first` leaves the fetched history entirely.
+        run_git(&repo, &["checkout", "--quiet", "--orphan", "fresh"]);
+        fs::write(repo.join("skill/one.md"), "unrelated\n").unwrap();
+        commit_all(&repo, "unrelated");
+        run_git(&repo, &["branch", "-D", "main"]);
+        // A local clone hardlinks every object, reachable or not; prune so
+        // the vanished pin is genuinely absent.
+        run_git(&repo, &["reflog", "expire", "--expire=now", "--all"]);
+        run_git(&repo, &["gc", "--quiet", "--prune=now"]);
+
+        let root = tmp.path().join("store");
+        let err = clone_as_checkout_at(&url, &root, "shared", &first).unwrap_err();
+
+        assert!(
+            err.to_string().contains("force-pushed"),
+            "the error explains the rug-pull shape: {err}"
+        );
+        assert!(!root.join("shared").exists(), "nothing left behind");
+    }
+
+    #[test]
+    fn remove_checkout_deletes_the_dir_and_its_stamp() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(&url, &root, "shared").unwrap();
+        assert!(import_integrity_stamp(&root.join("shared")).exists());
+
+        let removed = remove_checkout(&root, "shared").unwrap();
+
+        assert_eq!(removed, root.join("shared"));
+        assert!(!root.join("shared").exists());
+        assert!(!import_integrity_stamp(&root.join("shared")).exists());
+    }
+
+    #[test]
+    fn remove_checkout_refuses_reserved_and_missing_names() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("store");
+        fs::create_dir_all(&root).unwrap();
+
+        let err = remove_checkout(&root, LOCAL_ARGOSY_NAME).unwrap_err();
+        assert!(err.to_string().contains("project-local bundle"), "{err}");
+
+        let err = remove_checkout(&root, crate::lockfile::LOCKFILE_NAME).unwrap_err();
+        assert!(err.to_string().contains("lockfile"), "{err}");
+
+        let err = remove_checkout(&root, "nope").unwrap_err();
+        assert!(err.to_string().contains("no checkout"), "{err}");
+
+        let err = remove_checkout(&root, "bad/name").unwrap_err();
+        assert!(err.to_string().contains("invalid checkout name"), "{err}");
+    }
+
+    #[test]
+    fn checkout_remote_reads_origin_and_tracking_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let root = tmp.path().join("store");
+        clone_as_checkout(&url, &root, "shared").unwrap();
+
+        let (found_url, reference) = checkout_remote(&root.join("shared")).unwrap();
+
+        assert_eq!(found_url, url);
+        assert_eq!(reference, "main");
+    }
+
+    #[test]
+    fn checkout_remote_of_a_plain_tree_is_none() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("plain")).unwrap();
+        assert_eq!(checkout_remote(&tmp.path().join("plain")), None);
+    }
+
+    #[test]
+    fn resolve_remote_commit_prefers_a_branch_over_a_same_named_tag() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+        let first = head_sha(&repo);
+        run_git(&repo, &["tag", "main", &first]);
+        fs::write(repo.join("skill/one.md"), "second\n").unwrap();
+        commit_all(&repo, "two");
+        let second = head_sha(&repo);
+
+        assert_eq!(resolve_remote_commit(&url, "main").unwrap(), second);
+        assert_eq!(resolve_remote_commit(&url, "HEAD").unwrap(), second);
+        assert!(
+            resolve_remote_commit(&url, "no-such-ref").is_err(),
+            "an unresolvable ref is an error, not a guess"
+        );
+    }
+
+    #[test]
+    fn default_remote_branch_names_the_heads_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let url = book_repo(&repo);
+
+        assert_eq!(default_remote_branch(&url).unwrap(), "main");
+    }
+
+    #[test]
+    fn normalize_diff_paths_rewrites_only_headers() {
+        let diff = "diff --git a/shared/skill/one.md b/shared.update-1/skill/one.md\n\
+                    index 0906fba..86ba82a 100644\n\
+                    --- a/shared/skill/one.md\n\
+                    +++ b/shared.update-1/skill/one.md\n\
+                    @@ -1 +1 @@\n\
+                    -old\n\
+                    +a/shared/skill/one.md stays in the body\n";
+
+        let normalized =
+            normalize_diff_paths(diff, "shared/skill", "shared.update-1/skill", "skill");
+
+        assert!(normalized.contains("diff --git a/skill/one.md b/skill/one.md"));
+        assert!(normalized.contains("--- a/skill/one.md"));
+        assert!(normalized.contains("+++ b/skill/one.md"));
+        assert!(
+            normalized.contains("+a/shared/skill/one.md stays in the body"),
+            "body lines pass through verbatim: {normalized}"
+        );
     }
 }

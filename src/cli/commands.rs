@@ -1,7 +1,8 @@
 //! Subcommand handlers: argument parsing + one library call + output
 //! formatting. Any real logic here is a bug — it belongs in the library.
 
-use std::path::Path;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[cfg(feature = "default-index")]
@@ -54,39 +55,438 @@ pub(super) fn cmd_init(out: &Output, args: &InitArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result<ExitCode> {
-    let global = args.global.unwrap_or(config.pull.default_global);
-    let root = if global {
-        argosy::pull::global_argosy_dir()?
+/// The checkout store a pull/update/remove/sync operates on: the global
+/// store, or this project's slot (recorded for the catalog on the way in).
+fn store_root(global: bool) -> Result<PathBuf> {
+    if global {
+        argosy::pull::global_argosy_dir()
     } else {
-        // A project-scoped pull creates (or joins) the project's slot:
+        // A project-scoped store creates (or joins) the project's slot:
         // record its canonical root for the catalog.
         let cwd = current_dir()?;
         argosy::pull::record_project_root(&cwd)?;
-        argosy::pull::project_argosy_dir(cwd)?
+        argosy::pull::project_argosy_dir(cwd)
+    }
+}
+
+/// The pin for `name`, or (when none is recorded yet) one built from the
+/// fresh clone: the default branch it tracks and the commit it landed on.
+fn pin_after_pull(
+    root: &Path,
+    name: &str,
+    url: &str,
+    lock: &argosy::lockfile::Lockfile,
+) -> Result<argosy::lockfile::LockEntry> {
+    let dest = root.join(name);
+    let commit =
+        argosy::pull::checkout_head_commit(&dest).ok_or_else(|| argosy::Error::Validation {
+            reason: format!(
+                "the clone at `{}` carries no readable git commit; \
+                 cannot pin it",
+                dest.display()
+            ),
+        })?;
+    let reference = match lock.entry(name) {
+        Some(entry) => entry.reference.clone(),
+        None => argosy::pull::default_remote_branch(url)?,
     };
-    let argosy = argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?;
+    Ok(argosy::lockfile::LockEntry {
+        url: url.to_string(),
+        reference,
+        commit,
+        integrity: argosy::pull::integrity_status(&dest).to_string(),
+    })
+}
+
+pub(super) fn cmd_pull(out: &Output, config: &Config, args: &PullArgs) -> Result<ExitCode> {
+    let global = args.global.unwrap_or(config.pull.default_global);
+    let root = store_root(global)?;
+    let mut lock = argosy::lockfile::Lockfile::load(&root)?;
+    // A recorded pin wins: a pinned-but-missing checkout is re-cloned at
+    // the pinned commit; a different URL is refused below.
+    let argosy = if let Some(entry) = lock.entry(&args.name) {
+        ensure_pinned_url(&args.name, &entry.url, &args.url)?;
+        argosy::pull::clone_as_checkout_at(&entry.url, &root, &args.name, &entry.commit)?
+    } else {
+        argosy::pull::clone_as_checkout(&args.url, &root, &args.name)?
+    };
+    let pin = pin_after_pull(&root, &args.name, &args.url, &lock)?;
+    lock.upsert(&args.name, pin);
+    lock.save(&root)?;
     let dest = root.join(&args.name);
-    // Any sidecar on an accepted clone passed verification (clone_as_checkout refuses mismatches).
-    let integrity = argosy::pull::integrity_status(&dest);
+    let commit = argosy::pull::checkout_head_commit(&dest);
     if out.json {
         out.json(&serde_json::json!({
             "name": argosy.manifest().name(),
             "argosy_version": argosy.manifest().argosy_version(),
             "path": dest,
             "global": global,
-            "integrity": integrity,
+            "integrity": argosy::pull::integrity_status(&dest),
+            "commit": commit,
         }))?;
     } else {
         out.note(&format!(
-            "pulled {} {} into {} (integrity: {})",
+            "pulled {} {} into {} (integrity: {}, commit: {})",
             argosy.manifest().name(),
             argosy.manifest().argosy_version(),
             dest.display(),
-            integrity
+            argosy::pull::integrity_status(&dest),
+            commit.as_deref().unwrap_or("unknown"),
         ));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Refuses a pull whose URL differs from the pinned one: cloning a pinned
+/// name from elsewhere would launder content past the pin.
+fn ensure_pinned_url(name: &str, pinned: &str, requested: &str) -> Result<()> {
+    if pinned == requested {
+        return Ok(());
+    }
+    Err(argosy::Error::Validation {
+        reason: format!(
+            "checkout `{name}` is pinned to `{pinned}`; refusing to pull it from \
+             `{requested}` — remove it first (`argosy remove {name}`) if the pin \
+             is really meant to change"
+        ),
+    })
+}
+
+/// One line of the change summary shared by update's human and JSON faces.
+fn update_summary_line(plan: &argosy::pull::UpdatePlan) -> String {
+    fn short(commit: &str) -> &str {
+        &commit[..12.min(commit.len())]
+    }
+    format!(
+        "{}: {} → {} (skill: {}, styleguide: {}, other: {} file{})",
+        plan.name,
+        plan.from_commit
+            .as_deref()
+            .map(short)
+            .unwrap_or("no commit"),
+        short(&plan.to_commit),
+        plan.counts.skill,
+        plan.counts.styleguide,
+        plan.counts.other,
+        if plan.counts.total() == 1 { "" } else { "s" },
+    )
+}
+
+/// Asks on the terminal whether the pin should move; reads one line.
+fn confirm_pin_move() -> Result<bool> {
+    let mut stdin = std::io::stdin().lock();
+    let mut answer = String::new();
+    let read = std::io::BufRead::read_line(&mut stdin, &mut answer).map_err(|source| {
+        argosy::Error::Io {
+            path: "<stdin>".into(),
+            source,
+        }
+    })?;
+    Ok(read > 0 && matches!(answer.trim(), "y" | "Y" | "yes"))
+}
+
+pub(super) fn cmd_update(out: &Output, config: &Config, args: &UpdateArgs) -> Result<ExitCode> {
+    let global = args.global.unwrap_or(config.pull.default_global);
+    let root = store_root(global)?;
+    let mut lock = argosy::lockfile::Lockfile::load(&root)?;
+    let checkout = root.join(&args.name);
+    if !checkout.is_dir() {
+        return Err(argosy::Error::Validation {
+            reason: format!(
+                "no checkout `{}` in `{}`; `argosy pull <url> {0}` reproduces its pin, \
+                 or `argosy sync` materializes every pin",
+                args.name,
+                root.display()
+            ),
+        });
+    }
+    // URL and ref: the recorded pin, a `--reference` override, or adoption
+    // from the checkout's own origin remote.
+    let (url, reference) = match (lock.entry(&args.name), args.reference.as_deref()) {
+        (Some(entry), reference) => (
+            entry.url.clone(),
+            reference.unwrap_or(&entry.reference).to_string(),
+        ),
+        (None, reference) => {
+            let (url, tracked) = argosy::pull::checkout_remote(&checkout).ok_or_else(|| {
+                argosy::Error::Validation {
+                    reason: format!(
+                        "no pin recorded for `{}` and its checkout has no origin remote \
+                         to adopt one from; re-pull it with `argosy pull <url> {0}`",
+                        args.name
+                    ),
+                }
+            })?;
+            (url, reference.unwrap_or(&tracked).to_string())
+        }
+    };
+
+    let prepared = argosy::pull::prepare_update(&root, &args.name, &url, &reference)?;
+    // Owned: `prepared` is consumed by `apply` below, and the plan (diff
+    // included) is printed after that point too.
+    let plan = match &prepared {
+        argosy::pull::PreparedUpdate::UpToDate(plan) => plan.clone(),
+        argosy::pull::PreparedUpdate::Ready(update) => update.plan().clone(),
+    };
+
+    // One JSON document per run: the plan when nothing is applied, the
+    // result otherwise. Human mode shows the diff up front.
+    let json_plan = |applied: bool| {
+        serde_json::json!({
+            "name": plan.name,
+            "url": plan.url,
+            "reference": plan.reference,
+            "from_commit": plan.from_commit,
+            "to_commit": plan.to_commit,
+            "up_to_date": plan.up_to_date,
+            "applied": applied,
+            "counts": {
+                "skill": plan.counts.skill,
+                "styleguide": plan.counts.styleguide,
+                "other": plan.counts.other,
+            },
+            "review_diff": plan.review_diff,
+        })
+    };
+
+    if !out.json {
+        if plan.up_to_date {
+            out.note(&format!(
+                "`{}` is already at {} (`{}` unchanged)",
+                plan.name,
+                &plan.to_commit[..12.min(plan.to_commit.len())],
+                plan.reference
+            ));
+        } else {
+            out.note(&format!("update {}", update_summary_line(&plan)));
+            if !plan.review_diff.is_empty() {
+                // The diff is the review artifact: stdout even under --quiet.
+                print!("{}", plan.review_diff);
+            }
+        }
+    }
+
+    // An up-to-date checkout with no pin gets adopted, so the pin exists
+    // before the next pull could bypass it.
+    if plan.up_to_date {
+        if lock.entry(&args.name).is_none() {
+            lock.upsert(
+                &args.name,
+                argosy::lockfile::LockEntry {
+                    url: plan.url.clone(),
+                    reference: plan.reference.clone(),
+                    commit: plan.to_commit.clone(),
+                    integrity: argosy::pull::integrity_status(&checkout).to_string(),
+                },
+            );
+            lock.save(&root)?;
+            out.note(&format!("adopted `{}` into the lockfile", args.name));
+        }
+        if out.json {
+            out.json(&json_plan(false))?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if args.dry_run {
+        out.note("dry run: the pin was not moved");
+        if out.json {
+            out.json(&json_plan(false))?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let argosy::pull::PreparedUpdate::Ready(update) = prepared else {
+        unreachable!("an up-to-date plan returned above")
+    };
+    if !args.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(argosy::Error::Validation {
+                reason: "refusing to move the pin without confirmation: pass `--yes`, \
+                         or `--dry-run` to preview"
+                    .to_string(),
+            });
+        }
+        eprint!("move the pin? [y/N] ");
+        std::io::stderr().flush().ok();
+        if !confirm_pin_move()? {
+            out.note("left as-is; nothing was changed");
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+
+    let applied = update.apply()?;
+    lock.upsert(
+        &args.name,
+        argosy::lockfile::LockEntry {
+            url: applied.url.clone(),
+            reference: applied.reference.clone(),
+            commit: applied.to_commit.clone(),
+            integrity: argosy::pull::integrity_status(&root.join(&args.name)).to_string(),
+        },
+    );
+    lock.save(&root)?;
+    if out.json {
+        out.json(&json_plan(true))?;
+    } else {
+        out.note(&format!(
+            "moved the pin: {} now at {}",
+            applied.name,
+            &applied.to_commit[..12.min(applied.to_commit.len())]
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(super) fn cmd_remove(out: &Output, config: &Config, args: &RemoveArgs) -> Result<ExitCode> {
+    let global = args.global.unwrap_or(config.pull.default_global);
+    let root = store_root(global)?;
+    let removed = argosy::pull::remove_checkout(&root, &args.name)?;
+    let mut lock = argosy::lockfile::Lockfile::load(&root)?;
+    let pin = lock.remove(&args.name);
+    if pin.is_some() {
+        lock.save(&root)?;
+    }
+    if out.json {
+        out.json(&serde_json::json!({
+            "removed": removed,
+            "pin_dropped": pin.is_some(),
+        }))?;
+    } else {
+        out.note(&format!(
+            "removed {} (pin {})",
+            removed.display(),
+            if pin.is_some() {
+                "dropped"
+            } else {
+                "was never recorded"
+            }
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One sync result line: which checkouts appeared, verified which pins,
+/// which drifted, and which could not be reproduced.
+struct SyncOutcome {
+    name: String,
+    status: &'static str,
+    detail: Option<String>,
+}
+
+pub(super) fn cmd_sync(out: &Output, config: &Config, args: &SyncArgs) -> Result<ExitCode> {
+    let global = args.global.unwrap_or(config.pull.default_global);
+    let root = store_root(global)?;
+    let mut lock = argosy::lockfile::Lockfile::load(&root)?;
+    if let Some(from) = &args.from {
+        let adopted = argosy::lockfile::Lockfile::load_from(from)?;
+        if adopted.entries().is_empty() {
+            return Err(argosy::Error::Validation {
+                reason: format!("`{}` holds no pins; nothing to adopt", from.display()),
+            });
+        }
+        for (name, entry) in adopted.entries() {
+            lock.upsert(name.clone(), entry.clone());
+        }
+        lock.save(&root)?;
+        out.note(&format!(
+            "adopted {} pin{} from {}",
+            adopted.entries().len(),
+            if adopted.entries().len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            from.display()
+        ));
+    }
+    if lock.is_empty() {
+        out.note("no pins recorded; `argosy pull` an import first");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut outcomes: Vec<SyncOutcome> = Vec::new();
+    for (name, entry) in lock.entries() {
+        let dest = root.join(name);
+        if !dest.exists() {
+            match argosy::pull::clone_as_checkout_at(&entry.url, &root, name, &entry.commit) {
+                Ok(argosy) => outcomes.push(SyncOutcome {
+                    name: name.clone(),
+                    status: "pulled",
+                    detail: Some(format!(
+                        "{} at {}",
+                        argosy.manifest().name(),
+                        &entry.commit[..12.min(entry.commit.len())]
+                    )),
+                }),
+                Err(error) => outcomes.push(SyncOutcome {
+                    name: name.clone(),
+                    status: "failed",
+                    detail: Some(format!("{error:#}")),
+                }),
+            }
+        } else {
+            match argosy::pull::checkout_head_commit(&dest) {
+                Some(head) if head == entry.commit => outcomes.push(SyncOutcome {
+                    name: name.clone(),
+                    status: "at pin",
+                    detail: None,
+                }),
+                head => outcomes.push(SyncOutcome {
+                    name: name.clone(),
+                    status: "drifted",
+                    detail: Some(format!(
+                        "at {} but pinned {}; run `argosy update {name}` to review \
+                         and move the pin, or `argosy remove {name}`",
+                        head.as_deref().unwrap_or("no commit"),
+                        &entry.commit[..12.min(entry.commit.len())],
+                    )),
+                }),
+            }
+        }
+    }
+
+    let count = |status: &str| outcomes.iter().filter(|o| o.status == status).count();
+    let (pulled, at_pin, drifted, failed) = (
+        count("pulled"),
+        count("at pin"),
+        count("drifted"),
+        count("failed"),
+    );
+    if out.json {
+        out.json(&serde_json::json!({
+            "results": outcomes.iter().map(|o| serde_json::json!({
+                "name": o.name,
+                "status": o.status,
+                "detail": o.detail,
+            })).collect::<Vec<_>>(),
+            "pulled": pulled,
+            "at_pin": at_pin,
+            "drifted": drifted,
+            "failed": failed,
+        }))?;
+    } else {
+        for outcome in &outcomes {
+            out.note(&format!(
+                "{:<12} {}{}",
+                outcome.status,
+                outcome.name,
+                outcome
+                    .detail
+                    .as_deref()
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default()
+            ));
+        }
+        out.note(&format!(
+            "sync: {pulled} pulled, {at_pin} at pin, {drifted} drifted, {failed} failed"
+        ));
+    }
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 pub(super) fn cmd_validate(out: &Output, args: &ValidateArgs) -> Result<ExitCode> {

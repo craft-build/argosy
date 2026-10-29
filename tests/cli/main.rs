@@ -7,6 +7,7 @@ mod catalog;
 mod common;
 mod convert;
 mod help;
+mod imports;
 mod index;
 mod init_validate;
 mod package;
