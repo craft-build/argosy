@@ -33,6 +33,7 @@ pub struct ConflictsParams {
 }
 
 /// The `conflicts` outcome.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ConflictsReport {
     /// The resolved scope path.

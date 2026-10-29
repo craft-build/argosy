@@ -31,6 +31,10 @@
 //! code_tools {
 //!     allow_external_paths = false
 //! }
+//! mcp {
+//!     // Comma-separated subset of knowledge, review, code; unset = all.
+//!     toolsets = "knowledge,review"
+//! }
 //! session {
 //!     project_ttl_secs = 1800
 //!     project_max = 8
@@ -102,6 +106,8 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// Defaults for the code-intelligence tools.
     pub code_tools: CodeToolsConfig,
+    /// Defaults for the MCP server (`argosy mcp`).
+    pub mcp: McpConfig,
     /// Session-cache bounds for MCP project and review sessions.
     pub session: SessionConfig,
     /// Per-import maximum OKF trust tiers (see [`TrustPolicy`]).
@@ -230,6 +236,29 @@ pub struct CodeToolsConfig {
     /// through `astgrep apply` and `conflicts resolve`, write — files
     /// outside the workspace.
     pub allow_external_paths: bool,
+}
+
+/// Defaults for the MCP server (`argosy mcp`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    /// Toolsets the server advertises: a comma-separated subset of
+    /// `knowledge`, `review`, and `code`. Unset means every toolset
+    /// this build compiled in.
+    ///
+    /// The `--toolsets` CLI flag overrides this value.
+    pub toolsets: Option<String>,
+}
+
+impl McpConfig {
+    /// The configured toolset names, split and trimmed; `None` when
+    /// unset. Empty segments survive so [`crate::mcp::Toolsets::from_names`]
+    /// rejects them.
+    pub fn toolsets_names(&self) -> Option<Vec<String>> {
+        self.toolsets
+            .as_deref()
+            .map(|spec| spec.split(',').map(str::trim).map(str::to_string).collect())
+    }
 }
 
 /// Session-cache bounds.
@@ -496,6 +525,10 @@ impl Config {
                     known.join(", ")
                 ),
             });
+        }
+        #[cfg(feature = "mcp")]
+        if let Some(names) = self.mcp.toolsets_names() {
+            crate::mcp::Toolsets::from_names(&names)?;
         }
         if self.session.project_ttl_secs == 0 || self.session.review_ttl_secs == 0 {
             return Err(crate::error::Error::Validation {
@@ -870,6 +903,42 @@ mod tests {
         let config = load(&tmp.path().join("argosy"));
         assert!(config.code_tools.allow_external_paths);
         assert!(!Config::default().code_tools.allow_external_paths);
+    }
+
+    #[test]
+    fn mcp_section_parses_toolsets_and_defaults_to_everything() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            &tmp.path().join("argosy.bml"),
+            "mcp { toolsets = \"knowledge, review\" }",
+        );
+        let config = load(&tmp.path().join("argosy"));
+        assert_eq!(
+            config.mcp.toolsets_names(),
+            Some(vec!["knowledge".to_string(), "review".to_string()]),
+            "split on commas, trimmed"
+        );
+        // Unset means every compiled-in toolset.
+        assert_eq!(Config::default().mcp.toolsets_names(), None);
+    }
+
+    #[test]
+    fn mcp_toolsets_reject_unknown_and_empty_names() {
+        let mut config = Config::default();
+        config.mcp.toolsets = Some("knowledge,nope".into());
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown toolset `nope`"),
+            "names the bad value: {err}"
+        );
+        config.mcp.toolsets = Some("knowledge,".into());
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown toolset"),
+            "an empty segment is not silently dropped: {err}"
+        );
+        config.mcp.toolsets = Some("review".into());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub struct AstgrepParams {
 }
 
 /// The `astgrep` outcome.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AstgrepReport {
     /// `"search"`, `"diff"` (dry-run replace), or `"apply"`.

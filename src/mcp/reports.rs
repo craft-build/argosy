@@ -1,10 +1,13 @@
 //! Tool outcomes (serialized as structured tool results) and resource
 //! shapes.
 
+// The `JsonSchema` derive expansion references `schemars` by bare name;
+// the rmcp re-export keeps our version pinned to the SDK's.
+use rmcp::schemars;
 use serde::Serialize;
 
 /// One search hit with its URI and facets for client-side re-filtering.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SearchHitOut {
     /// `argosy://<name>/<namespace>/<concept-id>`.
     pub uri: String,
@@ -69,14 +72,14 @@ pub struct SearchHitOut {
 }
 
 /// The `search`/`search_rules` tool outcome.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SearchReport {
     /// Ranked hits, best first.
     pub hits: Vec<SearchHitOut>,
 }
 
 /// The `ask` outcome: retrieval candidates plus the decision endpoint's pick.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct AskReport {
     /// The question asked.
     pub query: String,
@@ -94,7 +97,7 @@ pub struct AskReport {
 }
 
 /// The document an `ask` decision selected.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct AskSelection {
     /// The chosen concept's `argosy://` URI.
     pub uri: String,
@@ -106,7 +109,7 @@ pub struct AskSelection {
 }
 
 /// One skill in `list_skills`, with origin, shadowing status, and tier.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SkillOut {
     /// Skill name (entry-point file stem).
     pub name: String,
@@ -125,14 +128,14 @@ pub struct SkillOut {
 }
 
 /// The `list_skills` tool outcome.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SkillsReport {
     /// All visible skills across every active argosy.
     pub skills: Vec<SkillOut>,
 }
 
 /// The `get_skill` outcome: the resolved skill plus its content.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct SkillContent {
     /// The precedence-resolved skill, with trust fields.
     pub skill: SkillOut,
@@ -143,7 +146,7 @@ pub struct SkillContent {
 }
 
 /// A concept read: the `read_memory` outcome.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct UriContent {
     /// The concept's `argosy://` URI.
     pub uri: String,
@@ -156,7 +159,7 @@ pub struct UriContent {
 }
 
 /// The `read` tool outcome: one concept from any active argosy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct ConceptContent {
     /// The concept's `argosy://` URI.
     pub uri: String,
@@ -178,7 +181,7 @@ pub struct ConceptContent {
 }
 
 /// An inclusive 1-based line range in a concept's body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, rmcp::schemars::JsonSchema)]
 pub struct LineRange {
     /// First line.
     pub start: u32,
@@ -187,7 +190,7 @@ pub struct LineRange {
 }
 
 /// A mutating tool's machine-readable summary: what changed and where.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct WriteReport {
     /// `"created"`, `"updated"`, or `"deleted"`.
     pub action: &'static str,
@@ -207,7 +210,7 @@ pub struct WriteReport {
 
 /// The `promote` outcome: the untouched source plus the drafted target —
 /// the client confirms, the server never does.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct PromoteReport {
     /// Source memory URI.
     pub source_uri: String,

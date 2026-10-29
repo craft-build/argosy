@@ -6,9 +6,9 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError,
     GetPromptRequestMethod, GetPromptRequestParams, GetPromptResponse, Implementation,
-    ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-    ServerCapabilities, Tool,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ResourceTemplate, ServerCapabilities, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use serde::Serialize;
@@ -23,7 +23,7 @@ use crate::codetools::{self, CodeTools};
 use super::params::*;
 use super::prompts::{get_prompt_result, prompt_definitions};
 use super::session::McpState;
-use super::tools::tool_definitions;
+use super::tools::{Toolsets, tool_definitions_for, toolset_of};
 
 // SEP-2549: `ttlMs`/`cacheScope` are required on list/read results under
 // protocol `2026-07-28` — omitting them fails strict clients. Static
@@ -41,6 +41,8 @@ pub struct ArgosyMcpServer<P: EmbeddingProvider, S: VectorStore> {
     /// Shared code-tool state; its dispatch never takes the `state` lock.
     #[cfg(feature = "code-tools")]
     pub code: Arc<CodeTools>,
+    /// The toolsets this instance advertises.
+    pub toolsets: Toolsets,
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> Clone for ArgosyMcpServer<P, S> {
@@ -49,6 +51,7 @@ impl<P: EmbeddingProvider, S: VectorStore> Clone for ArgosyMcpServer<P, S> {
             state: Arc::clone(&self.state),
             #[cfg(feature = "code-tools")]
             code: Arc::clone(&self.code),
+            toolsets: self.toolsets,
         }
     }
 }
@@ -72,6 +75,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
             state: Arc::new(Mutex::new(state)),
             #[cfg(feature = "code-tools")]
             code: Arc::new(code),
+            toolsets: Toolsets::all(),
         }
     }
 
@@ -79,6 +83,13 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
     #[cfg(feature = "code-tools")]
     pub fn with_code_tools(mut self, code: Arc<CodeTools>) -> Self {
         self.code = code;
+        self
+    }
+
+    /// Restricts the advertised toolsets; `argosy mcp` applies the
+    /// `--toolsets` flag / `mcp.toolsets` config here.
+    pub fn with_toolsets(mut self, toolsets: Toolsets) -> Self {
+        self.toolsets = toolsets;
         self
     }
 }
@@ -117,8 +128,9 @@ const INSTRUCTIONS_BASE: &str = "Argosy knowledge server: search and read concep
                  verification and is not served. Confirmation policy is your \
                  decision.";
 
-/// The full `instructions`, extended per compiled-in features.
-fn server_instructions() -> String {
+/// The full `instructions`, extended per compiled-in features and the
+/// advertised toolsets.
+fn server_instructions(toolsets: Toolsets) -> String {
     let mut text = INSTRUCTIONS_BASE.to_string();
     #[cfg(feature = "decision")]
     text.push_str(
@@ -148,6 +160,15 @@ fn server_instructions() -> String {
              reviewdog JSONL, and structured edits on findings become \
              one-click PR suggestions.",
         );
+    }
+    if !toolsets.is_all() {
+        let names = toolsets.names();
+        text.push_str(&format!(
+            " This instance advertises only the {} toolset{}; tools of a \
+             disabled toolset are rejected as unknown tools.",
+            names.join(", "),
+            if names.len() == 1 { "" } else { "s" }
+        ));
     }
     text
 }
@@ -307,7 +328,7 @@ where
         )
         .with_protocol_version(ProtocolVersion::LATEST)
         .with_server_info(Implementation::new("argosy-mcp", env!("CARGO_PKG_VERSION")))
-        .with_instructions(server_instructions())
+        .with_instructions(server_instructions(self.toolsets))
     }
 
     fn list_tools(
@@ -316,13 +337,17 @@ where
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + '_
     {
-        std::future::ready(Ok(ListToolsResult::with_all_items(tool_definitions())
-            .with_ttl_ms(STATIC_LIST_TTL_MS)
-            .with_cache_scope(CacheScope::Public)))
+        std::future::ready(Ok(ListToolsResult::with_all_items(tool_definitions_for(
+            &self.toolsets,
+        ))
+        .with_ttl_ms(STATIC_LIST_TTL_MS)
+        .with_cache_scope(CacheScope::Public)))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_definitions().into_iter().find(|t| t.name == name)
+        tool_definitions_for(&self.toolsets)
+            .into_iter()
+            .find(|t| t.name == name)
     }
 
     fn list_prompts(
@@ -364,9 +389,18 @@ where
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
         let name: String = request.name.into_owned();
         let lock = Arc::clone(&self.state);
+        let toolsets = self.toolsets;
         #[cfg(feature = "code-tools")]
         let code = Arc::clone(&self.code);
         async move {
+            // A disabled toolset is unroutable, like an unknown name.
+            if let Some(set) = toolset_of(&name)
+                && !toolsets.contains(set)
+            {
+                return Err(McpError::method_not_found::<
+                    rmcp::model::CallToolRequestMethod,
+                >());
+            }
             // Code tools first: they share no state with the argosy tools,
             // so they skip the state lock. The name filter mirrors
             // `dispatch_code_tool` (one test per tool pins the pairing).
@@ -454,6 +488,20 @@ where
         }
     }
 
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListResourceTemplatesResult, McpError>> + '_
+    {
+        // Static listing, so no state lock is needed here.
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(
+            resource_templates(),
+        )
+        .with_ttl_ms(STATIC_LIST_TTL_MS)
+        .with_cache_scope(CacheScope::Public)))
+    }
+
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -499,4 +547,21 @@ fn resource_error(err: Error) -> McpError {
         | Error::NotAnArgosy { .. } => McpError::resource_not_found(err.to_string(), None),
         other => McpError::internal_error(other.to_string(), None),
     }
+}
+
+/// The resource templates served by `list_resource_templates`.
+pub fn resource_templates() -> Vec<ResourceTemplate> {
+    vec![
+        ResourceTemplate::new(super::CONCEPT_TEMPLATE_URI, "argosy-concept")
+            .with_description(
+                "Any concept in any active argosy. Substitute {argosy} with a manifest \
+         name from the argosy://_argosys listing, {namespace} with document, \
+         skill, memory, or styleguide, and {id} with the bundle-relative \
+         concept id under that namespace (slashes allowed for nested ids). \
+         Returns raw markdown with frontmatter; imported content arrives \
+         wrapped in <untrusted-content> delimiters. Browse an argosy's \
+         argosy://<name>/_index listing first to discover ids.",
+            )
+            .with_mime_type("text/markdown"),
+    ]
 }

@@ -45,6 +45,7 @@ pub struct OutlineParams {
 }
 
 /// The `outline` outcome: the rendered outline plus its envelope.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct OutlineReport {
     /// The resolved path that was outlined.

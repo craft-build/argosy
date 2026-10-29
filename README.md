@@ -103,6 +103,43 @@ projects):
 The same `mcpServers` shape works for Cursor and ZCode; any MCP client that
 can spawn a stdio server can host argosy.
 
+### Toolsets
+
+The advertised surface splits into three toolsets: `knowledge` (search,
+`search_rules`, reads, skills, and the local-argosy write tools — the
+core), `review` (the four review-session tools), and `code` (the seven
+code-intelligence tools below). By default the server advertises
+everything it was built with; a host that wants a smaller context
+footprint restricts it, either on the command line or in the user
+config:
+
+```json
+{
+  "mcpServers": {
+    "argosy": { "command": "argosy", "args": ["mcp", "--toolsets", "knowledge,review"] }
+  }
+}
+```
+
+```bml
+# ~/.config/argosy/argosy.bml — the flag above overrides this
+mcp {
+    toolsets = "knowledge"
+}
+```
+
+Unknown spellings are startup errors, tools of a disabled toolset are
+rejected as unknown tools, and the server instructions name the live
+sets. Compile-time features still apply: a build without `code-tools`
+never serves the `code` or `review` tools regardless of the selection.
+
+Every tool also declares an `outputSchema` describing its
+`structuredContent` — the tools-spec contract — and the resources
+side advertises one RFC 6570 template,
+`argosy://{argosy}/{namespace}/{+id}`, covering every concept in every
+active argosy (browse an argosy's `argosy://<name>/_index` listing to
+discover ids).
+
 The server exposes hybrid `search` / `search_rules` tools (exact-term BM25
 fused with vector similarity by reciprocal rank, so identifiers and rule
 IDs rank next to paraphrases), `argosy://`
@@ -195,7 +232,8 @@ Imported books are shared content, so they are never taken at their word:
 ### Code-intelligence tools
 
 The same server also serves read-mostly **code-intelligence tools** over
-the workspace directory it was spawned in, ported from Craft:
+the workspace directory it was spawned in (the `code` toolset; the review
+tools are the `review` toolset — see [Toolsets](#toolsets)), ported from Craft:
 
 | Tool | What it does |
 |---|---|

@@ -597,3 +597,119 @@ async fn tools_select_their_project_by_cwd() {
     drop(client);
     server_task.abort();
 }
+
+/// `list_resource_templates` advertises the concept URI template with
+/// the static listings' SEP-2549 cache hints.
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_templates_advertise_the_concept_uri_template() {
+    let rig = rig();
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        use rmcp::ServiceExt;
+        let running = ArgosyMcpServer::new(rig.state)
+            .serve(server_io)
+            .await
+            .expect("server initializes");
+        let _ = running.waiting().await;
+    });
+    use rmcp::ServiceExt;
+    let client = ().serve(client_io).await.expect("initialize handshake");
+
+    let templates = client.list_resource_templates(None).await.unwrap();
+    assert_eq!(
+        templates.ttl_ms,
+        Some(3_600_000),
+        "template list: static, public, 1h"
+    );
+    assert_eq!(templates.cache_scope, Some(rmcp::model::CacheScope::Public));
+    assert_eq!(templates.resource_templates.len(), 1);
+    let template = &templates.resource_templates[0];
+    assert_eq!(
+        template.uri_template,
+        argosy::mcp::CONCEPT_TEMPLATE_URI,
+        "the advertised template is the concept URI shape"
+    );
+    assert_eq!(template.name, "argosy-concept");
+    assert_eq!(template.mime_type.as_deref(), Some("text/markdown"));
+    assert!(
+        template
+            .description
+            .as_deref()
+            .is_some_and(|d| !d.is_empty()),
+        "the template explains its variables"
+    );
+
+    // A URI expanded from the template reads like any concept resource.
+    let read = client
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "argosy://acme-billing/memory/gotchas",
+        ))
+        .await
+        .unwrap();
+    match &read.contents[0] {
+        rmcp::model::ResourceContents::TextResourceContents {
+            mime_type, text, ..
+        } => {
+            assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+            assert!(text.contains("# Gotchas"), "got {text}");
+        }
+        other => panic!("expected text contents, got {other:?}"),
+    }
+
+    drop(client);
+    server_task.abort();
+}
+
+/// A restricted toolset shrinks the listing, keeps the enabled tools
+/// working, and makes disabled tools unroutable like unknown names.
+#[tokio::test(flavor = "multi_thread")]
+async fn toolset_restriction_filters_listings_and_rejects_disabled_tools() {
+    let rig = rig();
+    let cwd = rig.cwd.clone();
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server = ArgosyMcpServer::new(rig.state)
+        .with_toolsets(argosy::mcp::Toolsets::from_names(&["knowledge".to_string()]).unwrap());
+    let server_task = tokio::spawn(async move {
+        use rmcp::ServiceExt;
+        let running = server.serve(server_io).await.expect("server initializes");
+        let _ = running.waiting().await;
+    });
+    use rmcp::ServiceExt;
+    let client = ().serve(client_io).await.expect("initialize handshake");
+
+    let tools = client.list_all_tools().await.unwrap();
+    let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+    assert!(
+        names.contains(&"search".to_string()),
+        "enabled set: {names:?}"
+    );
+    #[cfg(feature = "code-tools")]
+    for absent in ["outline", "repomap", "start_review", "review_findings"] {
+        assert!(!names.contains(&absent.to_string()), "listing: {names:?}");
+    }
+
+    // Knowledge tools keep working.
+    let skills = complete(
+        client
+            .call_tool_once(call("list_skills", serde_json::json!({"cwd": &cwd})))
+            .await
+            .unwrap(),
+    );
+    assert_ne!(skills.is_error, Some(true), "knowledge tools still serve");
+
+    // A disabled toolset is unroutable: a protocol error, like an unknown name.
+    #[cfg(feature = "code-tools")]
+    {
+        let disabled = client
+            .call_tool_once(call("start_review", serde_json::json!({"cwd": &cwd})))
+            .await;
+        assert!(disabled.is_err(), "disabled toolset rejected as unknown");
+        let unknown = client
+            .call_tool_once(call("not-a-tool", serde_json::json!({"cwd": &cwd})))
+            .await;
+        assert!(unknown.is_err(), "unknown tool rejected");
+    }
+
+    drop(client);
+    server_task.abort();
+}

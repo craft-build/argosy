@@ -28,6 +28,7 @@ pub struct ZoomParams {
 }
 
 /// The `zoom` outcome: the header line plus the gutter-numbered snippet.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ZoomReport {
     /// The resolved path that was zoomed.

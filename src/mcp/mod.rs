@@ -15,9 +15,9 @@ mod tools;
 pub use params::*;
 pub use prompts::{get_prompt_result, prompt_definitions};
 pub use reports::*;
-pub use server::ArgosyMcpServer;
+pub use server::{ArgosyMcpServer, resource_templates};
 pub use session::{McpState, ProjectSession, SessionFactory};
-pub use tools::tool_definitions;
+pub use tools::{Toolset, Toolsets, tool_definitions, tool_definitions_for, toolset_of};
 
 /// The `argosy://_argosys` pseudo-resource: the active argosys.
 pub const ARGOSYS_URI: &str = "argosy://_argosys";
@@ -27,6 +27,10 @@ pub const CATALOG_URI: &str = "argosy://catalog";
 
 /// Suffix of the `argosy://<name>/_index` root-index pseudo-resource.
 pub const ARGOSY_INDEX_SUFFIX: &str = "/_index";
+
+/// The RFC 6570 URI template for concept resources, advertised through
+/// `list_resource_templates` (`{+id}` allows nested concept paths).
+pub const CONCEPT_TEMPLATE_URI: &str = "argosy://{argosy}/{namespace}/{+id}";
 
 /// Default hit count for `search`/`search_rules`.
 pub(super) const DEFAULT_K: usize = 8;

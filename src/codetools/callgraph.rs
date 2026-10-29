@@ -26,6 +26,7 @@ pub struct CallgraphParams {
 }
 
 /// The `callgraph` outcome: the rendered tree or list.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct CallgraphReport {
     /// The operation that ran.

@@ -41,6 +41,7 @@ pub struct RepomapParams {
 }
 
 /// The `repomap` outcome.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoMapReport {
     /// The repository root that was mapped (display form).

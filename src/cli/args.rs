@@ -12,7 +12,13 @@ use argosy::package::PackageFormat;
 /// Serve argosys over the Model Context Protocol (stdio; diagnostics on
 /// stderr). Tools select the project per call via `cwd`; each project's
 /// first use opens it and downloads the embedding model (~90 MB).
-pub(super) struct McpArgs {}
+pub(super) struct McpArgs {
+    /// Toolsets to advertise, comma-separated among `knowledge`,
+    /// `review`, and `code` (default: the configured `mcp.toolsets`,
+    /// else every compiled-in toolset).
+    #[arg(long, value_delimiter = ',')]
+    pub(super) toolsets: Option<Vec<String>>,
+}
 
 /// Clone an external argosy into this project's argosy store (under the
 /// user state dir, outside the project tree).

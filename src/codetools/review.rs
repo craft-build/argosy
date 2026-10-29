@@ -140,6 +140,7 @@ pub struct ReviewFindingsParams {
     pub format: Option<ExportFormat>,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct StartReviewOutcome {
     pub review_id: String,
@@ -158,6 +159,7 @@ pub struct StartReviewOutcome {
 }
 
 /// The deterministic `pattern` pre-pass result of one `start_review`.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum PrepassOutcome {
@@ -303,6 +305,7 @@ pub enum ReviewPriority {
     P3,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingOrigin {
@@ -314,6 +317,7 @@ pub enum FindingOrigin {
     Pattern,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReviewFinding {
     pub finding_id: String,
@@ -344,6 +348,7 @@ pub struct ReviewFinding {
 
 /// An advisory assessment of a finding by the decision endpoint; it never
 /// filters or downgrades the finding.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindingAssessment {
     /// `"supported"` or `"unsupported"`, when the endpoint answered.
@@ -360,6 +365,7 @@ pub struct FindingAssessment {
     pub severity_confidence: Option<f32>,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportFindingOutcome {
     pub review_id: String,
@@ -372,6 +378,7 @@ pub struct ReportFindingOutcome {
     pub assessment: Option<FindingAssessment>,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewFindingsOutcome {
     pub review_id: String,
@@ -382,6 +389,7 @@ pub struct ReviewFindingsOutcome {
     pub export: Option<String>,
 }
 
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewDiffOutcome {
     pub review_id: String,

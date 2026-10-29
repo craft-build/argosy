@@ -19,6 +19,7 @@ pub struct InspectParams {
 }
 
 /// The `inspect` outcome: the rendered sections.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct InspectReport {
     /// The rendered `todos:` and/or `git_status:` sections.

@@ -724,16 +724,27 @@ fn truncate_at(text: &str, width: usize) -> String {
 }
 
 #[cfg(all(feature = "mcp", feature = "default-index"))]
-pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result<ExitCode> {
+pub(super) fn cmd_mcp(_out: &Output, config: &Config, args: &McpArgs) -> Result<ExitCode> {
     use std::sync::Arc;
 
     use argosy::context::ProjectContext;
     use argosy::error::Error;
     use argosy::index::Index;
     use argosy::index::sqlite::SqliteVecStore;
-    use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory};
+    use argosy::mcp::{ArgosyMcpServer, McpState, ProjectSession, SessionFactory, Toolsets};
     use rmcp::ServiceExt;
 
+    // Toolset selection: the CLI flag wins over the `mcp.toolsets` config;
+    // unset means every toolset this build compiled in.
+    let toolsets = match args
+        .toolsets
+        .clone()
+        .or_else(|| config.mcp.toolsets_names())
+    {
+        Some(names) => Toolsets::from_names(&names)?,
+        None => Toolsets::all(),
+    };
+    eprintln!("argosy mcp: toolsets: {}", toolsets.names().join(", "));
     let default_k = config.index.mcp_default_k;
     let db_name = config.index_db_name().to_string();
     let embed_cache = embed_cache_override(config);
@@ -811,7 +822,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
         }
         tools
     };
-    let server = ArgosyMcpServer::new(state);
+    let server = ArgosyMcpServer::new(state).with_toolsets(toolsets);
     #[cfg(feature = "code-tools")]
     let server = {
         // Review grounding: the deterministic pattern pre-pass and
