@@ -10,12 +10,16 @@ use rmcp::model::{Tool, ToolAnnotations};
 #[cfg(feature = "code-tools")]
 use crate::codetools;
 
+#[cfg(feature = "decision")]
+use super::params::AskParams;
 use super::params::{
-    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams,
-    RulesParams, SearchParams, WriteParams,
+    GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams, RulesParams,
+    SearchParams, WriteParams,
 };
+#[cfg(feature = "decision")]
+use super::reports::AskReport;
 use super::reports::{
-    AskReport, ConceptContent, PromoteReport, SearchReport, SkillContent, SkillsReport, UriContent,
+    ConceptContent, PromoteReport, SearchReport, SkillContent, SkillsReport, UriContent,
     WriteReport,
 };
 use crate::error::{Error, Result};
@@ -161,6 +165,7 @@ pub fn toolset_of(name: &str) -> Option<Toolset> {
 
 /// Every compiled-in tool definition, across all toolsets.
 pub fn tool_definitions() -> Vec<Tool> {
+    #[allow(unused_mut)]
     let mut tools = knowledge_tool_definitions();
     #[cfg(feature = "code-tools")]
     {

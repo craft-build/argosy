@@ -11,7 +11,9 @@ use argosy::package::{ImportReport, PackageOptions, PackageReport};
 use argosy::{Argosy, LocalArgosy, Namespace, ValidationReport};
 
 use crate::cli::args::*;
-use crate::cli::{Output, current_dir, embed_cache_override};
+#[cfg(feature = "default-index")]
+use crate::cli::embed_cache_override;
+use crate::cli::{Output, current_dir};
 use argosy::Config;
 use argosy::Result;
 
@@ -599,6 +601,8 @@ pub(super) fn cmd_package(out: &Output, config: &Config, args: &PackageArgs) -> 
     Ok(ExitCode::SUCCESS)
 }
 
+// `config` only feeds the post-import index reconcile.
+#[cfg_attr(not(feature = "default-index"), allow(unused_variables))]
 pub(super) fn cmd_convert(out: &Output, config: &Config, args: &ConvertArgs) -> Result<ExitCode> {
     match &args.format {
         ConvertFormat::Styleguide(imp) => {

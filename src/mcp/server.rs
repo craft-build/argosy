@@ -20,9 +20,11 @@ use crate::index::{EmbeddingProvider, VectorStore};
 #[cfg(feature = "code-tools")]
 use crate::codetools::{self, CodeTools};
 
+#[cfg(feature = "decision")]
+use super::params::AskParams;
 use super::params::{
-    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams,
-    RulesParams, SearchParams, WriteParams,
+    GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams, RulesParams,
+    SearchParams, WriteParams,
 };
 use super::prompts::{get_prompt_result, prompt_definitions};
 use super::session::McpState;

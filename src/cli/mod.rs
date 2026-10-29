@@ -139,6 +139,7 @@ pub fn run() -> ExitCode {
 /// The configured embedding-model cache; `None` when an env override
 /// (`$ARGOSY_EMBED_CACHE_DIR`, legacy `$FASTEMBED_CACHE_DIR`) is set —
 /// the library resolves those itself.
+#[cfg(feature = "default-index")]
 pub(super) fn embed_cache_override(config: &Config) -> Option<PathBuf> {
     if std::env::var_os("ARGOSY_EMBED_CACHE_DIR")
         .or_else(|| std::env::var_os("FASTEMBED_CACHE_DIR"))

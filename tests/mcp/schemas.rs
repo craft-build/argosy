@@ -172,9 +172,9 @@ fn toolsets_partition_the_advertised_tools() {
     #[cfg(all(feature = "code-tools", not(feature = "decision")))]
     let (knowledge_n, review_n, code_n, all_n) = (13, 4, 7, 24);
     #[cfg(all(not(feature = "code-tools"), feature = "decision"))]
-    let (knowledge_n, review_n, code_n, all_n) = (14, 0, 0, 14);
+    let (knowledge_n, all_n) = (14, 14);
     #[cfg(all(not(feature = "code-tools"), not(feature = "decision")))]
-    let (knowledge_n, review_n, code_n, all_n) = (13, 0, 0, 13);
+    let (knowledge_n, all_n) = (13, 13);
     assert_eq!(knowledge.len(), knowledge_n, "knowledge set: {names:?}");
     assert_eq!(all.len(), all_n);
     #[cfg(feature = "code-tools")]

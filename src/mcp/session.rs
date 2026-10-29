@@ -19,15 +19,19 @@ use crate::decision::{
     ChoiceResolution, DecisionProvider, DecisionRequest, Question, resolve_choice,
 };
 
+#[cfg(feature = "decision")]
+use super::params::AskParams;
 use super::params::{
-    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, PromoteTarget, ReadParams,
-    ReadPathParams, RulesParams, SearchParams, WriteParams, concept_id, parse_concept,
+    GetSkillParams, ListSkillsParams, PromoteParams, PromoteTarget, ReadParams, ReadPathParams,
+    RulesParams, SearchParams, WriteParams, concept_id, parse_concept,
 };
 use super::reports::{
-    ArgosyInfo, ArgosysReport, AskReport, AskSelection, ConceptContent, ExcludedArgosy, LineRange,
-    PromoteReport, ResourceBody, ResourceDescriptor, SearchHitOut, SearchReport, SkillContent,
-    SkillOut, SkillsReport, UriContent, WriteReport, identity_meta, meta_with_writable,
+    ArgosyInfo, ArgosysReport, ConceptContent, ExcludedArgosy, LineRange, PromoteReport,
+    ResourceBody, ResourceDescriptor, SearchHitOut, SearchReport, SkillContent, SkillOut,
+    SkillsReport, UriContent, WriteReport, identity_meta, meta_with_writable,
 };
+#[cfg(feature = "decision")]
+use super::reports::{AskReport, AskSelection};
 use super::{
     ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, DEFAULT_MAX_PROJECT_SESSIONS,
     DEFAULT_PROJECT_TTL, UNVERIFIED,
@@ -966,6 +970,7 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     pub fn search_rules(&mut self, params: RulesParams) -> Result<SearchReport> {
         #[cfg(feature = "decision")]
         let query = params.query.clone();
+        #[allow(unused_mut)]
         let mut report = self.session(&params.cwd)?.search_rules(params)?;
         #[cfg(feature = "decision")]
         {

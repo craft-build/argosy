@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::*;
+#[cfg(feature = "code-tools")]
 use crate::codetools::review::{ReviewFinding, ReviewFindingsOutcome, ReviewPriority};
 
 /// Recursively assert required/declared properties agree, resolving
@@ -87,6 +88,7 @@ fn search_hit_with_empty_facets_matches_output_schema() {
     assert_matches_output_schema("SearchReport", &SearchReport { hits: vec![hit] });
 }
 
+#[cfg(feature = "code-tools")]
 #[test]
 fn review_finding_with_empty_extras_matches_output_schema() {
     let finding = ReviewFinding {
