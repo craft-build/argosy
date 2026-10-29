@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/craft-build/argosy/compare/v0.7.0...v0.8.0) - 2026-10-29
+
+### Added
+
+- *(pull)* pin imports to commits with update, remove, and sync
+- *(mcp)* add toolsets, outputSchema, and resource templates
+- *(review)* export findings as SARIF 2.1.0 and reviewdog rdjsonl
+- *(review)* run a deterministic pattern pre-pass and ground report_finding in the snapshot
+- *(index)* add a labeled retrieval eval (recall@k, MRR) gated in CI
+- *(index)* fuse FTS5 BM25 with vector search via reciprocal rank fusion
+- *(index)* chunk concepts by heading and return passages in search hits
+
+### Fixed
+
+- *(tests)* handle diverging git branch defaults in test
+- *(tests)* test feature gate issues fixed
+- *(mcp)* dedupe search_rules hits to one per rule
+- *(pull)* include peeled tag refs when resolving a pin
+- *(mcp)* always serialize fields the output schema marks required
+- *(mcp)* bound project and review session caches with TTL/LRU
+- *(mcp)* tag hits with provenance and delimit imported content
+- *(pull)* verify the integrity sidecar on import and cap trust tiers by provenance
+- *(code-tools)* confine paths to the workspace root and fail the write guard closed
+- *(review)* reject option-shaped start_review revisions, keep ranges and trees
+
+### Other
+
+- *(docs)* fix changelog for release-plz
+- *(style)* apply rust-review styleguide findings
+- *(deps)* bump dependencies
+- drop narrative comments and simplify doc comments
+
 ## [0.7.0](https://github.com/craft-build/argosy/compare/v0.6.0...v0.7.0) - 2026-10-10
 
 ### Other
