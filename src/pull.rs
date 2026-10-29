@@ -1435,7 +1435,7 @@ mod tests {
                 .unwrap();
             assert!(out.status.success(), "git {args:?} failed");
         };
-        git(&["init", "--quiet"]);
+        git(&["init", "--quiet", "-b", "main"]);
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"]);
         git(&[
             "-c",
