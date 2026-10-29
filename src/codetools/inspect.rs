@@ -4,9 +4,10 @@
 use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
-use super::{CodeTools, relative_path, tool_error};
-use crate::error::Result;
+use super::{CodeTools, relative_path};
+use crate::error::{Result, ReviewIoSnafu};
 
 /// `inspect` parameters.
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -156,7 +157,9 @@ fn inspect_git_status(scope_path: &str) -> Result<String> {
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| tool_error(format!("git status failed: {e}")))?;
+        .context(ReviewIoSnafu {
+            operation: "running `git rev-parse --show-toplevel`".to_string(),
+        })?;
     if !toplevel.status.success() {
         return Ok("git_status: (not a git repo)\n".to_string());
     }
@@ -173,9 +176,9 @@ fn inspect_git_status(scope_path: &str) -> Result<String> {
     if !rel.is_empty() {
         cmd.arg("--").arg(&rel);
     }
-    let output = cmd
-        .output()
-        .map_err(|e| tool_error(format!("git status failed: {e}")))?;
+    let output = cmd.output().context(ReviewIoSnafu {
+        operation: "running `git status`".to_string(),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

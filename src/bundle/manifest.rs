@@ -41,7 +41,7 @@ impl Manifest {
     /// (it appears in `argosy://` URIs), or if `argosy_version` is missing/malformed.
     pub fn parse(concept: &Concept) -> Result<Self> {
         let name = concept
-            .get_str("name")
+            .frontmatter_str("name")
             .filter(|n| !n.trim().is_empty())
             .with_context(|| MissingFieldSnafu {
                 field: "name",
@@ -75,7 +75,7 @@ impl Manifest {
         })?;
 
         let okf_version = concept.get("okf_version").and_then(scalar_str);
-        let description = concept.get_str("description").map(str::to_string);
+        let description = concept.frontmatter_str("description").map(str::to_string);
 
         let extra = concept
             .frontmatter()

@@ -25,7 +25,9 @@ use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use crate::error::{Error, Result};
+use snafu::ResultExt;
+
+use crate::error::{Error, GlobPatternSnafu, Result};
 
 /// Process cwd captured once at first use: the anchor for relative paths and display shortening.
 static CWD: LazyLock<Option<PathBuf>> = LazyLock::new(|| env::current_dir().ok());
@@ -65,6 +67,16 @@ impl Default for CodeTools {
             root: default_root(),
             allow_external_paths: false,
         }
+    }
+}
+
+impl std::fmt::Debug for CodeTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeTools")
+            .field("root", &self.root)
+            .field("allow_external_paths", &self.allow_external_paths)
+            .field("tracked_reads", &self.tracker.read_paths().len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -146,9 +158,7 @@ impl CodeTools {
 
     /// Refuses an edit of a stale or never-read file (fail closed); a missing file may be written.
     pub fn check_before_edit(&self, path: &Path) -> Result<()> {
-        self.tracker
-            .check_before_edit(path)
-            .map_err(|message| Error::CodeTool { message })
+        self.tracker.check_before_edit(path)
     }
 
     /// Takes the mutating-run lock for the duration of the returned guard.
@@ -286,13 +296,10 @@ pub(crate) fn walk_builder_opts(
     ob.add("!.git").expect("!.git is a valid glob");
 
     for p in patterns {
-        ob.add(p)
-            .map_err(|e| tool_error(format!("invalid glob pattern: {e}")))?;
+        ob.add(p).context(GlobPatternSnafu)?;
     }
 
-    let overrides = ob
-        .build()
-        .map_err(|e| tool_error(format!("invalid glob pattern: {e}")))?;
+    let overrides = ob.build().context(GlobPatternSnafu)?;
 
     let mut wb = ignore::WalkBuilder::new(root);
     wb.hidden(false).overrides(overrides);
@@ -411,12 +418,12 @@ mod tests {
         let a = tools.repomap_for_root(dir.path(), None, false);
         let b = tools.repomap_for_root(dir.path(), None, false);
         // Same cached instance (Arc-shared caches).
-        let text_a = a.get_repo_map(&[], &[], "query");
-        let text_b = b.get_repo_map(&[], &[], "query");
+        let text_a = a.repo_map(&[], &[], "query");
+        let text_b = b.repo_map(&[], &[], "query");
         assert_eq!(text_a, text_b);
         // A custom budget must not poison the default-budget cache.
         let _custom = tools.repomap_for_root(dir.path(), Some(64), false);
         let c = tools.repomap_for_root(dir.path(), None, false);
-        assert_eq!(c.get_repo_map(&[], &[], "query"), text_a);
+        assert_eq!(c.repo_map(&[], &[], "query"), text_a);
     }
 }

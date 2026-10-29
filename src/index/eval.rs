@@ -177,17 +177,11 @@ pub struct EvalDataset {
 }
 
 impl EvalDataset {
-    /// Rejects datasets whose shape or labels cannot produce honest scores.
+    /// Rejects datasets whose shape or labels cannot produce honest scores,
+    /// naming the first problem found.
     ///
     /// Label URIs must parse here; existence in the built index is checked by
     /// [`run_eval`], which has the store.
-    ///
-    /// # Errors
-    /// Returns [`crate::error::Error::Validation`] naming the first problem
-    /// found: an empty `k` list, a `k` below 1 or duplicated, a floor outside
-    /// 0–1 or at a `k` the dataset does not report, an empty query text or
-    /// `expected` set, an unparseable or duplicated label URI, or one URI
-    /// listed as both expected and absent.
     pub fn validate(&self) -> Result<()> {
         let reject = |reason: String| ValidationSnafu { reason }.fail();
         if self.k.is_empty() {
@@ -381,16 +375,12 @@ pub(crate) fn score_query(
 }
 
 /// Runs every dataset query against the index and scores the fused hits.
+/// A label naming a concept the built index does not hold fails loudly (a
+/// typo'd label must never silently score zero; see [`EvalDataset::validate`]).
 ///
 /// Each query searches with an over-fetch depth (the same `4×k, min 32` the
 /// hybrid legs use) because [`Index::search`] truncates the fused list before
 /// this eval collapses passages to concepts.
-///
-/// # Errors
-/// Returns [`crate::error::Error::Validation`] when the dataset fails
-/// [`EvalDataset::validate`] or a label names a concept the built index does
-/// not hold (a typo'd label must fail loudly, never silently score zero),
-/// and propagates search failures unchanged.
 pub fn run_eval<P: super::EmbeddingProvider, S: super::VectorStore>(
     index: &Index<P, S>,
     context: &crate::context::ProjectContext,

@@ -25,9 +25,10 @@ use std::path::Path;
 use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use super::{CodeTools, relative_path, tool_error};
-use crate::error::Result;
+use crate::error::{IoSnafu, Result};
 
 use render::{
     build_outline_tree, count_leaves, render_dir_outline, render_file_outline, render_files_table,
@@ -79,7 +80,9 @@ pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
 
     // Size-check before reading so a giant file is never fully loaded.
     let size = std::fs::metadata(p)
-        .map_err(|e| tool_error(format!("read error: {e}")))?
+        .context(IoSnafu {
+            path: p.to_path_buf(),
+        })?
         .len();
     if size > MAX_FILE_BYTES as u64 {
         return Err(tool_error(format!(
@@ -87,7 +90,9 @@ pub fn run(code: &CodeTools, params: OutlineParams) -> Result<OutlineReport> {
         )));
     }
 
-    let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
+    let content = std::fs::read_to_string(p).context(IoSnafu {
+        path: p.to_path_buf(),
+    })?;
     code.record_read(p);
 
     let Some(lang) = LangId::from_path(p) else {
@@ -145,10 +150,8 @@ fn outline_dir(code: &CodeTools, path: &str, files_mode: bool) -> (String, bool)
 
         let symbols = extract_symbols(&content, lang);
         let tree = build_outline_tree(&symbols);
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
         entries.push(DirEntry {
             rel_path: relative_path(&entry),
-            name: name.to_string(),
             lang,
             symbol_count: count_leaves(&tree),
             bytes: content.len(),

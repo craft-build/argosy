@@ -7,9 +7,11 @@ use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
 
+use snafu::ResultExt;
+
 use super::outline::{self, LangId};
 use super::{CodeTools, relative_path, tool_error};
-use crate::error::Result;
+use crate::error::{IoSnafu, Result};
 
 /// `zoom` parameters.
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -49,7 +51,9 @@ pub fn run(code: &CodeTools, params: ZoomParams) -> Result<ZoomReport> {
         )));
     }
 
-    let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
+    let content = std::fs::read_to_string(p).context(IoSnafu {
+        path: p.to_path_buf(),
+    })?;
     code.record_read(p);
 
     let context = params.context_lines.unwrap_or(DEFAULT_CONTEXT_LINES);

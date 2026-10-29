@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use snafu::{IntoError, ResultExt};
 
-use crate::error::{IoSnafu, Result, ValidationSnafu};
+use crate::error::{IoSnafu, LockfileFormatSnafu, LockfileParseSnafu, Result, ValidationSnafu};
 use crate::pull::{LOCAL_ARGOSY_NAME, integrity_status_strings};
 
 /// The lockfile name inside a checkout store.
@@ -109,12 +109,6 @@ impl Lockfile {
     /// an empty lockfile, an unreadable or malformed one is an error. Pins
     /// guard what gets served, so a lockfile that cannot be understood is
     /// never silently ignored.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Io`](crate::error::Error) when the file cannot be read, or
-    /// [`Error::Validation`](crate::error::Error) when it is not valid
-    /// BarkML, carries an unsupported version, or holds an invalid entry.
     pub fn load(root: &Path) -> Result<Self> {
         Self::load_from(&Self::path(root))
     }
@@ -133,18 +127,13 @@ impl Lockfile {
                 .into_error(source));
             }
         };
-        let statement = barkml::from_str(&text).map_err(|error| {
-            ValidationSnafu {
-                reason: format!("failed to parse `{}`: {error}", path.display()),
-            }
-            .build()
+        let statement = barkml::from_str(&text).context(LockfileParseSnafu {
+            path: path.to_path_buf(),
         })?;
-        let lockfile: Self = barkml::de::from_statement(&statement).map_err(|error| {
-            ValidationSnafu {
-                reason: format!("failed to read `{}` as a lockfile: {error}", path.display()),
-            }
-            .build()
-        })?;
+        let lockfile: Self =
+            barkml::de::from_statement(&statement).context(LockfileFormatSnafu {
+                path: path.to_path_buf(),
+            })?;
         lockfile.validate(path)?;
         // Git prints lowercase object ids everywhere; folding here keeps
         // string comparisons against HEAD and ls-remote exact.
@@ -155,14 +144,7 @@ impl Lockfile {
         Ok(lockfile)
     }
 
-    /// Validates schema and every entry; `Err` names the file and field.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`](crate::error::Error) naming the first problem
-    /// found: unsupported version, an unsafe checkout name, an
-    /// option-shaped URL or ref, a non-hex commit, or an unknown integrity
-    /// value.
+    /// Validates schema and every entry; `Err` names the first problem found.
     pub fn validate(&self, path: &Path) -> Result<()> {
         let at = |reason: String| ValidationSnafu {
             reason: format!("`{}`: {reason}", path.display()),
@@ -258,12 +240,6 @@ impl Lockfile {
     /// Writes the lockfile into store `root` atomically: a temp file in the
     /// same directory, then a rename over the target, so a crash never
     /// leaves a half-written lockfile.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Validation`](crate::error::Error) when rendering would
-    /// write an invalid lockfile (validate runs first), or
-    /// [`Error::Io`](crate::error::Error) when the write or rename fails.
     pub fn save(&self, root: &Path) -> Result<()> {
         let path = Self::path(root);
         self.validate(&path)?;

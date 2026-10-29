@@ -793,7 +793,7 @@ mod tests {
         let stamp = pull::import_integrity_stamp(&import);
         let sidecar_bytes = fs::read(import.join(crate::package::INTEGRITY_FILENAME)).unwrap();
         fs::write(&stamp, crate::hash::sha256_hex(&sidecar_bytes)).unwrap();
-        // Tamper content only: the stamped sidecar no longer covers it.
+        // Tamper with content the sidecar covered.
         fs::write(import.join("document/doc-0.md"), "Injected.\n").unwrap();
 
         let catalog = build(&state, &options()).unwrap();

@@ -381,8 +381,8 @@ fn import_one_rule(
             return;
         }
     };
-    let language = concept.get_str("language").unwrap_or("general");
-    let category = concept.get_str("category").unwrap_or("misc");
+    let language = concept.frontmatter_str("language").unwrap_or("general");
+    let category = concept.frontmatter_str("category").unwrap_or("misc");
     let target = format!("styleguide/{language}/{category}/{rule_id}");
     let id = match ConceptId::from_str(&target) {
         Ok(id) => id,

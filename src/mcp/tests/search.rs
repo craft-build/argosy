@@ -381,7 +381,9 @@ fn search_rules_deduplicates_chunks_of_one_rule() {
         .local()
         .write_concept(
             Namespace::Styleguide,
-            &"styleguide/rust/error_handling/zephyr-backoff".parse().unwrap(),
+            &"styleguide/rust/error_handling/zephyr-backoff"
+                .parse()
+                .unwrap(),
             &rule,
         )
         .unwrap();
@@ -426,7 +428,10 @@ fn search_rules_deduplicates_chunks_of_one_rule() {
         "the surviving hit is enriched"
     );
     assert!(
-        report.hits.iter().any(|h| h.uri.ends_with("snake-case-vars")),
+        report
+            .hits
+            .iter()
+            .any(|h| h.uri.ends_with("snake-case-vars")),
         "other rules are not crowded out, got: {uris:?}"
     );
 }

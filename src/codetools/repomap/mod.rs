@@ -66,7 +66,7 @@ pub fn run(code: &CodeTools, params: RepomapParams) -> Result<RepoMapReport> {
     let mentioned = params.mentioned_files.unwrap_or_default();
     let context = params.context_files.unwrap_or_default();
     let query = params.query.as_deref().unwrap_or("");
-    let rendered = map.get_repo_map(&mentioned, &context, query);
+    let rendered = map.repo_map(&mentioned, &context, query);
 
     let text = if rendered.is_empty() {
         "(no indexable definitions found under this root — the map is empty)".to_string()
@@ -86,6 +86,15 @@ pub struct RepoMap {
     max_tokens: u32,
     tags_cache: Arc<Mutex<Option<CachedTags>>>,
     render_cache: Arc<Mutex<Option<CachedRender>>>,
+}
+
+impl std::fmt::Debug for RepoMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepoMap")
+            .field("root", &self.root)
+            .field("max_tokens", &self.max_tokens)
+            .finish_non_exhaustive()
+    }
 }
 
 struct CachedTags {
@@ -143,7 +152,7 @@ impl RepoMap {
         tags
     }
 
-    pub fn get_repo_map(
+    pub fn repo_map(
         &self,
         mentioned_files: &[String],
         context_files: &[String],
@@ -277,7 +286,7 @@ mod tests {
         .unwrap();
 
         let map = RepoMap::new(dir.path());
-        let rendered = map.get_repo_map(&[], &[], "show me the hello function");
+        let rendered = map.repo_map(&[], &[], "show me the hello function");
         assert!(rendered.contains("hello") || rendered.contains("main.rs"));
     }
 
@@ -292,8 +301,8 @@ mod tests {
         .unwrap();
 
         let map = RepoMap::new(dir.path());
-        let first = map.get_repo_map(&[], &[], "same message");
-        let second = map.get_repo_map(&[], &[], "same message");
+        let first = map.repo_map(&[], &[], "same message");
+        let second = map.repo_map(&[], &[], "same message");
         assert_eq!(first, second);
     }
 
@@ -305,7 +314,7 @@ mod tests {
         fs::write(dir.path().join("main.rs"), "fn hello() {}\n").unwrap();
 
         let map = RepoMap::new(dir.path()).with_max_tokens(u32::MAX);
-        let rendered = map.get_repo_map(&[], &[], "");
+        let rendered = map.repo_map(&[], &[], "");
         assert!(rendered.contains("hello"), "got {rendered}");
     }
 
@@ -325,9 +334,9 @@ mod tests {
         .unwrap();
 
         let map = RepoMap::new(dir.path());
-        let with_alpha = map.get_repo_map(&[], &[], "look at alpha");
+        let with_alpha = map.repo_map(&[], &[], "look at alpha");
         map.force_refresh();
-        let with_beta = map.get_repo_map(&[], &[], "look at beta");
+        let with_beta = map.repo_map(&[], &[], "look at beta");
         assert!(
             with_alpha.contains("alpha") || with_beta.contains("beta"),
             "mentioning an ident should surface it: alpha={with_alpha:?} beta={with_beta:?}"
@@ -339,7 +348,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         init_git_repo(dir.path());
         let map = RepoMap::new(dir.path());
-        let rendered = map.get_repo_map(&[], &[], "hello");
+        let rendered = map.repo_map(&[], &[], "hello");
         assert!(rendered.is_empty());
     }
 

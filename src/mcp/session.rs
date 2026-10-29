@@ -19,8 +19,15 @@ use crate::decision::{
     ChoiceResolution, DecisionProvider, DecisionRequest, Question, resolve_choice,
 };
 
-use super::params::*;
-use super::reports::*;
+use super::params::{
+    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, PromoteTarget, ReadParams,
+    ReadPathParams, RulesParams, SearchParams, WriteParams, concept_id, parse_concept,
+};
+use super::reports::{
+    ArgosyInfo, ArgosysReport, AskReport, AskSelection, ConceptContent, ExcludedArgosy, LineRange,
+    PromoteReport, ResourceBody, ResourceDescriptor, SearchHitOut, SearchReport, SkillContent,
+    SkillOut, SkillsReport, UriContent, WriteReport, identity_meta, meta_with_writable,
+};
 use super::{
     ARGOSY_INDEX_SUFFIX, ARGOSYS_URI, CATALOG_URI, DEFAULT_MAX_PROJECT_SESSIONS,
     DEFAULT_PROJECT_TTL, UNVERIFIED,
@@ -48,7 +55,6 @@ pub type SessionFactory<P, S> = Arc<dyn Fn(&Path) -> Result<ProjectSession<P, S>
 /// One cached project session plus its recency stamp.
 struct CachedSession<P: EmbeddingProvider, S: VectorStore> {
     session: ProjectSession<P, S>,
-    /// Last use.
     touched: Instant,
 }
 
@@ -57,9 +63,7 @@ struct CachedSession<P: EmbeddingProvider, S: VectorStore> {
 pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     factory: SessionFactory<P, S>,
     sessions: HashMap<PathBuf, CachedSession<P, S>>,
-    /// Project-session idle TTL.
     session_ttl: Duration,
-    /// Project-session cap.
     max_sessions: usize,
     /// Overrides the argosy state root the `argosy://catalog` resource scans.
     catalog_state_root: Option<PathBuf>,
@@ -69,6 +73,20 @@ pub struct McpState<P: EmbeddingProvider, S: VectorStore> {
     /// The process-global decision endpoint.
     #[cfg(feature = "decision")]
     decision: std::sync::Arc<dyn crate::decision::DecisionProvider>,
+}
+
+impl<P: EmbeddingProvider, S: VectorStore> std::fmt::Debug for McpState<P, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("McpState");
+        dbg.field("open_sessions", &self.sessions.len())
+            .field("session_ttl", &self.session_ttl)
+            .field("max_sessions", &self.max_sessions);
+        #[cfg(feature = "decision")]
+        {
+            dbg.field("decision_enabled", &self.decision.is_enabled());
+        }
+        dbg.finish_non_exhaustive()
+    }
 }
 
 impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
@@ -427,7 +445,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     }
 
     /// One skill by name, resolved by precedence across argosies, with its entry-point content.
-    pub fn get_skill(&self, params: GetSkillParams) -> Result<SkillContent> {
+    pub fn skill(&self, params: GetSkillParams) -> Result<SkillContent> {
         let Some(listing) = self.context.resolve_skill(&params.name)? else {
             return Err(Error::ConceptNotFound {
                 id: params.name.parse()?,
@@ -972,8 +990,8 @@ impl<P: EmbeddingProvider, S: VectorStore> McpState<P, S> {
     }
 
     /// One skill of the project named by `params.cwd`.
-    pub fn get_skill(&mut self, params: GetSkillParams) -> Result<SkillContent> {
-        self.session(&params.cwd)?.get_skill(params)
+    pub fn skill(&mut self, params: GetSkillParams) -> Result<SkillContent> {
+        self.session(&params.cwd)?.skill(params)
     }
 
     /// Direct read of a concept in the local argosy of the project named

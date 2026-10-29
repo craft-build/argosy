@@ -172,18 +172,18 @@ impl Concept {
     }
 
     /// Looks up a frontmatter key expected to hold a string.
-    pub fn get_str(&self, key: &str) -> Option<&str> {
+    pub fn frontmatter_str(&self, key: &str) -> Option<&str> {
         self.get(key)?.as_str()
     }
 
     /// The frontmatter `type` field.
     pub fn concept_type(&self) -> Option<&str> {
-        self.get_str("type")
+        self.frontmatter_str("type")
     }
 
     /// The frontmatter `description` field.
     pub fn description(&self) -> Option<&str> {
-        self.get_str("description")
+        self.frontmatter_str("description")
     }
 
     /// The frontmatter `tags` field, from a sequence or a single string.
@@ -390,7 +390,7 @@ mod tests {
 
         let serialized = concept.to_string();
         let reparsed = Concept::from_str(&serialized).unwrap();
-        assert_eq!(reparsed.get_str("custom_field"), Some("keepme"));
+        assert_eq!(reparsed.frontmatter_str("custom_field"), Some("keepme"));
         assert_eq!(reparsed.get("nested"), concept.get("nested"));
         assert_eq!(reparsed.body(), concept.body());
 

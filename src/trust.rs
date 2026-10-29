@@ -113,7 +113,7 @@ impl TrustPolicy {
 
     /// [`Self::effective`] over a concept's `verified` frontmatter.
     pub fn effective_for(&self, origin: Origin, argosy: &str, concept: &Concept) -> String {
-        self.effective(origin, argosy, concept.get_str("verified"))
+        self.effective(origin, argosy, concept.frontmatter_str("verified"))
     }
 }
 

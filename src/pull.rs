@@ -590,11 +590,6 @@ impl Update {
     /// candidate takes its place, and the pull-time integrity stamp is
     /// rewritten for the new tree. Any failure restores the previous
     /// checkout; the candidate is always cleaned up.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Io`](crate::error::Error) when a swap step fails (the
-    /// previous checkout is restored), or the integrity-stamp write fails.
     pub fn apply(self) -> Result<UpdatePlan> {
         let current = self.root.join(&self.name);
         let scratch = self.root.join(SCRATCH_DIR);
@@ -642,13 +637,6 @@ impl Update {
 /// tracked `reference` at `url`, clones the candidate beside the live
 /// checkout, verifies it exactly as `pull` would, and diffs the two trees.
 /// Nothing on the live checkout changes until [`Update::apply`].
-///
-/// # Errors
-///
-/// [`Error::Validation`](crate::error::Error) for an unsafe name or URL, an
-/// unresolvable ref, or a candidate that fails the pull-time checks (not an
-/// argosy, integrity mismatch); [`Error::Io`](crate::error::Error) for
-/// filesystem failures.
 pub fn prepare_update(
     root: &Path,
     name: &str,
@@ -790,11 +778,6 @@ fn sweep_scratch(root: &Path, name: &str) -> Result<()> {
 /// preferring `refs/heads/<reference>` over `refs/tags/<reference>` when a
 /// name exists as both, and never returning anything but a verified
 /// hex object id.
-///
-/// # Errors
-///
-/// [`Error::Validation`](crate::error::Error) when the ref cannot be
-/// resolved or resolves to something that is not an object id.
 pub fn resolve_remote_commit(url: &str, reference: &str) -> Result<String> {
     ensure!(
         !url.is_empty() && !url.starts_with('-'),
@@ -870,11 +853,6 @@ pub fn resolve_remote_commit(url: &str, reference: &str) -> Result<String> {
 
 /// The default branch `url`'s HEAD points at (`"main"`, `"master"`), or
 /// `"HEAD"` when the remote does not say.
-///
-/// # Errors
-///
-/// [`Error::Validation`](crate::error::Error) when `git ls-remote --symref`
-/// fails or git is missing.
 pub fn default_remote_branch(url: &str) -> Result<String> {
     ensure!(
         !url.is_empty() && !url.starts_with('-'),
@@ -998,11 +976,6 @@ fn git_dir_of(checkout: &Path) -> Option<PathBuf> {
 /// integrity stamp, returning the removed path. Works on broken checkouts
 /// too — removing a tampered import to re-pull it is the documented repair
 /// path, so no argosy.md is required.
-///
-/// # Errors
-///
-/// [`Error::Validation`](crate::error::Error) when `name` is unsafe or
-/// reserved, or no such real directory exists.
 pub fn remove_checkout(root: &Path, name: &str) -> Result<PathBuf> {
     ensure!(
         is_safe_checkout_name(name),
@@ -1261,9 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn git_spawn_error_names_git_when_the_binary_is_missing() {
-        // Regression: a failed spawn used to surface as a misleading I/O error
-        // on the destination path.
+    fn git_spawn_failure_reports_spawn_not_io() {
         let err = git_spawn_error(
             Path::new("/tmp/dest"),
             std::io::Error::from(std::io::ErrorKind::NotFound),
@@ -1862,7 +1833,7 @@ mod tests {
         let root = tmp.path().join("store");
         clone_as_checkout(&url, &root, "shared").unwrap();
 
-        // Rewrite history: the old commit is no longer reachable upstream.
+        // Rewrite history so the old commit is unreachable upstream.
         fs::write(repo.join("skill/one.md"), "rewritten\n").unwrap();
         commit_all(&repo, "two");
         run_git(

@@ -77,12 +77,8 @@ pub(super) struct OutlineEntry {
 
 pub(super) struct DirEntry {
     pub(super) rel_path: String,
-    #[allow(dead_code)]
-    pub(super) name: String,
     pub(super) lang: LangId,
-    #[allow(dead_code)]
     pub(super) symbol_count: usize,
-    #[allow(dead_code)]
     pub(super) bytes: usize,
     pub(super) tree: Vec<OutlineEntry>,
 }

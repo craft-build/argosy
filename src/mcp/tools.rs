@@ -10,8 +10,14 @@ use rmcp::model::{Tool, ToolAnnotations};
 #[cfg(feature = "code-tools")]
 use crate::codetools;
 
-use super::params::*;
-use super::reports::*;
+use super::params::{
+    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams,
+    RulesParams, SearchParams, WriteParams,
+};
+use super::reports::{
+    AskReport, ConceptContent, PromoteReport, SearchReport, SkillContent, SkillsReport, UriContent,
+    WriteReport,
+};
 use crate::error::{Error, Result};
 
 /// A selectable group of tools; see [`Toolsets`].
@@ -183,6 +189,7 @@ pub fn tool_definitions_for(enabled: &Toolsets) -> Vec<Tool> {
 }
 
 fn knowledge_tool_definitions() -> Vec<Tool> {
+    // `mut` is only used when code-tools toolsets extend the list (see below).
     #[allow(unused_mut)]
     let mut tools = vec![
         tool::<SearchParams, SearchReport>(

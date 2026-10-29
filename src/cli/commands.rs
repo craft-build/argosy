@@ -1208,6 +1208,7 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, args: &McpArgs) -> Result<
             .with_default_k(default_k)
             .with_trust_policy(trust.clone()))
     });
+    // `mut` is only used when the decision feature is enabled (with_decision below).
     #[allow(unused_mut)]
     let mut state = McpState::new(factory)
         .with_session_limits(config.session.project_ttl(), config.session.project_max);
@@ -1226,8 +1227,10 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, args: &McpArgs) -> Result<
     }
     // Code tools are confined to the spawn workspace unless the user opts out.
     #[cfg(feature = "code-tools")]
+    // `mut` because `code` is reassigned for review grounding in the server block below.
     #[allow(unused_mut)]
     let mut code = {
+        // `mut` is only used when the decision feature is enabled (with_decision below).
         #[allow(unused_mut)]
         let mut tools = argosy::codetools::CodeTools::default()
             .with_external_paths(config.code_tools.allow_external_paths)
@@ -1258,22 +1261,24 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, args: &McpArgs) -> Result<
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Transport {
-            reason: format!("failed to start the tokio runtime: {e}"),
-        })?
+        .map_err(|source| Error::TransportRuntime { source })?
         .block_on(async move {
             eprintln!("argosy mcp: serving on stdio");
-            let service =
-                server
-                    .serve(rmcp::transport::stdio())
-                    .await
-                    .map_err(|e| Error::Transport {
-                        reason: format!("MCP stdio handshake failed: {e}"),
-                    })?;
+            let service = server
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|source| Error::TransportService {
+                    operation: "MCP stdio handshake failed",
+                    source: Box::new(source),
+                })?;
             // `cancel()` would shut the server down immediately; wait for the natural end.
-            service.waiting().await.map_err(|e| Error::Transport {
-                reason: format!("MCP server task failed: {e}"),
-            })?;
+            service
+                .waiting()
+                .await
+                .map_err(|source| Error::TransportService {
+                    operation: "MCP server task failed",
+                    source: Box::new(source),
+                })?;
             Ok::<(), Error>(())
         })?;
     Ok(ExitCode::SUCCESS)

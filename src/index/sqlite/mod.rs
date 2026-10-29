@@ -109,7 +109,7 @@ impl SqliteVecStore {
                 .context(SqliteSnafu {
                     path: path.to_path_buf(),
                 })?;
-        } else if existing_version < SCHEMA_VERSION as i64 {
+        } else if existing_version < i64::from(SCHEMA_VERSION) {
             // A derived artifact: drop the old layout and let reconcile
             // rebuild it from the bundles.
             conn.execute_batch(
@@ -215,7 +215,7 @@ impl SqliteVecStore {
                 path: path.to_path_buf(),
             })?;
         let version = Self::check_schema_version(&conn, path)?;
-        if version < SCHEMA_VERSION as i64 {
+        if version < i64::from(SCHEMA_VERSION) {
             return IndexSnafu {
                 reason: format!(
                     "index schema version {version} predates this build's {SCHEMA_VERSION}; \
@@ -241,7 +241,7 @@ impl SqliteVecStore {
             .context(SqliteSnafu {
                 path: db.to_path_buf(),
             })?;
-        if version > SCHEMA_VERSION as i64 {
+        if version > i64::from(SCHEMA_VERSION) {
             return IndexSnafu {
                 reason: format!(
                     "index schema version {version} is newer than this build's {SCHEMA_VERSION}; upgrade argosy"

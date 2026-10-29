@@ -12,10 +12,21 @@ use std::time::SystemTime;
 
 use tracing::warn;
 
+use super::tool_error;
+use crate::error::Result;
+
 const STALE_READ_MSG: &str = "file changed since last read";
 const NO_READ_MSG: &str = "no read on record";
 
 pub struct FileReadTracker(Mutex<HashMap<PathBuf, SystemTime>>);
+
+impl std::fmt::Debug for FileReadTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileReadTracker")
+            .field("tracked", &self.lock().len())
+            .finish_non_exhaustive()
+    }
+}
 
 fn get_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
@@ -49,18 +60,18 @@ impl FileReadTracker {
         }
     }
 
-    pub fn check_before_edit(&self, path: &Path) -> Result<(), String> {
+    pub fn check_before_edit(&self, path: &Path) -> Result<()> {
         let normalized = normalize_path(path);
         let mut guard = self.lock();
         let Some(&recorded) = guard.get(&normalized) else {
             // Fail closed: a never-read file is refused — the writer has not
             // seen what it is about to overwrite. A new file clobbers nothing.
             if get_mtime(&normalized).is_some() {
-                return Err(format!(
+                return Err(tool_error(format!(
                     "{NO_READ_MSG}: {} - read it through these tools first (zoom or outline it, \
                      or run astgrep/conflicts without apply/resolve), then retry",
                     path.display(),
-                ));
+                )));
             }
             return Ok(());
         };
@@ -69,10 +80,10 @@ impl FileReadTracker {
             return Ok(());
         };
         if recorded != current {
-            return Err(format!(
+            return Err(tool_error(format!(
                 "{STALE_READ_MSG}: {} - re-read the file (e.g. zoom it) before editing",
                 path.display(),
-            ));
+            )));
         }
         Ok(())
     }
@@ -113,7 +124,7 @@ mod tests {
         fs::write(&path, "content").unwrap();
 
         let tracker = FileReadTracker::new();
-        let err = tracker.check_before_edit(&path).unwrap_err();
+        let err = tracker.check_before_edit(&path).unwrap_err().to_string();
         assert!(err.contains(NO_READ_MSG), "{err}");
     }
 
@@ -136,7 +147,7 @@ mod tests {
         let tracker = FileReadTracker::new();
         tracker.record_read(&path);
         future_mtime(&path);
-        let err = tracker.check_before_edit(&path).unwrap_err();
+        let err = tracker.check_before_edit(&path).unwrap_err().to_string();
         assert!(err.contains(STALE_READ_MSG), "{err}");
     }
 

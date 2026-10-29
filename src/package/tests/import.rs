@@ -18,12 +18,15 @@ fn import_honors_craft_metadata_block_and_nested_examples() {
         .join("styleguide/rust/naming/SNAKE-CASE-VARS.md");
     assert!(path.is_file());
     let concept = Concept::from_file(&path).unwrap();
-    assert_eq!(concept.get_str("language"), Some("rust"));
-    assert_eq!(concept.get_str("category"), Some("naming"));
-    assert_eq!(concept.get_str("rule_id"), Some("SNAKE-CASE-VARS"));
+    assert_eq!(concept.frontmatter_str("language"), Some("rust"));
+    assert_eq!(concept.frontmatter_str("category"), Some("naming"));
+    assert_eq!(concept.frontmatter_str("rule_id"), Some("SNAKE-CASE-VARS"));
     // Schema `warning` canonicalizes to `warn`.
-    assert_eq!(concept.get_str("priority"), Some("warn"));
-    assert_eq!(concept.get_str("pattern"), Some("^[a-z][a-z0-9_]*$"));
+    assert_eq!(concept.frontmatter_str("priority"), Some("warn"));
+    assert_eq!(
+        concept.frontmatter_str("pattern"),
+        Some("^[a-z][a-z0-9_]*$")
+    );
     assert_eq!(concept.tags(), vec!["naming", "convention"]);
     assert!(concept.body().contains("## Good"));
     assert!(concept.body().contains("- let my_variable = 5;"));
@@ -35,14 +38,14 @@ fn import_honors_craft_metadata_block_and_nested_examples() {
         .join("styleguide/rust-2021/style/OVERRIDE-EXPLICIT-FACETS.md");
     assert!(path.is_file());
     let concept = Concept::from_file(&path).unwrap();
-    assert_eq!(concept.get_str("language"), Some("rust-2021"));
-    assert_eq!(concept.get_str("category"), Some("style"));
+    assert_eq!(concept.frontmatter_str("language"), Some("rust-2021"));
+    assert_eq!(concept.frontmatter_str("category"), Some("style"));
 
     let path = local
         .root()
         .join("styleguide/rust/naming/HINT-PRIORITY-KEPT.md");
     let concept = Concept::from_file(&path).unwrap();
-    assert_eq!(concept.get_str("priority"), Some("hint"));
+    assert_eq!(concept.frontmatter_str("priority"), Some("hint"));
 
     assert_eq!(error_findings(&local).len(), 0);
 }
@@ -126,11 +129,14 @@ fn import_converts_craft_rulesets_into_styleguide_concepts() {
     assert!(full.is_file());
     let concept = Concept::from_file(&full).unwrap();
     assert_eq!(concept.concept_type(), Some("Styleguide Rule"));
-    assert_eq!(concept.get_str("language"), Some("rust"));
-    assert_eq!(concept.get_str("category"), Some("error-handling"));
-    assert_eq!(concept.get_str("rule_id"), Some("no-unwrap-in-prod"));
-    assert_eq!(concept.get_str("priority"), Some("error"));
-    assert_eq!(concept.get_str("pattern"), Some(".unwrap()"));
+    assert_eq!(concept.frontmatter_str("language"), Some("rust"));
+    assert_eq!(concept.frontmatter_str("category"), Some("error-handling"));
+    assert_eq!(
+        concept.frontmatter_str("rule_id"),
+        Some("no-unwrap-in-prod")
+    );
+    assert_eq!(concept.frontmatter_str("priority"), Some("error"));
+    assert_eq!(concept.frontmatter_str("pattern"), Some(".unwrap()"));
     let body = concept.body();
     assert!(body.contains("## Good"));
     assert!(body.contains("- let value = maybe()?;"));
@@ -141,7 +147,7 @@ fn import_converts_craft_rulesets_into_styleguide_concepts() {
     let minimal = local.root().join("styleguide/general/misc/minimal-rule.md");
     let concept = Concept::from_file(&minimal).unwrap();
     assert_eq!(
-        concept.get_str("description"),
+        concept.frontmatter_str("description"),
         Some("A rule with only the required fields.")
     );
     assert!(!concept.body().contains("## Good"));

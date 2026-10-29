@@ -59,9 +59,9 @@ fn list_skills_surfaces_origin_trust_tier_and_shadowing() {
 }
 
 #[test]
-fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
+fn skill_resolves_by_precedence_and_errors_on_unknown() {
     let mut rig = trusted_rig();
-    let out = rig.state.get_skill(GetSkillParams {
+    let out = rig.state.skill(GetSkillParams {
         cwd: project(),
         name: "shared-audit".to_string(),
     });
@@ -101,7 +101,7 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
         .unwrap();
     let out = rig
         .state
-        .get_skill(GetSkillParams {
+        .skill(GetSkillParams {
             cwd: project(),
             name: "shared-audit".to_string(),
         })
@@ -110,7 +110,7 @@ fn get_skill_resolves_by_precedence_and_errors_on_unknown() {
 
     let err = rig
         .state
-        .get_skill(GetSkillParams {
+        .skill(GetSkillParams {
             cwd: project(),
             name: "nope".to_string(),
         })
@@ -145,7 +145,7 @@ fn configured_cap_above_the_claim_leaves_the_claim_standing() {
     ));
     let out = rig
         .state
-        .get_skill(GetSkillParams {
+        .skill(GetSkillParams {
             cwd: project(),
             name: "shared-audit".to_string(),
         })
@@ -162,7 +162,7 @@ fn configured_cap_below_the_claim_caps_the_reported_tier() {
     ));
     let out = rig
         .state
-        .get_skill(GetSkillParams {
+        .skill(GetSkillParams {
             cwd: project(),
             name: "shared-audit".to_string(),
         })

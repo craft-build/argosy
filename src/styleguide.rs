@@ -108,27 +108,27 @@ impl StyleguideRule {
 
     /// The language this rule applies to.
     pub fn language(&self) -> Option<&str> {
-        self.concept.get_str("language")
+        self.concept.frontmatter_str("language")
     }
 
     /// The rule category.
     pub fn category(&self) -> Option<&str> {
-        self.concept.get_str("category")
+        self.concept.frontmatter_str("category")
     }
 
     /// A producer's stable rule identifier, if set.
     pub fn rule_id(&self) -> Option<&str> {
-        self.concept.get_str("rule_id")
+        self.concept.frontmatter_str("rule_id")
     }
 
     /// The producer's priority (`error`/`warn`/`info` by convention, not validated).
     pub fn priority(&self) -> Option<&str> {
-        self.concept.get_str("priority")
+        self.concept.frontmatter_str("priority")
     }
 
     /// A machine-checkable pattern, if the producer supplied one.
     pub fn pattern(&self) -> Option<&str> {
-        self.concept.get_str("pattern")
+        self.concept.frontmatter_str("pattern")
     }
 
     /// The body section under a `## Good` heading, trimmed; `None` when absent.
@@ -262,7 +262,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             ));
         }
         if concept
-            .get_str("language")
+            .frontmatter_str("language")
             .is_none_or(|l| l.trim().is_empty())
         {
             findings.push(Finding::new(
@@ -273,7 +273,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
             ));
         }
         if concept
-            .get_str("category")
+            .frontmatter_str("category")
             .is_none_or(|c| c.trim().is_empty())
         {
             findings.push(Finding::new(
@@ -285,7 +285,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         }
         // `priority` and `pattern` power the deterministic review pre-pass;
         // a broken value silently no-ops there, so surface it here.
-        if let Some(priority) = concept.get_str("priority").map(str::trim)
+        if let Some(priority) = concept.frontmatter_str("priority").map(str::trim)
             && !priority.is_empty()
             && !matches!(priority, "error" | "warn" | "info")
         {
@@ -302,7 +302,7 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
         // The regex check exists wherever the pre-pass compiles patterns
         // (`regex` is a code-tools dependency).
         #[cfg(feature = "code-tools")]
-        if let Some(pattern) = concept.get_str("pattern").map(str::trim)
+        if let Some(pattern) = concept.frontmatter_str("pattern").map(str::trim)
             && !pattern.is_empty()
             && regex::Regex::new(pattern).is_err()
         {

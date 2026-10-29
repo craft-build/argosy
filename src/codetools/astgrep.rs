@@ -122,11 +122,13 @@ pub fn run(code: &CodeTools, params: AstgrepParams) -> Result<AstgrepReport> {
             let rw = rewrite_str.expect("is_replace implies rewrite is Some");
             let mut grep2 = lang.ast_grep(&content);
             let edits = grep2.root().replace_all(pattern_str, rw);
+            let rel = relative_path(&path.to_string_lossy());
             for edit in edits.into_iter().rev() {
-                grep2.edit(edit).map_err(|e| tool_error(e.to_string()))?;
+                grep2
+                    .edit(edit)
+                    .map_err(|e| tool_error(format!("failed to apply edit to {rel}: {e}")))?;
             }
             let new_content = grep2.generate();
-            let rel = relative_path(&path.to_string_lossy());
 
             if apply {
                 // Roll back only when the replacement INTRODUCES errors —

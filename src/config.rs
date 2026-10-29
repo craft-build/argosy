@@ -42,9 +42,7 @@
 //!     review_max = 16
 //! }
 //! trust {
-//!     // Per-import maximum OKF tier, keyed by manifest name. An import
-//!     // with no entry is capped at "unverified" whatever its concepts
-//!     // claim in `verified` frontmatter.
+//!     // Per-import max tier; an import with no entry is capped at "unverified".
 //!     "acme-shared" = "machine-confirmed"
 //! }
 //! decision {

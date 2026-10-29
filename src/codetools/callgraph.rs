@@ -6,10 +6,11 @@ use std::collections::HashSet;
 use rmcp::schemars;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 
 use super::outline::{LangId, Range, Symbol, extract_symbols};
 use super::{CodeTools, relative_path, tool_error};
-use crate::error::Result;
+use crate::error::{IoSnafu, Result};
 
 /// `callgraph` parameters.
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -50,7 +51,9 @@ pub fn run(code: &CodeTools, params: CallgraphParams) -> Result<CallgraphReport>
 
     let resolved = code.resolve_path(&params.path)?;
     let p = std::path::Path::new(&resolved);
-    let content = std::fs::read_to_string(p).map_err(|e| tool_error(format!("read error: {e}")))?;
+    let content = std::fs::read_to_string(p).context(IoSnafu {
+        path: p.to_path_buf(),
+    })?;
     code.record_read(p);
 
     let symbols = extract_symbols(&content, lang);

@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn package_tar_gz_refuses_an_existing_destination() {
-    // Regression: a second tar.gz run used to silently clobber the first artifact.
+    // Re-packaging must refuse an existing artifact rather than clobber it.
     let dir = TempDir::new().unwrap();
     let root = fixture_argosy(&dir);
     let dest = dir.path().join("bundle.tar.gz");

@@ -89,6 +89,7 @@ const REVIEW_DESCRIPTION: &str = "Review tracked working-tree changes or one com
 
 /// The advertised prompt set; static, with no `list_changed` notifications.
 pub fn prompt_definitions() -> Vec<Prompt> {
+    // `mut` is only used when the review prompt is compiled in (code-tools feature).
     #[allow(unused_mut)]
     let mut prompts = vec![
         Prompt::new("dream", Some(DREAM_DESCRIPTION), None),

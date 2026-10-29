@@ -60,7 +60,7 @@ pub struct StartReviewParams {
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct ReviewDiffParams {
-    /// Opaque id returned by `start_review`.
+    /// As returned by `start_review`; see [`StartReviewOutcome::review_id`].
     pub review_id: String,
     /// Repository-relative changed path. Omit to list the files in the snapshot.
     pub path: Option<String>,
@@ -69,7 +69,7 @@ pub struct ReviewDiffParams {
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct ReportFindingParams {
-    /// Opaque id returned by `start_review`.
+    /// As returned by `start_review`; see [`StartReviewOutcome::review_id`].
     pub review_id: String,
     /// Imperative title prefixed with the priority, e.g. `[P1] Preserve the lock`.
     pub title: String,
@@ -129,7 +129,7 @@ pub enum ExportFormat {
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
 pub struct ReviewFindingsParams {
-    /// Opaque id returned by `start_review`.
+    /// As returned by `start_review`; see [`StartReviewOutcome::review_id`].
     pub review_id: String,
     /// Return only this priority.
     pub priority: Option<ReviewPriority>,
@@ -143,6 +143,8 @@ pub struct ReviewFindingsParams {
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct StartReviewOutcome {
+    /// Opaque id for this review session; pass it to `review_diff`,
+    /// `report_finding`, and `review_findings`.
     pub review_id: String,
     pub repository: String,
     pub comparison: String,
@@ -224,13 +226,8 @@ pub struct ReviewRuleSet {
 }
 
 impl ReviewRuleSet {
-    /// Collects one opened project's grounding from its argosy set.
-    ///
-    /// # Errors
-    ///
-    /// Fails only when the underlying rule listing cannot walk the
-    /// `styleguide/` namespaces (unreadable directories); a rule with an
-    /// invalid `pattern` is counted in
+    /// Collects one opened project's grounding from its argosy set. A rule
+    /// with an invalid `pattern` is counted in
     /// [`invalid_patterns`](Self::invalid_patterns), never an error.
     pub fn from_context(context: &ProjectContext, trust: &TrustPolicy) -> Result<Self> {
         let mut set = Self::default();

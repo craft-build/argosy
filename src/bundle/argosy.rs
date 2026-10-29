@@ -243,14 +243,17 @@ impl Argosy {
         }
 
         // `name` and `argosy_version` are required; the other two are recommended.
-        if concept.get_str("name").is_none_or(|n| n.trim().is_empty()) {
+        if concept
+            .frontmatter_str("name")
+            .is_none_or(|n| n.trim().is_empty())
+        {
             report.push(Finding::new(
                 Severity::Error,
                 Some("STR-5"),
                 Some(manifest_rel.clone()),
                 "manifest must declare a non-empty `name` field (§4.2)",
             ));
-        } else if let Some(name) = concept.get_str("name").map(str::trim)
+        } else if let Some(name) = concept.frontmatter_str("name").map(str::trim)
             && !is_safe_bundle_name(name)
         {
             // `Manifest::parse` refuses the same names, so `validate` must
@@ -292,7 +295,10 @@ impl Argosy {
                 "manifest SHOULD declare the `okf_version` it targets (§4.2)",
             ));
         }
-        if concept.get_str("description").is_none_or(str::is_empty) {
+        if concept
+            .frontmatter_str("description")
+            .is_none_or(str::is_empty)
+        {
             report.push(Finding::new(
                 Severity::Warning,
                 Some("§4.2"),

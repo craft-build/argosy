@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{DecisionConfig, DecisionProviderConfig};
-use crate::error::{Error, Result};
+use snafu::{IntoError, ResultExt};
+
+use crate::error::{
+    DecisionClientBuildSnafu, DecisionRequestSnafu, DecisionResponseParseSnafu, Error, Result,
+};
 
 /// How long a failed endpoint is treated as unreachable before another
 /// attempt, bounding the cost of a down sidecar.
@@ -157,6 +161,7 @@ impl DecisionResponse {
             answer
                 .get(*key)
                 .and_then(serde_json::Value::as_f64)
+                // Deliberate narrowing: a confidence threshold needs only f32.
                 .map(|value| value as f32)
         })
     }
@@ -278,9 +283,7 @@ impl JevClient {
         let http = reqwest::blocking::Client::builder()
             .timeout(config.timeout())
             .build()
-            .map_err(|source| Error::Decision {
-                reason: format!("failed to build the HTTP client: {source}"),
-            })?;
+            .context(DecisionClientBuildSnafu)?;
         let api_key = std::env::var(config.api_key_env())
             .ok()
             .filter(|key| !key.trim().is_empty());
@@ -353,9 +356,7 @@ impl DecisionProvider for JevClient {
             Ok(response) => response,
             Err(source) => {
                 self.mark_down();
-                return Err(Error::Decision {
-                    reason: format!("decision request to `{url}` failed: {source}"),
-                });
+                return Err(DecisionRequestSnafu { url: url.clone() }.into_error(source));
             }
         };
         let status = response.status();
@@ -377,11 +378,8 @@ impl DecisionProvider for JevClient {
         self.clear_down();
         response
             .json::<DecisionResponse>()
-            .map_err(|source| Error::Decision {
-                reason: format!(
-                    "decision endpoint `{}` returned an unparseable response: {source}",
-                    self.endpoint
-                ),
+            .context(DecisionResponseParseSnafu {
+                endpoint: self.endpoint.clone(),
             })
     }
 

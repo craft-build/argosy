@@ -82,18 +82,18 @@ pub fn run(code: &CodeTools, params: ConflictsParams) -> Result<ConflictsReport>
                 scope.resolved_files.len()
             );
             for f in &scope.resolved_files {
-                out.push_str(&format!("  {f}\n"));
+                let _ = std::fmt::write(&mut out, format_args!("  {f}\n"));
             }
             if scope.remaining > 0 {
-                out.push_str(&format!(
-                    "{} conflict(s) remain unresolved\n",
-                    scope.remaining
-                ));
+                let _ = std::fmt::write(
+                    &mut out,
+                    format_args!("{} conflict(s) remain unresolved\n", scope.remaining),
+                );
             }
             out
         };
         for warning in &scope.skipped {
-            text.push_str(&format!("warning: {warning}\n"));
+            let _ = std::fmt::write(&mut text, format_args!("warning: {warning}\n"));
         }
         return Ok(ConflictsReport {
             path: relative_path(&scope_path),

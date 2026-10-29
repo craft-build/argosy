@@ -94,8 +94,8 @@ impl UnitMeta {
             concept_type: concept.concept_type().map(str::to_string),
             description: concept.description().map(str::to_string),
             tags: concept.tags().iter().map(|s| (*s).to_string()).collect(),
-            language: concept.get_str("language").map(str::to_string),
-            category: concept.get_str("category").map(str::to_string),
+            language: concept.frontmatter_str("language").map(str::to_string),
+            category: concept.frontmatter_str("category").map(str::to_string),
         }
     }
 }
@@ -227,6 +227,7 @@ pub fn rrf_fuse(legs: &[Vec<SearchHit>], k: usize) -> Vec<SearchHit> {
         .into_iter()
         .zip(hits)
         .map(|(score, mut hit)| {
+            // Deliberate narrowing: finite RRF scores need only f32 in the wire type.
             hit.score = score as f32;
             (score, hit)
         })

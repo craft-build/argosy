@@ -20,7 +20,10 @@ use crate::index::{EmbeddingProvider, VectorStore};
 #[cfg(feature = "code-tools")]
 use crate::codetools::{self, CodeTools};
 
-use super::params::*;
+use super::params::{
+    AskParams, GetSkillParams, ListSkillsParams, PromoteParams, ReadParams, ReadPathParams,
+    RulesParams, SearchParams, WriteParams,
+};
 use super::prompts::{get_prompt_result, prompt_definitions};
 use super::session::McpState;
 use super::tools::{Toolsets, tool_definitions_for, toolset_of};
@@ -63,6 +66,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ArgosyMcpServer<P, S> {
         // The decision endpoint is shared with the knowledge tools' rerank/ask.
         #[cfg(feature = "code-tools")]
         let code = {
+            // `mut` is only used when the decision feature is enabled (with_decision below).
             #[allow(unused_mut)]
             let mut tools = CodeTools::default();
             #[cfg(feature = "decision")]
@@ -429,7 +433,7 @@ where
             let known = match name.as_str() {
                 "search" => Some(dispatch!(lock, args, search : SearchParams)),
                 "list_skills" => Some(dispatch!(lock, args, list_skills : ListSkillsParams)),
-                "get_skill" => Some(dispatch!(lock, args, get_skill : GetSkillParams)),
+                "get_skill" => Some(dispatch!(lock, args, skill : GetSkillParams)),
                 "search_rules" => Some(dispatch!(lock, args, search_rules : RulesParams)),
                 #[cfg(feature = "decision")]
                 "ask" => Some(dispatch!(lock, args, ask : AskParams)),
