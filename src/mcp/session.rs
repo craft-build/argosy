@@ -227,11 +227,13 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
     /// `language`/`category` facets.
     ///
     /// Each hit carries the rule body's `## Good` / `## Bad` sections when present.
+    /// Rules are deduplicated to their best-scoring passage.
     pub fn search_rules(&self, params: RulesParams) -> Result<SearchReport> {
+        let k = params.k.unwrap_or(self.default_k);
         let mut report = self.search(SearchParams {
             cwd: params.cwd,
             query: params.query,
-            k: params.k,
+            k: Some(rules_fetch_k(k)),
             namespaces: Some(vec!["styleguide".to_string()]),
             argosy: None,
             tags: None,
@@ -239,6 +241,10 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             language: params.language,
             category: params.category,
         })?;
+        // One hit per rule: the best-scoring passage.
+        let mut seen = std::collections::HashSet::new();
+        report.hits.retain(|hit| seen.insert(hit.uri.clone()));
+        report.hits.truncate(k);
         for hit in &mut report.hits {
             // A hit whose concept was deleted mid-flight keeps its facets, without examples.
             let Ok(concept) = self.context.read_uri(&hit.uri) else {
@@ -1138,6 +1144,12 @@ fn slice_body(
     }
     let slice = lines[(start - 1) as usize..end as usize].join("\n");
     Ok(Some((slice, LineRange { start, end })))
+}
+
+/// The chunk depth `search_rules` fetches before per-rule dedup: several times
+/// `k` with a floor, so `k` distinct rules survive.
+fn rules_fetch_k(k: usize) -> usize {
+    (k * 4).max(32)
 }
 
 /// Reorders styleguide hits by a decision endpoint's applicability score (advisory).

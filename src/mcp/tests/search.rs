@@ -351,6 +351,86 @@ fn search_rules_hits_only_styleguide_and_facets_apply() {
     assert!(none.hits.is_empty(), "facet mismatch excludes");
 }
 
+#[test]
+fn search_rules_deduplicates_chunks_of_one_rule() {
+    let mut rig = rig();
+    // A long rule whose passages all match the query.
+    let mut body = "# Zephyr Backoff\n\nThe zephyr backoff retry ledger policy.\n\n".to_string();
+    for section in 1..=8 {
+        body.push_str(&format!(
+            "## Zephyr Section {section}\n\n\
+             The zephyr backoff retry ledger halves the zephyr backoff delay after each \
+             failed zephyr retry and records every zephyr backoff retry in the ledger.\n\n"
+        ));
+    }
+    body.push_str("## Good\nlet backoff = zephyr.retry();\n\n## Bad\nlet backoff = retry();\n");
+    let rule: Concept = format!(
+        "---\n\
+         type: Styleguide Rule\n\
+         description: Zephyr backoff retry ledger policy.\n\
+         language: rust\n\
+         category: error_handling\n\
+         ---\n{body}"
+    )
+    .parse()
+    .unwrap();
+    rig.state
+        .session(project())
+        .unwrap()
+        .context
+        .local()
+        .write_concept(
+            Namespace::Styleguide,
+            &"styleguide/rust/error_handling/zephyr-backoff".parse().unwrap(),
+            &rule,
+        )
+        .unwrap();
+    // A fresh state so its factory reconciles an index over the new rule.
+    let mut state = McpState::new(factory(
+        rig.state
+            .session(project())
+            .unwrap()
+            .context
+            .local()
+            .root()
+            .to_path_buf(),
+        rig.state
+            .session(project())
+            .unwrap()
+            .context
+            .imported()
+            .map(|a| a.root().to_path_buf())
+            .collect(),
+    ));
+
+    let report = state
+        .search_rules(RulesParams {
+            cwd: project(),
+            query: "zephyr backoff retry ledger".to_string(),
+            language: None,
+            category: None,
+            k: None,
+        })
+        .unwrap();
+
+    let uris: Vec<&str> = report.hits.iter().map(|h| h.uri.as_str()).collect();
+    let unique: std::collections::BTreeSet<_> = uris.iter().collect();
+    assert_eq!(uris.len(), unique.len(), "one hit per rule, got: {uris:?}");
+    let zephyr = report
+        .hits
+        .iter()
+        .find(|h| h.uri.ends_with("zephyr-backoff"))
+        .expect("the matching rule is still a hit");
+    assert!(
+        zephyr.good.is_some() && zephyr.bad.is_some(),
+        "the surviving hit is enriched"
+    );
+    assert!(
+        report.hits.iter().any(|h| h.uri.ends_with("snake-case-vars")),
+        "other rules are not crowded out, got: {uris:?}"
+    );
+}
+
 // --- Provenance tagging of hits and reads (SEC-1/SEC-2) ---
 
 #[test]
