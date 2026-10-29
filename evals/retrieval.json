@@ -1,0 +1,141 @@
+{
+  "k": [1, 5, 10],
+  "absent_window": 5,
+  "min": {
+    "recall@5": 0.95,
+    "mrr": 0.9
+  },
+  "queries": [
+    {
+      "query": "what is an argosy",
+      "expected": ["argosy://argosy-docs/document/architecture"]
+    },
+    {
+      "query": "which namespaces does a bundle hold",
+      "expected": ["argosy://argosy-docs/document/architecture"]
+    },
+    {
+      "query": "can I move a bundle to another machine",
+      "expected": ["argosy://argosy-docs/document/faq", "argosy://argosy-docs/document/architecture"]
+    },
+    {
+      "query": "how are the vector and keyword rankings combined",
+      "expected": ["argosy://argosy-docs/document/retrieval"]
+    },
+    {
+      "query": "what is reciprocal rank fusion",
+      "expected": ["argosy://argosy-docs/document/retrieval"]
+    },
+    {
+      "query": "how does chunking split long documents",
+      "expected": ["argosy://argosy-docs/document/retrieval"]
+    },
+    {
+      "query": "search without downloading an embedding model",
+      "expected": ["argosy://argosy-docs/document/retrieval", "argosy://argosy-docs/document/faq"]
+    },
+    {
+      "query": "what is the rank smoothing constant for fusion",
+      "expected": ["argosy://argosy-docs/document/retrieval"]
+    },
+    {
+      "query": "what happens when I switch embedding models",
+      "expected": ["argosy://argosy-docs/document/index-lifecycle", "argosy://argosy-docs/document/faq"]
+    },
+    {
+      "query": "where does index.db live",
+      "expected": ["argosy://argosy-docs/document/index-lifecycle"]
+    },
+    {
+      "query": "how do I know if my index is stale",
+      "expected": ["argosy://argosy-docs/document/index-lifecycle"]
+    },
+    {
+      "query": "why is the first index build slow",
+      "expected": ["argosy://argosy-docs/document/faq", "argosy://argosy-docs/document/index-lifecycle"]
+    },
+    {
+      "query": "how are imported argosys protected against tampering",
+      "expected": ["argosy://argosy-docs/document/security"]
+    },
+    {
+      "query": "what trust tier does an imported book get by default",
+      "expected": ["argosy://argosy-docs/document/security", "argosy://argosy-docs/document/configuration"]
+    },
+    {
+      "query": "how is untrusted content marked in tool output",
+      "expected": ["argosy://argosy-docs/document/security"]
+    },
+    {
+      "query": "when do project sessions expire",
+      "expected": ["argosy://argosy-docs/document/security", "argosy://argosy-docs/document/configuration"]
+    },
+    {
+      "query": "how does argosy handle invisible unicode",
+      "expected": ["argosy://argosy-docs/document/security"]
+    },
+    {
+      "query": "how do I share a book with my team",
+      "expected": ["argosy://argosy-docs/document/sharing"],
+      "absent": ["argosy://argosy-docs/document/error-codes"]
+    },
+    {
+      "query": "is memory included when packaging",
+      "expected": ["argosy://argosy-docs/document/sharing", "argosy://argosy-docs/document/faq"]
+    },
+    {
+      "query": "what does the catalog list",
+      "expected": ["argosy://argosy-docs/document/sharing"]
+    },
+    {
+      "query": "where is the embedding model cached",
+      "expected": ["argosy://argosy-docs/document/configuration", "argosy://argosy-docs/document/index-lifecycle"]
+    },
+    {
+      "query": "what is the default chunk token budget",
+      "expected": ["argosy://argosy-docs/document/retrieval", "argosy://argosy-docs/document/configuration"]
+    },
+    {
+      "query": "what is the exit code for a usage error",
+      "expected": ["argosy://argosy-docs/document/error-codes"],
+      "absent": ["argosy://argosy-docs/styleguide/rust/naming/snake-case-locals"]
+    },
+    {
+      "query": "which characters can an argosy uri contain",
+      "expected": ["argosy://argosy-docs/document/error-codes"]
+    },
+    {
+      "query": "UnknownArgosy",
+      "expected": ["argosy://argosy-docs/document/error-codes"]
+    },
+    {
+      "query": "search fails with a dimension mismatch",
+      "expected": ["argosy://argosy-docs/document/error-codes", "argosy://argosy-docs/document/index-lifecycle"]
+    },
+    {
+      "query": "which rule forbids bare unwrap",
+      "expected": ["argosy://argosy-docs/styleguide/rust/error-handling/expect-a-reason"]
+    },
+    {
+      "query": "rust error message punctuation style",
+      "expected": ["argosy://argosy-docs/styleguide/rust/error-handling/lowercase-error-messages"]
+    },
+    {
+      "query": "how should local variables be named in rust",
+      "expected": ["argosy://argosy-docs/styleguide/rust/naming/snake-case-locals"]
+    },
+    {
+      "query": "steps to build the semantic index",
+      "expected": ["argosy://argosy-docs/skill/build-and-query-index"]
+    },
+    {
+      "query": "what did the v3 schema migration cost",
+      "expected": ["argosy://argosy-docs/memory/build-notes"],
+      "absent": ["argosy://argosy-docs/document/sharing"]
+    },
+    {
+      "query": "can two worktrees share one index",
+      "expected": ["argosy://argosy-docs/document/faq"]
+    }
+  ]
+}

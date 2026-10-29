@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(index)* `argosy index eval <dataset>`: a labeled retrieval eval — a JSON
+  dataset of queries mapped to expected `argosy://` URIs, scored with
+  macro-averaged recall@k and MRR over the project's real search path, with
+  passage hits collapsed to unique concepts by best rank. Multi-relevant
+  expectations and `absent` drift-challenge labels (URIs that must stay out
+  of a configurable rank window) are supported; labels that do not exist in
+  the built index fail the run instead of silently scoring zero. Exits 1
+  below the dataset's floors (`--min-recall`/`--min-mrr` override,
+  `--report-only` is the calibration escape)
+- *(eval)* a checked-in corpus and dataset under `evals/` (13 concepts,
+  51 passages, 32 hand-pruned labels) plus a `retrieval-eval` CI job gating
+  two legs: hybrid (embedding model cached by its pinned revision) and
+  lexical (zero network). Measured at hybrid recall@5 1.000 / MRR 0.932,
+  lexical 0.938 / 0.795; floors set at 0.95/0.90 and 0.90/0.75
 - *(index)* hybrid retrieval: an FTS5 BM25 index over the chunked passages
   (and concept ids) is fused with vector similarity by reciprocal rank
   fusion — exact identifiers, error codes, and rule IDs now rank next to

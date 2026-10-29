@@ -11,8 +11,10 @@ use crate::error::{IndexSnafu, Result, UnknownArgosySnafu};
 use crate::hash::sha256_hex;
 
 pub mod chunk;
+pub mod eval;
 
 pub use chunk::{Chunk, ChunkConfig};
+pub use eval::{EvalDataset, EvalQuery, EvalReport, QueryScore, ThresholdCheck, Thresholds};
 
 #[cfg(feature = "default-index")]
 pub mod sqlite;

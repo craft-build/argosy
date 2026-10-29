@@ -2,6 +2,7 @@
 //! provider/store traits with no model and no SQLite. `pub(crate)` so other tests reuse them.
 
 mod chunk;
+mod eval;
 mod reconcile;
 mod sanitize;
 mod search;

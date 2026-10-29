@@ -68,3 +68,59 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # The labeled retrieval eval (docs/next.md item 8): queries mapped to
+  # expected `argosy://` URIs over the evals/corpus book, scored with
+  # recall@k and MRR. The hybrid leg measures the full production path
+  # (model cached by its pinned revision); the lexical leg needs no network
+  # at all and pins the BM25/chunking legs. Both legs fail below their floors.
+  retrieval-eval:
+    name: Retrieval eval (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [hybrid, lexical]
+    env:
+      # The pinned tract model revision (MODEL_REVISION in src/index/tract.rs);
+      # bump this key when it changes so the cache re-downloads.
+      MODEL_REVISION: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache the embedding model
+        if: matrix.mode == 'hybrid'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/argosy-embeddings
+          key: argosy-embed-${{ env.MODEL_REVISION }}
+      - name: Build the CLI
+        run: cargo build
+      - name: Scaffold the eval project
+        run: |
+          mkdir -p "$RUNNER_TEMP/project" "$RUNNER_TEMP/xdg-config/argosy" "$RUNNER_TEMP/state"
+          if [ "${{ matrix.mode }}" = "lexical" ]; then
+            printf 'index {\n    search_mode = "lexical"\n}\n' > "$RUNNER_TEMP/xdg-config/argosy/index.bml"
+          fi
+          bundle="$(cd "$RUNNER_TEMP/project" && \
+            XDG_STATE_HOME="$RUNNER_TEMP/state" XDG_CONFIG_HOME="$RUNNER_TEMP/xdg-config" \
+            "$GITHUB_WORKSPACE/target/debug/argosy" --json init | \
+            python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')"
+          cp -R evals/corpus/. "$bundle/"
+      - name: Build the index
+        working-directory: ${{ runner.temp }}/project
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/state
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+          ARGOSY_EMBED_CACHE_DIR: ${{ runner.temp }}/argosy-embeddings
+        run: '"$GITHUB_WORKSPACE/target/debug/argosy" index build'
+      - name: Run the eval
+        working-directory: ${{ runner.temp }}/project
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/state
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+          ARGOSY_EMBED_CACHE_DIR: ${{ runner.temp }}/argosy-embeddings
+        run: >
+          "$GITHUB_WORKSPACE/target/debug/argosy" index eval "$GITHUB_WORKSPACE/evals/retrieval.json"
+          ${{ matrix.mode == 'lexical' && '--min-recall 5=0.9 --min-mrr 0.75' || '' }}

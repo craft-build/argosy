@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 #[cfg(feature = "default-index")]
-use argosy::index::{Filter, Query};
+use argosy::index::{EvalDataset, Filter, Query};
 use argosy::package::{ImportReport, PackageOptions, PackageReport};
 use argosy::{Argosy, LocalArgosy, Namespace, ValidationReport};
 
@@ -565,6 +565,51 @@ pub(super) fn cmd_index(out: &Output, config: &Config, args: &IndexArgs) -> Resu
             }
             Ok(ExitCode::SUCCESS)
         }
+        IndexVerb::Eval(args) => {
+            let context = ProjectContext::open_project(&root)?;
+            if !db.is_file() {
+                out.note(&format!(
+                    "no index at {} — run `argosy index build`",
+                    db.display()
+                ));
+                if out.json {
+                    out.json(&serde_json::json!({"report": null, "db": db}))?;
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Read-only like `query`: the eval measures the built index as-is.
+            let store = SqliteVecStore::open_read_only(&db)?;
+            let provider = runtime_provider(config)?;
+            note_model_load(out, &provider);
+            let index = Index::new(provider, store);
+
+            let mut dataset = read_eval_dataset(&args.dataset)?;
+            apply_floor_overrides(&mut dataset, args)?;
+            let report = argosy::index::eval::run_eval(&index, &context, &dataset)?;
+
+            if out.json {
+                out.json(&report)?;
+            } else {
+                print_eval_report(out, &report);
+            }
+            // Warnings print even under `--report-only`: the floors are still
+            // evaluated; the flag only rescues the exit code.
+            if !report.passed {
+                for check in report.checks.iter().filter(|check| !check.passed) {
+                    out.warn(&format!(
+                        "eval below threshold: {} observed {:.3} < required {:.3}",
+                        check.metric, check.observed, check.required
+                    ));
+                }
+                if args.report_only {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    Ok(ExitCode::FAILURE)
+                }
+            } else {
+                Ok(ExitCode::SUCCESS)
+            }
+        }
     }
 }
 
@@ -575,6 +620,107 @@ pub(super) fn cmd_index(_out: &Output, _config: &Config, _args: &IndexArgs) -> R
          rebuild with default features to use the index subcommand"
     );
     Ok(ExitCode::FAILURE)
+}
+
+/// Reads and parses the eval dataset; I/O and JSON failures both name the path.
+#[cfg(feature = "default-index")]
+fn read_eval_dataset(path: &Path) -> Result<EvalDataset> {
+    let text = std::fs::read_to_string(path).map_err(|source| argosy::error::Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str(&text).map_err(|source| argosy::error::Error::Validation {
+        reason: format!(
+            "failed to parse eval dataset `{}`: {source}",
+            path.display()
+        ),
+    })
+}
+
+/// Applies `--min-recall`/`--min-mrr` over the dataset's floors, replacing
+/// per-`k` values the flags repeat.
+#[cfg(feature = "default-index")]
+fn apply_floor_overrides(dataset: &mut EvalDataset, args: &EvalArgs) -> Result<()> {
+    let reject =
+        |reason: String| -> Result<()> { Err(argosy::error::Error::Validation { reason }) };
+    for pair in &args.min_recall {
+        let Some((k, floor)) = pair.split_once('=') else {
+            return reject(format!(
+                "--min-recall expects <k>=<floor>, got `{pair}` (e.g. --min-recall 10=0.85)"
+            ));
+        };
+        let k = k
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| argosy::error::Error::Validation {
+                reason: format!("--min-recall: `{k}` is not an integer k"),
+            })?;
+        let floor = floor
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| argosy::error::Error::Validation {
+                reason: format!("--min-recall: `{floor}` is not a number"),
+            })?;
+        dataset.min.with_recall(k, floor);
+    }
+    if let Some(mrr) = args.min_mrr {
+        dataset.min.with_mrr(mrr);
+    }
+    Ok(())
+}
+
+/// Prints the human-readable eval report: per-query misses and violations,
+/// aggregate recall per `k`, MRR, and the gate verdict.
+#[cfg(feature = "default-index")]
+fn print_eval_report(out: &Output, report: &argosy::index::EvalReport) {
+    for (index, score) in report.queries.iter().enumerate() {
+        out.note(&format!(
+            "{:>3}. {:<48}  recall@max {:.2}  rr {:.2}",
+            index + 1,
+            truncate_at(&score.query, 48),
+            score
+                .recall_at_k
+                .iter()
+                .map(|(_, recall)| *recall)
+                .next_back()
+                .unwrap_or(0.0),
+            score.reciprocal_rank
+        ));
+        for (uri, rank) in &score.ranks {
+            if rank.is_none() {
+                out.note(&format!("       miss  {uri}"));
+            }
+        }
+        for (uri, rank) in &score.absent_violations {
+            out.note(&format!("       drift  {uri} ranked {rank}"));
+        }
+    }
+    for (k, recall) in &report.recall_at_k {
+        out.note(&format!("recall@{k:<4} {recall:.3}"));
+    }
+    out.note(&format!("mrr      {:.3}", report.mrr));
+    for check in &report.checks {
+        let verdict = if check.passed { "ok" } else { "FAIL" };
+        out.note(&format!(
+            "floor    {} observed {:.3} required {:.3}  {verdict}",
+            check.metric, check.observed, check.required
+        ));
+    }
+    if report.checks.is_empty() {
+        out.note("floor    none (report-only dataset)");
+    }
+}
+
+/// Shortens `text` to `width` characters plus an ellipsis.
+#[cfg(feature = "default-index")]
+fn truncate_at(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        text.to_string()
+    } else {
+        let mut cut: String = text.chars().take(width - 1).collect();
+        cut.push('…');
+        cut
+    }
 }
 
 #[cfg(all(feature = "mcp", feature = "default-index"))]

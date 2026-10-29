@@ -237,7 +237,7 @@ grounding and structured findings.
 | `argosy init [path]` | Create a bundle (manifest + reserved namespaces). |
 | `argosy validate <path>` | Structural + namespace-contract validation with requirement IDs (`--namespace` scopes one namespace). |
 | `argosy pull <url> <name>` | `git clone` an external argosy into the project's argosy store under the state dir (`--global` for the user-wide store). |
-| `argosy index build` / `status` / `query` | Build/diff/search the hybrid index (BM25 + vectors) at `<state>/projects/<slug>/index.db`; with `index.search_mode = "lexical"` in the user config the model is never downloaded and search is BM25-only. |
+| `argosy index build` / `status` / `query` / `eval` | Build/diff/search the hybrid index (BM25 + vectors) at `<state>/projects/<slug>/index.db`; with `index.search_mode = "lexical"` in the user config the model is never downloaded and search is BM25-only. `eval` scores a labeled dataset (recall@k, MRR) and exits 1 below its floors. |
 | `argosy package <src> <dest>` | Distributable copy (`--format tar.gz`), integrity sidecar, `memory/` always excluded. |
 | `argosy convert styleguide <yaml-dir>` | Import legacy YAML rule sets as styleguide concepts (additive, re-runnable). |
 | `argosy catalog` | Generate the global catalog of every project slot (markdown; `--json` for machine output, `--write` to `<state>/README.md`, `--redact-home` to rewrite home paths as `~`). |
@@ -268,6 +268,28 @@ project directory has disappeared is flagged stale. `--redact-home`
 prefixes as `~`. Coding agents can read the same document through MCP at
 `argosy://catalog`. The catalog file lives outside every bundle, so
 packaging never includes it.
+
+## Retrieval eval
+
+Argosy ships its own labeled search-quality benchmark
+([`evals/`](evals/)): a checked-in corpus book plus a JSON dataset of
+queries mapped to expected `argosy://` URIs, scored with recall@k and
+MRR. CI runs it in two modes — the full hybrid path (embedding model
+cached by its pinned revision) and a network-free lexical leg — and fails
+below the dataset's floors, so every retrieval change lands with a
+measurable score.
+
+```sh
+# against any project whose index is built, with any dataset:
+argosy index eval evals/retrieval.json            # human report
+argosy index eval evals/retrieval.json --json     # machine-readable
+argosy index eval evals/retrieval.json --report-only    # always exits 0
+```
+
+Labels must name concepts that exist in the built index, may expect
+several URIs per query, and may carry `absent` challenge URIs that must
+not surface — see [`evals/README.md`](evals/README.md) for the format,
+the corpus provenance, and the label-pruning policy.
 
 ## Library
 

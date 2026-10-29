@@ -97,6 +97,10 @@ pub(super) enum IndexVerb {
 
     /// Hybrid retrieval over the index (BM25 + vector similarity, fused).
     Query(QueryArgs),
+
+    /// Score a labeled retrieval dataset against the index (recall@k, MRR);
+    /// exits 1 below the dataset's floors unless `--report-only`.
+    Eval(EvalArgs),
 }
 
 /// A semantic query; repeatable flags allow several values.
@@ -133,6 +137,26 @@ pub(super) struct QueryArgs {
     /// Only hits whose frontmatter `type` is one of these.
     #[arg(long = "type")]
     pub(super) concept_type: Vec<String>,
+}
+
+/// `index eval` parameters: one labeled dataset, optional floor overrides.
+#[derive(Args)]
+pub(super) struct EvalArgs {
+    /// Path to the labeled JSON dataset: `{"k": […], "min": {…}, "queries":
+    /// [{"query": …, "expected": ["argosy://…"], "absent": […]}]}`.
+    pub(super) dataset: PathBuf,
+
+    /// Override or add a recall floor, formatted `<k>=<floor>`; repeatable.
+    #[arg(long = "min-recall", value_name = "K=FLOOR")]
+    pub(super) min_recall: Vec<String>,
+
+    /// Override the dataset's MRR floor.
+    #[arg(long = "min-mrr", value_name = "FLOOR")]
+    pub(super) min_mrr: Option<f32>,
+
+    /// Report scores but exit 0 even below the floors — the calibration escape.
+    #[arg(long)]
+    pub(super) report_only: bool,
 }
 
 /// Convert external material into argosy concepts.
