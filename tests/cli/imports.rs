@@ -365,6 +365,96 @@ fn sync_materializes_carried_pins_and_reports_drift() {
 }
 
 #[test]
+fn update_reconciles_a_stale_pin() {
+    let setup = Setup::new();
+    setup
+        .argosy()
+        .args(["pull", setup.url(), "company-rules"])
+        .assert()
+        .success();
+    let head = head_sha(&setup.repo);
+
+    // A pin that disagrees with the checkout (a crash between apply and
+    // the lock write leaves exactly this state).
+    let mut lock = Lockfile::load(&setup.store).unwrap();
+    let mut entry = lock.entry("company-rules").unwrap().clone();
+    entry.commit = "0123456789abcdef0123456789abcdef01234567".to_string();
+    lock.upsert("company-rules", entry);
+    lock.save(&setup.store).unwrap();
+
+    setup
+        .argosy()
+        .args(["update", "company-rules"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already at"))
+        .stdout(predicate::str::contains("reconciled the pin"));
+
+    assert_eq!(
+        Lockfile::load(&setup.store)
+            .unwrap()
+            .entry("company-rules")
+            .unwrap()
+            .commit,
+        head
+    );
+    setup
+        .argosy()
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("at pin"));
+}
+
+/// A packaged remote whose clones carry an integrity sidecar, committed as
+/// a git repo.
+fn packaged_setup(scratch: &TempDir) -> Setup {
+    let setup = Setup::new();
+    let source = scratch.path().join("packaged-source");
+    fs::create_dir_all(source.join("skill")).unwrap();
+    fs::write(
+        source.join("argosy.md"),
+        "---\ntype: Argosy Manifest\nname: sealed-rules\nargosy_version: \"1.0.0\"\n---\n# sealed\n",
+    )
+    .unwrap();
+    fs::write(source.join("skill/one.md"), "old line\n").unwrap();
+    argosy::package::package(
+        &argosy::Argosy::open(&source).unwrap(),
+        &setup.repo,
+        &argosy::package::PackageOptions::default(),
+    )
+    .unwrap();
+    git(&setup.repo, &["init", "--quiet", "-b", "main"]);
+    commit(&setup.repo, "one");
+    setup
+}
+
+#[test]
+fn sync_reports_integrity_failure_for_a_tampered_worktree() {
+    let scratch = TempDir::new().unwrap();
+    let setup = packaged_setup(&scratch);
+    setup
+        .argosy()
+        .args(["pull", setup.url(), "company-rules"])
+        .assert()
+        .success();
+
+    // Tamper the checkout's worktree (HEAD unmoved): "at pin" alone would
+    // present a book as healthy that the serving path excludes.
+    fs::write(setup.store.join("company-rules/skill/one.md"), "injected\n").unwrap();
+
+    setup
+        .argosy()
+        .args(["sync"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("integrity failed"))
+        .stdout(predicate::str::contains(
+            "sync: 0 pulled, 0 at pin, 0 drifted, 1 failed",
+        ));
+}
+
+#[test]
 fn sync_fails_loudly_when_a_pin_cannot_be_reproduced() {
     let setup = Setup::new();
     // A pin for a commit no remote ever had.

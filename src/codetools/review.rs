@@ -328,13 +328,13 @@ pub struct ReviewFinding {
     pub path: String,
     pub line_start: u32,
     pub line_end: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub rule_uris: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
-    /// Machine-applicable fixes inside the finding's line range; absent on
+    /// Machine-applicable fixes inside the finding's line range; empty on
     /// pattern findings.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub edits: Vec<FindingEdit>,
     /// Advisory assessment from the decision endpoint, when one was enabled at
     /// report time; it never changes the finding's presence or priority.

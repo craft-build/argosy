@@ -21,8 +21,8 @@ pub struct SearchHitOut {
     pub score: f32,
     /// Which passage matched (`0` for a whole-concept or first passage).
     pub chunk_ordinal: u32,
-    /// The matched passage's heading breadcrumb, when it has one.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// The matched passage's heading breadcrumb; empty when it has none.
+    /// Always serialized: the generated output schema marks it `required`.
     pub heading_path: String,
     /// 1-based first body line the passage covers (frontmatter excluded).
     pub start_line: u32,
@@ -38,7 +38,6 @@ pub struct SearchHitOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Frontmatter `tags` (empty when absent).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Frontmatter `language` facet (styleguide rules).
     #[serde(skip_serializing_if = "Option::is_none")]

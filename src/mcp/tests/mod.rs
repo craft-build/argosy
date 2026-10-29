@@ -4,6 +4,7 @@
 mod ask;
 mod promote;
 mod prompts;
+mod reports;
 mod resources;
 mod search;
 mod sessions;

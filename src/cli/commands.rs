@@ -70,7 +70,8 @@ fn store_root(global: bool) -> Result<PathBuf> {
 }
 
 /// The pin for `name`, or (when none is recorded yet) one built from the
-/// fresh clone: the default branch it tracks and the commit it landed on.
+/// fresh clone: the branch it tracks (read from the clone's own git
+/// config, no second network call) and the commit it landed on.
 fn pin_after_pull(
     root: &Path,
     name: &str,
@@ -88,7 +89,10 @@ fn pin_after_pull(
         })?;
     let reference = match lock.entry(name) {
         Some(entry) => entry.reference.clone(),
-        None => argosy::pull::default_remote_branch(url)?,
+        None => argosy::pull::checkout_remote(&dest)
+            .map(|(_, reference)| reference)
+            .or_else(|| argosy::pull::default_remote_branch(url).ok())
+            .unwrap_or_else(|| "HEAD".to_string()),
     };
     Ok(argosy::lockfile::LockEntry {
         url: url.to_string(),
@@ -266,21 +270,21 @@ pub(super) fn cmd_update(out: &Output, config: &Config, args: &UpdateArgs) -> Re
         }
     }
 
-    // An up-to-date checkout with no pin gets adopted, so the pin exists
-    // before the next pull could bypass it.
+    // An up-to-date checkout reconciles its pin: a recorded pin that
+    // disagrees (a crash between apply and lock save, an adopted older
+    // pin, a manual checkout) is rewritten, so `sync`'s drift hint and
+    // `update` itself always converge.
     if plan.up_to_date {
-        if lock.entry(&args.name).is_none() {
-            lock.upsert(
-                &args.name,
-                argosy::lockfile::LockEntry {
-                    url: plan.url.clone(),
-                    reference: plan.reference.clone(),
-                    commit: plan.to_commit.clone(),
-                    integrity: argosy::pull::integrity_status(&checkout).to_string(),
-                },
-            );
+        let correct = argosy::lockfile::LockEntry {
+            url: plan.url.clone(),
+            reference: plan.reference.clone(),
+            commit: plan.to_commit.clone(),
+            integrity: argosy::pull::integrity_status(&checkout).to_string(),
+        };
+        if lock.entry(&args.name) != Some(&correct) {
+            lock.upsert(&args.name, correct);
             lock.save(&root)?;
-            out.note(&format!("adopted `{}` into the lockfile", args.name));
+            out.note(&format!("reconciled the pin for `{}`", args.name));
         }
         if out.json {
             out.json(&json_plan(false))?;
@@ -427,11 +431,23 @@ pub(super) fn cmd_sync(out: &Output, config: &Config, args: &SyncArgs) -> Result
             }
         } else {
             match argosy::pull::checkout_head_commit(&dest) {
-                Some(head) if head == entry.commit => outcomes.push(SyncOutcome {
-                    name: name.clone(),
-                    status: "at pin",
-                    detail: None,
-                }),
+                Some(head) if head == entry.commit => {
+                    // HEAD equality alone says nothing about the worktree;
+                    // the serving path re-verifies on every open, so sync
+                    // does too.
+                    match argosy::pull::verify_import_integrity(&dest) {
+                        Ok(()) => outcomes.push(SyncOutcome {
+                            name: name.clone(),
+                            status: "at pin",
+                            detail: None,
+                        }),
+                        Err(reason) => outcomes.push(SyncOutcome {
+                            name: name.clone(),
+                            status: "integrity failed",
+                            detail: Some(reason),
+                        }),
+                    }
+                }
                 head => outcomes.push(SyncOutcome {
                     name: name.clone(),
                     status: "drifted",
@@ -446,13 +462,13 @@ pub(super) fn cmd_sync(out: &Output, config: &Config, args: &SyncArgs) -> Result
         }
     }
 
+    // "integrity failed" is a failure for the exit code, with its own line.
     let count = |status: &str| outcomes.iter().filter(|o| o.status == status).count();
-    let (pulled, at_pin, drifted, failed) = (
-        count("pulled"),
-        count("at pin"),
-        count("drifted"),
-        count("failed"),
-    );
+    let failed = outcomes
+        .iter()
+        .filter(|o| o.status == "failed" || o.status == "integrity failed")
+        .count();
+    let (pulled, at_pin, drifted) = (count("pulled"), count("at pin"), count("drifted"));
     if out.json {
         out.json(&serde_json::json!({
             "results": outcomes.iter().map(|o| serde_json::json!({
@@ -468,7 +484,7 @@ pub(super) fn cmd_sync(out: &Output, config: &Config, args: &SyncArgs) -> Result
     } else {
         for outcome in &outcomes {
             out.note(&format!(
-                "{:<12} {}{}",
+                "{:<17} {}{}",
                 outcome.status,
                 outcome.name,
                 outcome

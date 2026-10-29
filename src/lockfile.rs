@@ -28,7 +28,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use snafu::{IntoError, ResultExt};
 
-use crate::bundle::is_safe_bundle_name;
 use crate::error::{IoSnafu, Result, ValidationSnafu};
 use crate::pull::{LOCAL_ARGOSY_NAME, integrity_status_strings};
 
@@ -147,6 +146,12 @@ impl Lockfile {
             .build()
         })?;
         lockfile.validate(path)?;
+        // Git prints lowercase object ids everywhere; folding here keeps
+        // string comparisons against HEAD and ls-remote exact.
+        let mut lockfile = lockfile;
+        for entry in lockfile.import.values_mut() {
+            entry.commit = entry.commit.to_lowercase();
+        }
         Ok(lockfile)
     }
 
@@ -171,10 +176,10 @@ impl Lockfile {
             .fail();
         }
         for (name, entry) in &self.import {
-            if !is_safe_bundle_name(name) {
+            if !crate::pull::is_safe_checkout_name(name) {
                 return at(format!(
                     "import `{name}` is not a safe checkout name \
-                     (allowed: [A-Za-z0-9._-])"
+                     (allowed: [A-Za-z0-9._-], no leading `-`)"
                 ))
                 .fail();
             }
@@ -186,10 +191,13 @@ impl Lockfile {
                 .fail();
             }
             for (field, value) in [("url", &entry.url), ("reference", &entry.reference)] {
-                if value.is_empty() || value.starts_with('-') {
+                if value.is_empty()
+                    || value.starts_with('-')
+                    || value.chars().any(|c| c.is_control())
+                {
                     return at(format!(
-                        "import `{name}`: `{field}` must be a non-empty value \
-                         that does not start with `-` (got `{value}`)"
+                        "import `{name}`: `{field}` must be a non-empty value that does \
+                         not start with `-` or contain control characters (got `{value}`)"
                     ))
                     .fail();
                 }
@@ -253,9 +261,12 @@ impl Lockfile {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`](crate::error::Error) when rendering fails, or
+    /// [`Error::Validation`](crate::error::Error) when rendering would
+    /// write an invalid lockfile (validate runs first), or
     /// [`Error::Io`](crate::error::Error) when the write or rename fails.
     pub fn save(&self, root: &Path) -> Result<()> {
+        let path = Self::path(root);
+        self.validate(&path)?;
         let text = self.render();
         fs::create_dir_all(root).context(IoSnafu {
             path: root.to_path_buf(),
@@ -412,5 +423,58 @@ mod tests {
         let lock = Lockfile::load_from(&from).unwrap();
 
         assert_eq!(lock.entry("company-rules").unwrap().reference, "main");
+    }
+
+    #[test]
+    fn save_rejects_control_characters_in_values() {
+        let tmp = TempDir::new().unwrap();
+        let mut lock = Lockfile::empty();
+        let mut entry = pinned("0123456789abcdef0123456789abcdef01234567");
+        entry.url = "https://example.com/\ninject".to_string();
+        lock.upsert("shared", entry);
+
+        let err = lock.save(tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("control characters"), "{err}");
+        assert!(!Lockfile::path(tmp.path()).exists(), "nothing written");
+    }
+
+    #[test]
+    fn uppercase_hex_commits_fold_to_lowercase_on_load() {
+        let tmp = TempDir::new().unwrap();
+        let upper = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let mut lock = Lockfile::empty();
+        lock.upsert(
+            "shared",
+            LockEntry {
+                url: "https://example.com/rules".to_string(),
+                reference: "main".to_string(),
+                commit: upper.to_string(),
+                integrity: "verified".to_string(),
+            },
+        );
+        lock.save(tmp.path()).unwrap();
+
+        let loaded = Lockfile::load(tmp.path()).unwrap();
+
+        assert_eq!(
+            loaded.entry("shared").unwrap().commit,
+            upper.to_lowercase(),
+            "string comparisons against git output stay exact"
+        );
+    }
+
+    #[test]
+    fn leading_dash_import_names_fail_validation() {
+        let tmp = TempDir::new().unwrap();
+        let mut lock = Lockfile::empty();
+        lock.upsert(
+            "-shared",
+            pinned("0123456789abcdef0123456789abcdef01234567"),
+        );
+
+        let err = lock.validate(&Lockfile::path(tmp.path())).unwrap_err();
+
+        assert!(err.to_string().contains("no leading `-`"), "{err}");
     }
 }
