@@ -142,7 +142,11 @@ fn server_instructions() -> String {
              pattern pre-pass over the diff's added lines (styleguide rules \
              with a `pattern` produce findings with origin `pattern`), and \
              report_finding rejects findings whose path, line range, or \
-             rule URIs do not match the snapshot or the project's rules.",
+             rule URIs do not match the snapshot or the project's rules. \
+             Findings export to PR formats: review_findings with format \
+             sarif or rdjsonl returns a GitHub code scanning log or \
+             reviewdog JSONL, and structured edits on findings become \
+             one-click PR suggestions.",
         );
     }
     text

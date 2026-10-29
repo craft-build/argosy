@@ -169,13 +169,13 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::review::ReportFindingParams>(
             "report_finding",
-            "Record one structured automated finding in the review session created by start_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, and the finding is validated against the snapshot — the path must be one of the review's changed files, the line range must fall inside that file's changed hunks, and every rule_uris entry must be a styleguide-rule argosy:// URI that resolves in this project (use the uri of a search_rules hit; report ungrounded findings with an empty rule_uris). Identical retries are deduplicated. The finding becomes visible through review_findings.",
+            "Record one structured automated finding in the review session created by start_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, and the finding is validated against the snapshot — the path must be one of the review's changed files, the line range must fall inside that file's changed hunks, and every rule_uris entry must be a styleguide-rule argosy:// URI that resolves in this project (use the uri of a search_rules hit; report ungrounded findings with an empty rule_uris). Attach edits (line ranges inside the finding's range plus replacement text) when a safe complete replacement exists — SARIF and rdjsonl exports turn edits into one-click PR suggestions; an empty replacement deletes the lines. Identical retries are deduplicated. The finding becomes visible through review_findings.",
             false,
             false,
         ),
         tool::<codetools::review::ReviewFindingsParams>(
             "review_findings",
-            "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Findings from the deterministic pattern pre-pass carry origin \"pattern\" (confidence 1.0); agent-reported ones carry origin \"agent\". Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict.",
+            "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Findings from the deterministic pattern pre-pass carry origin \"pattern\" (confidence 1.0); agent-reported ones carry origin \"agent\". Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict. Set format to sarif or rdjsonl to additionally receive an export document in the export field — a SARIF 2.1.0 log for GitHub code scanning, or reviewdog JSONL whose edits-backed suggestions become one-click PR comments — ready to write to a file for CI.",
             true,
             false,
         ),

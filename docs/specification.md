@@ -238,6 +238,7 @@ The `styleguide` namespace holds coding-style rules as first-class, retrievable 
 - **STG-8**: Where multiple active argosys supply rules for the same language and category, the harness's multi-argosy precedence rules (§9.4) apply: imported rule sets combine with, rather than replace, rules in the local argosy, and the local argosy takes precedence on direct conflict.
 - **STG-9**: A rule that carries `priority` **SHOULD** use the vocabulary `error` (must fix), `warn` (should fix), or `info` (optional). A consumer that maps `priority` onto finding severities **MUST** treat absent and unrecognized values as `warn` (argosy maps `error`→P1, `warn`→P2, `info`→P3, reserving P0 for defects a line-level check cannot establish).
 - **STG-10**: A rule that carries `pattern` **SHOULD** hold a valid regular expression in the Rust [`regex`](https://docs.rs/regex) dialect. A consumer **MAY** run such patterns as a deterministic pre-pass over the added lines of a diff, emitting findings with exact line ranges and full confidence; an invalid pattern **MUST** be skipped (and warned about by validation), never fail the review, and rules without a `pattern` are left wholly to the reviewer's judgment (STG-5).
+- **STG-11**: A consumer that exports recorded findings to an interchange format **SHOULD** map finding priorities consistently — P0/P1 to `error`/`ERROR`, P2 to `warning`/`WARNING`, P3 to `note`/`INFO` under the SARIF 2.1.0 and reviewdog rdjson vocabularies — and, where a finding carries machine-applicable edits (inclusive line ranges inside the finding's own range plus replacement text), **SHOULD** carry them into the format's fix fields (SARIF `fixes[].artifactChanges[].replacements[]`, reviewdog `suggestions[]`) so PR reporters can post them as one-click suggestions. Because finding ranges are grounded in the diff's changed hunks, so are the edits — which is what makes the suggestion ranges postable.
 
 ### 5.5 Namespace Summary Table
 
@@ -546,6 +547,7 @@ As the project's local argosy, it also has a `memory/` namespace — informal no
 | STG-8 | 5.4 | Imported rule sets combine with local precedence |
 | STG-9 | 5.4 | `priority` vocabulary: error/warn/info, others read as warn |
 | STG-10 | 5.4 | `pattern` is a valid regex a consumer may pre-pass over added lines |
+| STG-11 | 5.4 | Exported findings map priorities consistently and carry edits as fix fields |
 | PROM-1 | 6.2 | Promotion creates a new `document/` or `styleguide/` concept |
 | PROM-2 | 6.2 | Promotion copies, never relocates |
 | PROM-3 | 6.2 | Source memory concept's fate is discretionary |

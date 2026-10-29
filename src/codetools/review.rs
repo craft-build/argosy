@@ -23,6 +23,7 @@ use crate::error::{CodeToolSnafu, Error, Result, ReviewEncodingSnafu, ReviewIoSn
 use crate::trust::{Origin, TrustPolicy};
 
 use super::diffhunks::{self, FileHunks};
+use super::review_export;
 
 const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 /// Default review-session idle TTL.
@@ -34,6 +35,10 @@ const MAX_PATTERN_FINDINGS_PER_RULE_FILE: usize = 10;
 const MAX_PATTERN_FINDINGS: usize = 200;
 /// Quoted-line cap inside pre-pass finding bodies.
 const MAX_QUOTED_LINE_CHARS: usize = 200;
+/// Cap on structured edits per finding.
+const MAX_EDITS_PER_FINDING: usize = 8;
+/// Cap on one edit's replacement text, matching the `suggestion` cap.
+const MAX_EDIT_CHARS: usize = 10_000;
 static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -85,6 +90,40 @@ pub struct ReportFindingParams {
     pub rule_uris: Vec<String>,
     /// Concrete replacement or implementation direction, when useful.
     pub suggestion: Option<String>,
+    /// Machine-applicable fixes: inclusive line ranges inside the finding's
+    /// own range plus replacement text.
+    #[serde(default)]
+    pub edits: Vec<FindingEdit>,
+}
+
+/// One machine-applicable fix: replace the inclusive 1-indexed line range
+/// with `replacement`.
+///
+/// An empty replacement deletes the lines.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingEdit {
+    /// First line of the replaced range (1-indexed, inclusive).
+    pub line_start: u32,
+    /// Last line of the replaced range (inclusive).
+    pub line_end: u32,
+    /// The text the replaced lines become.
+    pub replacement: String,
+}
+
+/// The rendering of a `review_findings` call: the structured JSON listing
+/// (default), or a PR-ready export document.
+#[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    /// The default structured listing; no export document.
+    Json,
+    /// A SARIF 2.1.0 log for GitHub code scanning and SARIF-aware tooling.
+    Sarif,
+    /// reviewdog rdjsonl, one Diagnostic JSON object per line, for the
+    /// `github-pr-review` and `gitlab-mr-discussion` reporters.
+    Rdjsonl,
 }
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -96,6 +135,9 @@ pub struct ReviewFindingsParams {
     pub priority: Option<ReviewPriority>,
     /// Return only findings whose repository-relative path contains this text.
     pub path_contains: Option<String>,
+    /// Render an export document (`sarif` or `rdjsonl`) in addition to the
+    /// findings listing; `json` (the default) adds none.
+    pub format: Option<ExportFormat>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +328,10 @@ pub struct ReviewFinding {
     pub rule_uris: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Machine-applicable fixes inside the finding's line range; absent on
+    /// pattern findings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<FindingEdit>,
     /// Advisory assessment from the decision endpoint, when one was enabled at
     /// report time; it never changes the finding's presence or priority.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,6 +376,10 @@ pub struct ReportFindingOutcome {
 pub struct ReviewFindingsOutcome {
     pub review_id: String,
     pub findings: Vec<ReviewFinding>,
+    /// The rendered export document, present only when the caller asked for
+    /// `format: "sarif"` or `format: "rdjsonl"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -666,7 +716,7 @@ impl ReviewManager {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         Self::purge_expired(&mut sessions, self.ttl);
         let session = Self::touch(&mut sessions, &params.review_id)?;
-        let findings = session
+        let findings: Vec<ReviewFinding> = session
             .findings
             .iter()
             .filter(|finding| {
@@ -682,9 +732,18 @@ impl ReviewManager {
             })
             .cloned()
             .collect();
+        // The export renders the filtered set, not the whole session.
+        let export = match params.format {
+            Some(ExportFormat::Sarif) => {
+                Some(review_export::to_sarif(&params.review_id, &findings))
+            }
+            Some(ExportFormat::Rdjsonl) => Some(review_export::to_rdjsonl(&findings)),
+            None | Some(ExportFormat::Json) => None,
+        };
         Ok(ReviewFindingsOutcome {
             review_id: params.review_id,
             findings,
+            export,
         })
     }
 
@@ -916,6 +975,7 @@ fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFindin
         }
         .fail();
     }
+    validate_edits(&params.edits, params.line_start, params.line_end)?;
 
     let mut finding = ReviewFinding {
         finding_id: String::new(),
@@ -928,12 +988,60 @@ fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFindin
         line_end: params.line_end,
         rule_uris: params.rule_uris,
         suggestion,
+        edits: params.edits,
         assessment: None,
         origin: FindingOrigin::Agent,
     };
     let review_id = params.review_id;
     finding.finding_id = finding_id(&review_id, &finding);
     Ok((review_id, finding))
+}
+
+/// Validates a finding's edits: inclusive ranges inside the finding's own
+/// range (which grounding already confines to a changed hunk), non-overlapping,
+/// within the caps. An empty replacement (deleting lines) is valid.
+fn validate_edits(edits: &[FindingEdit], line_start: u32, line_end: u32) -> Result<()> {
+    if edits.len() > MAX_EDITS_PER_FINDING {
+        return CodeToolSnafu {
+            message: format!(
+                "invalid finding edits: at most {MAX_EDITS_PER_FINDING} per finding, got {}",
+                edits.len()
+            ),
+        }
+        .fail();
+    }
+    let mut sorted: Vec<&FindingEdit> = edits.iter().collect();
+    sorted.sort_by_key(|edit| (edit.line_start, edit.line_end));
+    for pair in sorted.windows(2) {
+        let (first, second) = (pair[0], pair[1]);
+        if second.line_start <= first.line_end {
+            return CodeToolSnafu {
+                message: format!(
+                    "invalid finding edits: ranges {}-{} and {}-{} overlap",
+                    first.line_start, first.line_end, second.line_start, second.line_end
+                ),
+            }
+            .fail();
+        }
+    }
+    for edit in sorted {
+        if edit.line_start == 0
+            || edit.line_end < edit.line_start
+            || edit.line_start < line_start
+            || edit.line_end > line_end
+            || edit.replacement.len() > MAX_EDIT_CHARS
+        {
+            return CodeToolSnafu {
+                message: format!(
+                    "invalid finding edits: each edit must be an inclusive 1-indexed range \
+                     inside the finding's range {line_start}-{line_end} with replacement text \
+                     up to {MAX_EDIT_CHARS} bytes (an empty replacement deletes the lines)"
+                ),
+            }
+            .fail();
+        }
+    }
+    Ok(())
 }
 
 /// The deduplication key of one finding within its review: every field,
@@ -965,6 +1073,14 @@ fn finding_id(review_id: &str, finding: &ReviewFinding) -> String {
     }
     if let Some(value) = &finding.suggestion {
         hasher.update(value.as_bytes());
+    }
+    for edit in &finding.edits {
+        hasher.update(edit.line_start.to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(edit.line_end.to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(edit.replacement.as_bytes());
+        hasher.update([0]);
     }
     hasher.finalize()[..12]
         .iter()
@@ -1073,6 +1189,7 @@ fn pattern_finding(
         line_end: run.last().map(|(no, _)| *no).unwrap_or(1),
         rule_uris: vec![rule.uri.clone()],
         suggestion: None,
+        edits: Vec::new(),
         assessment: None,
         origin: FindingOrigin::Pattern,
     };
@@ -1489,6 +1606,7 @@ mod tests {
                 review_id: opened.review_id,
                 priority: None,
                 path_contains: None,
+                format: None,
             },
         )
         .unwrap_err();
@@ -1573,6 +1691,7 @@ mod tests {
                 review_id: opened.review_id,
                 priority: None,
                 path_contains: None,
+                format: None,
             },
         )
         .expect("an access refreshes the idle clock");
@@ -1868,6 +1987,7 @@ mod tests {
                 line_end: 1,
                 rule_uris: vec!["argosy://rules/styleguide/contracts".into()],
                 suggestion: Some("Restore `before` until callers migrate.".into()),
+                edits: Vec::new(),
             },
         )
         .unwrap();
@@ -1885,6 +2005,7 @@ mod tests {
                 line_end: 1,
                 rule_uris: vec!["argosy://rules/styleguide/contracts".into()],
                 suggestion: Some("Restore `before` until callers migrate.".into()),
+                edits: Vec::new(),
             },
         )
         .unwrap();
@@ -1896,6 +2017,7 @@ mod tests {
                 review_id: opened.review_id.clone(),
                 priority: Some(ReviewPriority::P1),
                 path_contains: Some("HELLO".into()),
+                format: None,
             },
         )
         .unwrap();
@@ -1975,6 +2097,7 @@ mod tests {
                 review_id: opened.review_id,
                 priority: None,
                 path_contains: None,
+                format: None,
             },
         )
         .unwrap();
@@ -2092,6 +2215,7 @@ mod tests {
             line_end: lines.1,
             rule_uris: Vec::new(),
             suggestion: None,
+            edits: Vec::new(),
         }
     }
 
@@ -2226,6 +2350,181 @@ mod tests {
     }
 
     #[test]
+    fn report_finding_rejects_edits_outside_the_finding_range() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+        params.edits = vec![FindingEdit {
+            line_start: 1,
+            line_end: 2,
+            replacement: "before\n".into(),
+        }];
+        let err = report_finding(&tools, params).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("inside the finding's range 1-1"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn report_finding_rejects_overlapping_edits() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+        params.edits = vec![
+            FindingEdit {
+                line_start: 1,
+                line_end: 1,
+                replacement: "a\n".into(),
+            },
+            FindingEdit {
+                line_start: 1,
+                line_end: 1,
+                replacement: "b\n".into(),
+            },
+        ];
+        let err = report_finding(&tools, params).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("overlap"), "got: {message}");
+        assert!(message.contains("1-1 and 1-1"), "got: {message}");
+    }
+
+    #[test]
+    fn distinct_edits_are_not_deduplicated() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        for replacement in ["before\n", "before\n\n"] {
+            let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+            params.edits = vec![FindingEdit {
+                line_start: 1,
+                line_end: 1,
+                replacement: replacement.into(),
+            }];
+            let outcome = report_finding(&tools, params).unwrap();
+            assert!(outcome.created, "replacement {replacement:?} is distinct");
+        }
+        let findings = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(findings.findings.len(), 2, "edits join the dedup key");
+    }
+
+    #[test]
+    fn review_findings_exports_sarif_and_rdjsonl() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+        params.rule_uris = vec!["argosy://test-book/styleguide/contracts".into()];
+        params.edits = vec![FindingEdit {
+            line_start: 1,
+            line_end: 1,
+            replacement: "before\n".into(),
+        }];
+        report_finding(&tools, params).unwrap();
+
+        let plain = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id.clone(),
+                priority: None,
+                path_contains: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        assert!(plain.export.is_none());
+        assert_eq!(plain.findings.len(), 1);
+
+        let sarif = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id.clone(),
+                priority: None,
+                path_contains: None,
+                format: Some(ExportFormat::Sarif),
+            },
+        )
+        .unwrap()
+        .export
+        .expect("sarif export rendered");
+        let log: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        assert_eq!(log["version"], "2.1.0");
+        let result = &log["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "argosy://test-book/styleguide/contracts");
+        assert_eq!(result["level"], "error", "P1 maps to error");
+        assert_eq!(
+            result["fixes"][0]["artifactChanges"][0]["replacements"][0]["insertedContent"]["text"],
+            "before\n"
+        );
+        assert_eq!(
+            log["runs"][0]["automationDetails"]["id"],
+            format!("argosy/reviews/{}", opened.review_id)
+        );
+
+        let rdjsonl = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+                format: Some(ExportFormat::Rdjsonl),
+            },
+        )
+        .unwrap()
+        .export
+        .expect("rdjsonl export rendered");
+        let lines: Vec<&str> = rdjsonl.lines().collect();
+        assert_eq!(lines.len(), 1, "one diagnostic per line: {rdjsonl}");
+        let diagnostic: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(diagnostic["severity"], "ERROR");
+        assert_eq!(diagnostic["suggestions"][0]["text"], "before\n");
+    }
+
+    #[test]
     fn rule_set_collects_compiles_and_caps_trust() {
         use crate::bundle::Namespace;
         use crate::context::ProjectContext;
@@ -2329,6 +2628,7 @@ mod tests {
             line_end: 1,
             rule_uris: Vec::new(),
             suggestion: None,
+            edits: Vec::new(),
             assessment: None,
             origin: FindingOrigin::Agent,
         }
@@ -2401,6 +2701,7 @@ mod tests {
                 line_end: 1,
                 rule_uris: Vec::new(),
                 suggestion: None,
+                edits: Vec::new(),
             },
         )
         .unwrap();
@@ -2415,6 +2716,7 @@ mod tests {
                 review_id: opened.review_id,
                 priority: None,
                 path_contains: None,
+                format: None,
             },
         )
         .unwrap();

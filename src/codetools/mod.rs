@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod outline;
 pub mod repomap;
 pub mod review;
+mod review_export;
 pub mod zoom;
 
 pub use file_tracker::FileReadTracker;
