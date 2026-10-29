@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(review)* a deterministic pattern pre-pass at `start_review`: styleguide
+  rules carrying a `pattern` (a Rust-`regex` dialect regular expression,
+  optional per STG-5) are matched against the added lines of the snapshotted
+  diff, grouped into per-run findings with exact new-file line ranges,
+  confidence 1.0, and `origin: "pattern"`; consecutive matched lines collapse
+  into one finding and flood caps (10 per rule per file, 200 per review)
+  truncate with a flag. A rule's `priority` maps onto finding priorities
+  (`error`→P1, `warn`→P2, `info`→P3; P0 stays reserved for what a line
+  regex cannot establish), and `search_rules` hits now surface `priority`
+  alongside `kind`/`trust` so the reviewer weights findings the same way
+- *(review)* `report_finding` grounding: findings whose path is not in the
+  snapshot, whose line range falls outside that file's changed hunks, or
+  whose `rule_uris` entries do not parse as styleguide-rule URIs (or, when
+  the project's argosy is reachable, do not resolve to a rule) are rejected
+  with actionable messages, so no invented file, line, or rule survives
+- *(styleguide)* validation warnings for review-pre-pass frontmatter: STG-9
+  (`priority` outside the error/warn/info vocabulary reads as `warn`) and
+  STG-10 (`pattern` that does not compile is skipped by the pre-pass)
+
 - *(index)* `argosy index eval <dataset>`: a labeled retrieval eval — a JSON
   dataset of queries mapped to expected `argosy://` URIs, scored with
   macro-averaged recall@k and MRR over the project's real search path, with

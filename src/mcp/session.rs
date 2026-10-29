@@ -169,6 +169,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             tags: hit.meta.tags,
             language: hit.meta.language,
             category: hit.meta.category,
+            priority: None,
             kind,
             trust,
             source_commit,
@@ -259,6 +260,7 @@ impl<P: EmbeddingProvider, S: VectorStore> ProjectSession<P, S> {
             };
             hit.good = wrap(rule.good_examples());
             hit.bad = wrap(rule.bad_examples());
+            hit.priority = rule.priority().map(str::to_string);
         }
         Ok(report)
     }
@@ -1234,6 +1236,7 @@ mod tests {
             tags: Vec::new(),
             language: None,
             category: None,
+            priority: None,
             kind: "local",
             trust: UNVERIFIED.to_string(),
             source_commit: None,

@@ -799,7 +799,8 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     }
     // Code tools are confined to the spawn workspace unless the user opts out.
     #[cfg(feature = "code-tools")]
-    let code = {
+    #[allow(unused_mut)]
+    let mut code = {
         #[allow(unused_mut)]
         let mut tools = argosy::codetools::CodeTools::default()
             .with_external_paths(config.code_tools.allow_external_paths)
@@ -812,7 +813,20 @@ pub(super) fn cmd_mcp(_out: &Output, config: &Config, _args: &McpArgs) -> Result
     };
     let server = ArgosyMcpServer::new(state);
     #[cfg(feature = "code-tools")]
-    let server = server.with_code_tools(Arc::new(code));
+    let server = {
+        // Review grounding: the deterministic pattern pre-pass and
+        // rule-URI validation read the project's styleguide rules through
+        // the shared session cache. Lock order is reviews → knowledge
+        // sessions (the knowledge path never takes the reviews lock), so
+        // the two dispatch paths cannot deadlock.
+        let shared = Arc::clone(&server.state);
+        code = code.with_review_grounding(Arc::new(move |root| {
+            let state = &mut *shared.blocking_lock();
+            let session = state.session(root)?;
+            argosy::codetools::review::ReviewRuleSet::from_context(&session.context, &session.trust)
+        }));
+        server.with_code_tools(Arc::new(code))
+    };
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

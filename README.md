@@ -114,8 +114,9 @@ hits carry the matched passage: long concepts are chunked by heading, and each
 hit returns the passage text, its heading breadcrumb, and a 1-based body line
 range that `read` accepts (`start_line`/`end_line`) to widen without fetching
 the whole concept. `search_rules` hits
-additionally carry the rule's `## Good` / `## Bad` sections, so a review
-sees the examples in one call. Writes
+additionally carry the rule's `## Good` / `## Bad` sections and its
+`priority` (`error`/`warn`/`info`) when set, so a review sees the examples
+and their weight in one call. Writes
 reconcile the index immediately — a concept written through MCP is
 searchable in the same session. The embedding model loads lazily: until the
 first `search`, startup is instant and works offline. It also serves
@@ -126,10 +127,13 @@ investigates the codebase and writes the core document set (`summary`,
 `architecture`, `tech`, `development`) into the local argosy, updating
 existing documents in place.
 It also serves a `review` prompt with arguments for the project root and
-working-tree base or commit. The workflow snapshots the diff, reads the
-affected code and its blast radius, grounds verified findings in qualified
-styleguide-rule URIs, records them as structured review findings, and returns
-a prioritized verdict without modifying files.
+working-tree base or commit. The workflow snapshots the diff, runs a
+deterministic pre-pass (styleguide rules with a `pattern` regex are matched
+against the added lines and recorded as `origin: "pattern"` findings at
+confidence 1.0), reads the affected code and its blast radius, grounds
+verified findings in qualified styleguide-rule URIs — rejecting paths,
+lines, or rules the snapshot does not contain — records them as structured
+review findings, and returns a prioritized verdict without modifying files.
 
 Agents reach all of this through the tools and `argosy://` resources, never by
 reading the argosy state directory on disk — the on-disk layout is an
@@ -202,10 +206,10 @@ the workspace directory it was spawned in, ported from Craft:
 | `inspect` | Quick health check: TODO/FIXME/HACK/XXX scan plus `git status`. |
 | `callgraph` | Intra-file call graph: `call_tree`, `callers`, `impact` (blast radius). |
 | `repomap` | Token-budgeted, PageRank-ranked map of a repository's definitions. |
-| `start_review` | Snapshot tracked repository changes or one specific committed revision into an in-process review session; returns an ID for reading the diff and recording findings without opening a network port. |
+| `start_review` | Snapshot tracked repository changes or one specific committed revision into an in-process review session; runs a deterministic pre-pass over the added lines (styleguide rules with a `pattern` become `origin: "pattern"` findings immediately); returns an ID for reading the diff and recording findings without opening a network port. |
 | `review_diff` | List changed files in a review session or read one file's immutable snapshotted patch. |
-| `report_finding` | Attach one validated, P0–P3 automated finding—with confidence, line range, suggestion, and qualified rule URIs—to a review session; identical retries deduplicate. |
-| `review_findings` | Read or filter the structured automated finding set for a review session. |
+| `report_finding` | Attach one validated, P0–P3 automated finding—with confidence, line range, suggestion, and qualified rule URIs—to a review session; the path must be a changed file, the lines inside its changed hunks, and each rule URI a resolvable styleguide rule; identical retries deduplicate. |
+| `review_findings` | Read or filter the structured automated finding set for a review session (pattern pre-pass findings carry `origin: "pattern"`). |
 
 Every path argument resolves inside that workspace (set
 `code_tools { allow_external_paths = true }` in the user config to opt

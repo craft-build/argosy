@@ -43,6 +43,11 @@ pub struct SearchHitOut {
     /// Frontmatter `category` facet (styleguide rules).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Frontmatter `priority` (`error`/`warn`/`info`; `search_rules` hits
+    /// only) — the deterministic pre-pass maps `error`→P1, `warn`→P2,
+    /// `info`→P3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     /// `"local"` (writable) or `"imported"` (read-only).
     pub kind: &'static str,
     /// The concept's effective OKF trust tier; imported self-claims are

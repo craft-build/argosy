@@ -283,6 +283,37 @@ pub(crate) fn validate(root: &Path) -> Vec<Finding> {
                 "styleguide rule should set `category` so retrieval can filter by it",
             ));
         }
+        // `priority` and `pattern` power the deterministic review pre-pass;
+        // a broken value silently no-ops there, so surface it here.
+        if let Some(priority) = concept.get_str("priority").map(str::trim)
+            && !priority.is_empty()
+            && !matches!(priority, "error" | "warn" | "info")
+        {
+            findings.push(Finding::new(
+                Severity::Warning,
+                Some("STG-9"),
+                Some(entry.rel.clone()),
+                format!(
+                    "styleguide rule `priority` `{priority}` is not one of error/warn/info; \
+                     the review pre-pass treats unknown values as `warn`"
+                ),
+            ));
+        }
+        // The regex check exists wherever the pre-pass compiles patterns
+        // (`regex` is a code-tools dependency).
+        #[cfg(feature = "code-tools")]
+        if let Some(pattern) = concept.get_str("pattern").map(str::trim)
+            && !pattern.is_empty()
+            && regex::Regex::new(pattern).is_err()
+        {
+            findings.push(Finding::new(
+                Severity::Warning,
+                Some("STG-10"),
+                Some(entry.rel.clone()),
+                "styleguide rule `pattern` is not a valid regular expression; the review \
+                 pre-pass skips rules whose pattern does not compile",
+            ));
+        }
     }
     findings
 }
@@ -508,6 +539,55 @@ mod tests {
             .collect();
         // One warning per missing facet.
         assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn stg9_unknown_priority_is_a_warning() {
+        let findings = validate(&fixture("rule-bad-check-fields"));
+        assert!(error_ids(&findings).is_empty());
+        let warning = findings
+            .iter()
+            .find(|f| f.id == Some("STG-9"))
+            .expect("unknown priority warns");
+        assert!(warning.message.contains("critical"), "{warning:?}");
+    }
+
+    /// The regex-validity check compiles wherever the pre-pass does
+    /// (`regex` rides the `code-tools` feature).
+    #[cfg(feature = "code-tools")]
+    #[test]
+    fn stg10_invalid_pattern_regex_is_a_warning() {
+        let findings = validate(&fixture("rule-bad-check-fields"));
+        assert!(error_ids(&findings).is_empty());
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == Some("STG-10") && f.severity == Severity::Warning),
+            "a pattern that cannot compile warns: {findings:?}"
+        );
+        // The rule still lists: the pre-pass skips it rather than dropping it.
+        let argosy = Argosy::open(fixture("rule-bad-check-fields")).unwrap();
+        assert_eq!(StyleguideRule::list(&argosy).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn valid_pattern_and_priority_stay_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("argosy.md"),
+            "---\ntype: Argosy Manifest\nname: t\nargosy_version: \"1.0.0\"\n\
+             okf_version: \"0.2\"\ndescription: t\n---\n# t\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("styleguide")).unwrap();
+        std::fs::write(
+            root.join("styleguide/checked.md"),
+            "---\ntype: Styleguide Rule\ndescription: d\nlanguage: rust\ncategory: hygiene\n\
+             priority: warn\npattern: \"\\\\bTODO\\\\b\"\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(validate(root).is_empty());
     }
 
     #[test]

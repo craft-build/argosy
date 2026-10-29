@@ -232,10 +232,12 @@ The `styleguide` namespace holds coding-style rules as first-class, retrievable 
 - **STG-2**: A styleguide rule concept **MUST** have `type: Styleguide Rule`.
 - **STG-3**: A styleguide rule concept **MUST** set `description` — a natural-language statement of the rule. This is the primary text a harness embeds and matches against code under review, so it must be self-contained.
 - **STG-4**: A styleguide rule concept **SHOULD** set `language` (an identifier such as `rust`, `python`, or `general` for language-agnostic rules) and `category` (for example, `naming`, `error-handling`, `organization`), since these drive structured filtering alongside semantic search (`QRY-3`).
-- **STG-5**: A styleguide rule concept **MAY** carry additional structured fields — for instance `rule_id` (a producer's stable identifier), `priority` (for example, `error`/`warn`/`info`), or `pattern` (a regular expression) — which consumers **MUST** treat as optional metadata, not as a required linting contract.
-- **STG-6**: A rule concept's body **SHOULD** contain the rule's guidance in ordinary markdown, and **MAY** illustrate it with contrasting good and bad examples, conventionally under `## Good` and `## Bad` headings so converters have a deterministic mapping. Machine-checkable enforcement is not this namespace's job; it conveys guidance to a reviewer, whether human or AI.
+- **STG-5**: A styleguide rule concept **MAY** carry additional structured fields — for instance `rule_id` (a producer's stable identifier), `priority` (for example, `error`/`warn`/`info`), or `pattern` (a regular expression) — which consumers **MUST** treat as optional metadata, not as a required linting contract: a rule without them is judgment-only, never invalid.
+- **STG-6**: A rule concept's body **SHOULD** contain the rule's guidance in ordinary markdown, and **MAY** illustrate it with contrasting good and bad examples, conventionally under `## Good` and `## Bad` headings so converters have a deterministic mapping. The body remains the namespace's primary product: where a rule also carries a `pattern`, argosy's reviewer applies that pattern deterministically (STG-10) but still reads the guidance and examples for the judgment the pattern cannot express.
 - **STG-7**: A rule set **MAY** be organized into subdirectories by language and category at the producer's discretion (for example, `styleguide/rust/naming/`) — this document defines no required internal structure.
 - **STG-8**: Where multiple active argosys supply rules for the same language and category, the harness's multi-argosy precedence rules (§9.4) apply: imported rule sets combine with, rather than replace, rules in the local argosy, and the local argosy takes precedence on direct conflict.
+- **STG-9**: A rule that carries `priority` **SHOULD** use the vocabulary `error` (must fix), `warn` (should fix), or `info` (optional). A consumer that maps `priority` onto finding severities **MUST** treat absent and unrecognized values as `warn` (argosy maps `error`→P1, `warn`→P2, `info`→P3, reserving P0 for defects a line-level check cannot establish).
+- **STG-10**: A rule that carries `pattern` **SHOULD** hold a valid regular expression in the Rust [`regex`](https://docs.rs/regex) dialect. A consumer **MAY** run such patterns as a deterministic pre-pass over the added lines of a diff, emitting findings with exact line ranges and full confidence; an invalid pattern **MUST** be skipped (and warned about by validation), never fail the review, and rules without a `pattern` are left wholly to the reviewer's judgment (STG-5).
 
 ### 5.5 Namespace Summary Table
 
@@ -542,6 +544,8 @@ As the project's local argosy, it also has a `memory/` namespace — informal no
 | STG-6 | 5.4 | Body holds guidance, optionally with `## Good`/`## Bad` examples |
 | STG-7 | 5.4 | Free internal organization |
 | STG-8 | 5.4 | Imported rule sets combine with local precedence |
+| STG-9 | 5.4 | `priority` vocabulary: error/warn/info, others read as warn |
+| STG-10 | 5.4 | `pattern` is a valid regex a consumer may pre-pass over added lines |
 | PROM-1 | 6.2 | Promotion creates a new `document/` or `styleguide/` concept |
 | PROM-2 | 6.2 | Promotion copies, never relocates |
 | PROM-3 | 6.2 | Source memory concept's fate is discretionary |

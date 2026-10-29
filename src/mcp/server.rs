@@ -137,7 +137,12 @@ fn server_instructions() -> String {
              workspace directory it was spawned in; their path arguments are \
              confined to that workspace, and astgrep (apply) and conflicts \
              (resolve) write files only when explicitly requested and only \
-             after the file was read through these tools in this session.",
+             after the file was read through these tools in this session. \
+             Reviews are grounded: start_review runs a deterministic \
+             pattern pre-pass over the diff's added lines (styleguide rules \
+             with a `pattern` produce findings with origin `pattern`), and \
+             report_finding rejects findings whose path, line range, or \
+             rule URIs do not match the snapshot or the project's rules.",
         );
     }
     text

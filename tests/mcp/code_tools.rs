@@ -607,6 +607,159 @@ async fn structured_review_findings_round_trip_over_mcp() {
     server.abort();
 }
 
+/// The production wiring of the deterministic pre-pass: code tools grounded
+/// in the shared knowledge state (exactly how `argosy mcp` builds them).
+#[tokio::test(flavor = "multi_thread")]
+async fn grounded_review_runs_the_pattern_prepass_and_validates_rule_uris() {
+    let rig = rig();
+    // A pattern rule in the project's (fixture-copy) local argosy. Sessions
+    // open lazily, so the rule is discovered at the first grounding call.
+    let rule: argosy::Concept = "---\n\
+         type: Styleguide Rule\n\
+         description: Resolve TODOs before merging tracked work.\n\
+         language: general\n\
+         category: hygiene\n\
+         priority: warn\n\
+         pattern: \"\\\\bTODO\\\\b\"\n\
+         ---\n\
+         # No Stale TODOs\n\n\
+         ## Bad\n\n// TODO: handle errors\n"
+        .parse()
+        .unwrap();
+    argosy::LocalArgosy::open(&rig.cwd)
+        .unwrap()
+        .write_concept(
+            argosy::Namespace::Styleguide,
+            &"styleguide/general/no-stale-todos".parse().unwrap(),
+            &rule,
+        )
+        .unwrap();
+
+    // A git repo whose working-tree change adds a TODO line.
+    let ws = workspace();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "review@example.com"][..],
+        &["config", "user.name", "Review Test"][..],
+        &["add", "."][..],
+        &["commit", "--quiet", "-m", "initial"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(ws.path())
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+    fs::write(
+        ws.path().join("src/app.py"),
+        "def run():\n    # TODO: handle errors\n    # TODO: validate input\n    return 1\n",
+    )
+    .unwrap();
+
+    // Mirrors cmd_mcp: the grounding closure locks the shared state and
+    // resolves the project's rule set through the session cache.
+    let server = ArgosyMcpServer::new(rig.state);
+    let shared = Arc::clone(&server.state);
+    let code = CodeTools::default()
+        .with_root(ws.path())
+        .with_review_grounding(Arc::new(move |root| {
+            let state = &mut *shared.blocking_lock();
+            let session = state.session(root)?;
+            argosy::codetools::review::ReviewRuleSet::from_context(&session.context, &session.trust)
+        }));
+    let server = server.with_code_tools(Arc::new(code));
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server_task = tokio::spawn(async move {
+        use rmcp::ServiceExt;
+        let running = server.serve(server_io).await.expect("server initializes");
+        let _ = running.waiting().await;
+    });
+    use rmcp::ServiceExt;
+    let client = ().serve(client_io).await.expect("initialize handshake");
+
+    let opened = call_ok(
+        &client,
+        "start_review",
+        serde_json::json!({"cwd": ws.path()}),
+    )
+    .await;
+    let review_id = opened["review_id"].as_str().unwrap();
+    assert_eq!(
+        opened["prepass"],
+        serde_json::json!({
+            "status": "ran",
+            "rules": 1,
+            "invalid_patterns": 0,
+            "findings": 1,
+            "truncated": false,
+        }),
+        "the pattern rule ran over the added TODO line: {opened}"
+    );
+
+    let findings = call_ok(
+        &client,
+        "review_findings",
+        serde_json::json!({"review_id": review_id}),
+    )
+    .await;
+    let finding = &findings["findings"][0];
+    assert_eq!(finding["origin"], "pattern");
+    assert_eq!(finding["priority"], "P2", "warn → P2");
+    assert_eq!(finding["path"], "src/app.py");
+    assert_eq!(finding["line_start"], 3);
+    assert_eq!(finding["line_end"], 3);
+    assert_eq!(
+        finding["rule_uris"],
+        serde_json::json!(["argosy://acme-billing/styleguide/general/no-stale-todos"])
+    );
+
+    // An invented rule URI is refused over the wire, with a way forward.
+    let err = call_err(
+        &client,
+        "report_finding",
+        serde_json::json!({
+            "review_id": review_id,
+            "title": "[P2] Resolve the TODO",
+            "body": "The added TODO defers required error handling; the call panics on empty input.",
+            "priority": "P2",
+            "confidence": 0.9,
+            "path": "src/app.py",
+            "line_start": 3,
+            "line_end": 3,
+            "rule_uris": ["argosy://acme-billing/styleguide/general/invented"],
+        }),
+    )
+    .await;
+    assert!(err.contains("does not resolve"), "{err}");
+
+    // The pre-pass finding's own URI grounds an agent report fine.
+    let reported = call_ok(
+        &client,
+        "report_finding",
+        serde_json::json!({
+            "review_id": review_id,
+            "title": "[P2] Resolve the TODO",
+            "body": "The added TODO defers required error handling; the call panics on empty input.",
+            "priority": "P2",
+            "confidence": 0.9,
+            "path": "src/app.py",
+            "line_start": 3,
+            "line_end": 3,
+            "rule_uris": ["argosy://acme-billing/styleguide/general/no-stale-todos"],
+        }),
+    )
+    .await;
+    assert_eq!(reported["created"], true);
+
+    drop(client);
+    server_task.abort();
+}
+
 /// Option-shaped `base`/`commit` values reach `git diff`/`git show` before
 /// their `--` separator, so the tool must refuse them before git runs.
 #[tokio::test(flavor = "multi_thread")]

@@ -157,7 +157,7 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::review::StartReviewParams>(
             "start_review",
-            "Start an in-process review session over a snapshotted git diff. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Both accept any git revision expression — a SHA, branch, tag, tree, or range like start..end or start...end; values starting with `-` are rejected. Returns a review_id used by review_diff, report_finding, and review_findings, plus changed_files. Sessions are cached in memory under a TTL/LRU bound — an expired id is reported as unknown, so call start_review again. Working-tree mode excludes untracked files; the tool never modifies the repository or opens a network port.",
+            "Start an in-process review session over a snapshotted git diff. To review local tracked changes, set base to the comparison revision (HEAD by default); to review exactly one committed revision, set commit instead (base and commit are mutually exclusive). Both accept any git revision expression — a SHA, branch, tag, tree, or range like start..end or start...end; values starting with `-` are rejected. Returns a review_id used by review_diff, report_finding, and review_findings, plus changed_files. When the project's argosy holds styleguide rules with a `pattern`, a deterministic pre-pass runs over the added lines and records its findings immediately (origin \"pattern\", confidence 1.0) — audit them through review_findings instead of re-reporting. Sessions are cached in memory under a TTL/LRU bound — an expired id is reported as unknown, so call start_review again. Working-tree mode excludes untracked files; the tool never modifies the repository or opens a network port.",
             false,
             false,
         ),
@@ -169,13 +169,13 @@ fn code_tool_definitions() -> Vec<Tool> {
         ),
         tool::<codetools::review::ReportFindingParams>(
             "report_finding",
-            "Record one structured automated finding in the review session created by start_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, the path must be repository-relative, and rule_uris must be qualified argosy:// URIs returned by rule search. Identical retries are deduplicated. The finding becomes visible through review_findings.",
+            "Record one structured automated finding in the review session created by start_review. Report only verified defects: the title must begin with its P0-P3 priority, the body must explain a concrete failure scenario and fix, and the finding is validated against the snapshot — the path must be one of the review's changed files, the line range must fall inside that file's changed hunks, and every rule_uris entry must be a styleguide-rule argosy:// URI that resolves in this project (use the uri of a search_rules hit; report ungrounded findings with an empty rule_uris). Identical retries are deduplicated. The finding becomes visible through review_findings.",
             false,
             false,
         ),
         tool::<codetools::review::ReviewFindingsParams>(
             "review_findings",
-            "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict.",
+            "List the structured automated findings recorded for a review_id, optionally filtered by priority or repository-relative path substring. Findings from the deterministic pattern pre-pass carry origin \"pattern\" (confidence 1.0); agent-reported ones carry origin \"agent\". Use it before finishing a review to audit the finding set, derive accurate priority counts, and avoid dropping or duplicating findings in the final verdict.",
             true,
             false,
         ),

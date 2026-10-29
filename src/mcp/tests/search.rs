@@ -233,6 +233,11 @@ fn search_rules_hits_carry_good_and_bad_sections() {
         .expect("fixture rule is a hit");
     assert_eq!(hit.good.as_deref(), Some("let retry_count = 0;"));
     assert_eq!(hit.bad.as_deref(), Some("let retryCount = 0;"));
+    assert_eq!(
+        hit.priority.as_deref(),
+        Some("error"),
+        "the fixture rule declares priority: error"
+    );
 
     // Plain `search` does not enrich — the examples are the `search_rules` contract.
     let plain = rig
@@ -255,6 +260,10 @@ fn search_rules_hits_carry_good_and_bad_sections() {
         .find(|h| h.concept_id.ends_with("snake-case-vars"))
         .expect("fixture rule is a hit");
     assert!(hit.good.is_none() && hit.bad.is_none());
+    assert!(
+        hit.priority.is_none(),
+        "priority is a search_rules enrichment"
+    );
 }
 
 #[test]

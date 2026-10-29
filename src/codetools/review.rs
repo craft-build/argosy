@@ -3,9 +3,10 @@
 //! `start_review` snapshots the diff; the other tools read that exact
 //! snapshot and attach or retrieve findings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,13 +17,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{CodeToolSnafu, Result, ReviewEncodingSnafu, ReviewIoSnafu};
+use crate::bundle::Namespace;
+use crate::context::{ArgosyRef, ProjectContext, QualifiedConceptId};
+use crate::error::{CodeToolSnafu, Error, Result, ReviewEncodingSnafu, ReviewIoSnafu};
+use crate::trust::{Origin, TrustPolicy};
+
+use super::diffhunks::{self, FileHunks};
 
 const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 /// Default review-session idle TTL.
 const DEFAULT_REVIEW_TTL: Duration = Duration::from_secs(7200);
 /// Default review-session cap.
 const DEFAULT_MAX_REVIEWS: usize = 16;
+/// Pre-pass flood caps: per rule per file, and across one whole review.
+const MAX_PATTERN_FINDINGS_PER_RULE_FILE: usize = 10;
+const MAX_PATTERN_FINDINGS: usize = 200;
+/// Quoted-line cap inside pre-pass finding bodies.
+const MAX_QUOTED_LINE_CHARS: usize = 200;
 static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -98,7 +109,148 @@ pub struct StartReviewOutcome {
     pub commit: Option<String>,
     pub files_changed: usize,
     pub changed_files: Vec<String>,
+    /// The deterministic `pattern` pre-pass; absent when no review
+    /// grounding is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepass: Option<PrepassOutcome>,
 }
+
+/// The deterministic `pattern` pre-pass result of one `start_review`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum PrepassOutcome {
+    /// The pre-pass ran; its findings are recorded with `origin: "pattern"`.
+    Ran {
+        /// Pattern rules that ran over the added lines.
+        rules: usize,
+        /// Pattern rules skipped because their regex failed to compile.
+        invalid_patterns: usize,
+        /// Findings recorded into the session.
+        findings: usize,
+        /// True when flood caps dropped further matches.
+        truncated: bool,
+    },
+    /// Review grounding was configured but could not be opened, so no
+    /// pre-pass ran. Reviews still work; only the deterministic pass and
+    /// rule-URI existence checks are unavailable.
+    Unavailable {
+        /// Why grounding failed, for the caller to relay or ignore.
+        reason: String,
+    },
+}
+
+/// One compiled deterministic check, from a styleguide rule's `pattern`
+/// frontmatter.
+#[derive(Debug, Clone)]
+pub struct PatternRule {
+    /// The rule's qualified `argosy://` URI.
+    pub uri: String,
+    /// Origin argosy manifest name.
+    pub argosy: String,
+    /// `"local"` or `"imported"`.
+    pub kind: &'static str,
+    /// The rule's effective trust tier (provenance-capped for imports).
+    pub trust: String,
+    /// Short label for finding titles: `rule_id` when set, else the
+    /// concept id's last segment.
+    pub label: String,
+    /// The rule's `description`, quoted in finding bodies.
+    pub description: String,
+    /// The rule's `priority` word (`error`/`warn`/`info`), when set.
+    pub priority: Option<String>,
+    /// The compiled `pattern` regex.
+    pub regex: regex::Regex,
+}
+
+/// The review grounding of one project: every styleguide-rule URI, plus the
+/// deterministic subset carrying compiled `pattern` regexes.
+///
+/// Built from a project's argosy set (local plus imports, in precedence
+/// order); [`ReviewRuleSet::from_context`] is the constructor hosts wire
+/// through [`CodeTools::with_review_grounding`](super::CodeTools::with_review_grounding).
+#[derive(Debug, Clone, Default)]
+pub struct ReviewRuleSet {
+    /// Rules carrying a valid `pattern`, in listing (precedence) order.
+    pub rules: Vec<PatternRule>,
+    /// Every styleguide-rule URI across all active argosys — the set a
+    /// finding's `rule_uris` entries must come from.
+    pub rule_uris: HashSet<String>,
+    /// Rules whose `pattern` failed to compile; the pre-pass skips them.
+    pub invalid_patterns: usize,
+}
+
+impl ReviewRuleSet {
+    /// Collects one opened project's grounding from its argosy set.
+    ///
+    /// # Errors
+    ///
+    /// Fails only when the underlying rule listing cannot walk the
+    /// `styleguide/` namespaces (unreadable directories); a rule with an
+    /// invalid `pattern` is counted in
+    /// [`invalid_patterns`](Self::invalid_patterns), never an error.
+    pub fn from_context(context: &ProjectContext, trust: &TrustPolicy) -> Result<Self> {
+        let mut set = Self::default();
+        for listing in context.list_rules(None, None)? {
+            let uri = format!("argosy://{}/{}", listing.argosy, listing.rule.id().as_str());
+            set.rule_uris.insert(uri.clone());
+            let Some(pattern) = listing
+                .rule
+                .pattern()
+                .map(str::trim)
+                .filter(|pattern| !pattern.is_empty())
+            else {
+                continue;
+            };
+            let Ok(regex) = regex::Regex::new(pattern) else {
+                set.invalid_patterns += 1;
+                continue;
+            };
+            let origin = match context.argosy_named(&listing.argosy) {
+                Some(ArgosyRef::Local(_)) => (Origin::Local, "local"),
+                _ => (Origin::Imported, "imported"),
+            };
+            let label = listing
+                .rule
+                .rule_id()
+                .map(str::to_string)
+                .unwrap_or_else(|| tail_segment(listing.rule.id().as_str()));
+            set.rules.push(PatternRule {
+                uri,
+                argosy: listing.argosy.clone(),
+                kind: origin.1,
+                trust: trust.effective_for(origin.0, &listing.argosy, listing.rule.concept()),
+                label,
+                description: listing
+                    .rule
+                    .concept()
+                    .description()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                priority: listing
+                    .rule
+                    .priority()
+                    .map(str::trim)
+                    .filter(|priority| !priority.is_empty())
+                    .map(str::to_string),
+                regex,
+            });
+        }
+        Ok(set)
+    }
+}
+
+/// The last `/`-separated segment of a concept id.
+fn tail_segment(id: &str) -> String {
+    id.rsplit('/').next().unwrap_or(id).to_string()
+}
+
+/// Opens a project's review grounding by project root.
+///
+/// The argosy MCP server installs one over its shared session cache;
+/// returned errors mean "grounding unavailable" and degrade the review
+/// (no pre-pass, no rule-URI existence checks), never fail it.
+pub type ReviewGrounding = Arc<dyn Fn(&Path) -> Result<ReviewRuleSet> + Send + Sync>;
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -107,6 +259,17 @@ pub enum ReviewPriority {
     P1,
     P2,
     P3,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingOrigin {
+    /// Reported through `report_finding` by the reviewing agent.
+    #[default]
+    Agent,
+    /// Emitted by the deterministic `pattern` pre-pass at `start_review`;
+    /// always confidence 1.0 with a rule URI attached.
+    Pattern,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -127,6 +290,10 @@ pub struct ReviewFinding {
     /// report time; it never changes the finding's presence or priority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assessment: Option<FindingAssessment>,
+    /// Who recorded the finding (agent report or deterministic pattern
+    /// match); defaults to `agent` for findings deserialized without one.
+    #[serde(default)]
+    pub origin: FindingOrigin,
 }
 
 /// An advisory assessment of a finding by the decision endpoint; it never
@@ -184,6 +351,10 @@ pub struct ReviewManager {
     /// The process-global decision endpoint, for advisory finding scoring.
     #[cfg(feature = "decision")]
     decision: Option<std::sync::Arc<dyn crate::decision::DecisionProvider>>,
+    /// Optional project-grounding source: compiled rule patterns and the
+    /// valid rule-URI set. `None` disables the pre-pass and rule-URI
+    /// existence checks.
+    grounding: Option<ReviewGrounding>,
 }
 
 impl Default for ReviewManager {
@@ -194,13 +365,19 @@ impl Default for ReviewManager {
             max_sessions: DEFAULT_MAX_REVIEWS,
             #[cfg(feature = "decision")]
             decision: None,
+            grounding: None,
         }
     }
 }
 
 struct Session {
+    /// Repository root — the review-grounding key.
+    root: PathBuf,
     diff: String,
     changed_files: Vec<String>,
+    /// Per-file hunk structure (added lines, new-line ranges), parsed once
+    /// from the immutable snapshot.
+    hunks: HashMap<String, FileHunks>,
     findings: Vec<ReviewFinding>,
     /// Last use.
     touched: Instant,
@@ -289,6 +466,12 @@ impl ReviewManager {
         self.decision = Some(decision);
     }
 
+    /// Installs the project-grounding source (see [`ReviewGrounding`]).
+    pub fn with_grounding(mut self, grounding: ReviewGrounding) -> Self {
+        self.grounding = Some(grounding);
+        self
+    }
+
     fn start(&self, params: StartReviewParams) -> Result<StartReviewOutcome> {
         let root = repository_root(&params.cwd)?;
         if params.base.is_some() && params.commit.is_some() {
@@ -336,6 +519,28 @@ impl ReviewManager {
             .to_string();
         let changed_files = changed_files(&diff);
         let files_changed = changed_files.len();
+        let hunks = diffhunks::parse(&diff);
+        let (prepass, prepass_findings) = match self.grounding.as_ref() {
+            Some(grounding) => match grounding(&root) {
+                Ok(set) => {
+                    let (findings, truncated) = run_prepass(&set, &hunks, &id);
+                    let report = PrepassOutcome::Ran {
+                        rules: set.rules.len(),
+                        invalid_patterns: set.invalid_patterns,
+                        findings: findings.len(),
+                        truncated,
+                    };
+                    (Some(report), findings)
+                }
+                Err(reason) => (
+                    Some(PrepassOutcome::Unavailable {
+                        reason: format!("{reason:#}"),
+                    }),
+                    Vec::new(),
+                ),
+            },
+            None => (None, Vec::new()),
+        };
 
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         Self::purge_expired(&mut sessions, self.ttl);
@@ -343,9 +548,14 @@ impl ReviewManager {
         sessions.insert(
             id.clone(),
             Session {
+                root,
                 diff,
                 changed_files: changed_files.clone(),
-                findings: Vec::new(),
+                hunks: hunks
+                    .into_iter()
+                    .map(|file| (file.path.clone(), file))
+                    .collect(),
+                findings: prepass_findings,
                 touched: Instant::now(),
             },
         );
@@ -359,6 +569,7 @@ impl ReviewManager {
             commit,
             files_changed,
             changed_files,
+            prepass,
         })
     }
 
@@ -390,10 +601,17 @@ impl ReviewManager {
     }
 
     fn report_finding(&self, params: ReportFindingParams) -> Result<ReportFindingOutcome> {
-        let (review_id, mut finding) = validate_finding(params)?;
+        let (review_id, finding) = validate_finding(params)?;
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         Self::purge_expired(&mut sessions, self.ttl);
         let session = Self::touch(&mut sessions, &review_id)?;
+        // Grounding checks before the finding exists: the path and lines
+        // must come from this snapshot, and each rule URI must resolve.
+        // (`validate_rule_uris` may invoke the grounding closure, which
+        // takes the knowledge-session lock; lock order is always reviews →
+        // knowledge, and the knowledge path never takes the reviews lock.)
+        Self::validate_against_snapshot(session, &finding)?;
+        self.validate_rule_uris(&session.root, &finding.rule_uris)?;
         let created = !session
             .findings
             .iter()
@@ -410,15 +628,20 @@ impl ReviewManager {
         // Computed outside the lock (a network call); any failure is silent —
         // scoring never affects whether the finding exists.
         #[cfg(feature = "decision")]
-        if created
+        let assessment = if created
             && let Some(decision) = self.decision.as_ref().filter(|d| d.is_enabled())
             && let Some(assessment) = assess_finding(
                 decision.as_ref(),
                 &finding,
                 hunk.as_deref().unwrap_or_default(),
-            )
-        {
-            finding.assessment = Some(assessment.clone());
+            ) {
+            Some(assessment)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "decision"))]
+        let assessment: Option<FindingAssessment> = None;
+        if let Some(assessment) = &assessment {
             let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(session) = sessions.get_mut(&review_id)
                 && let Some(stored) = session
@@ -426,7 +649,7 @@ impl ReviewManager {
                     .iter_mut()
                     .find(|existing| existing.finding_id == finding.finding_id)
             {
-                stored.assessment = Some(assessment);
+                stored.assessment = Some(assessment.clone());
             }
         }
 
@@ -435,7 +658,7 @@ impl ReviewManager {
             finding_id: finding.finding_id,
             created,
             finding_count,
-            assessment: finding.assessment,
+            assessment,
         })
     }
 
@@ -463,6 +686,108 @@ impl ReviewManager {
             review_id: params.review_id,
             findings,
         })
+    }
+
+    /// A finding must sit inside the snapshot it is reported against: its
+    /// path must be a changed file, and its line range inside one hunk's
+    /// new-file line range, so no invented file or line survives.
+    fn validate_against_snapshot(session: &Session, finding: &ReviewFinding) -> Result<()> {
+        if !session
+            .changed_files
+            .iter()
+            .any(|path| path == &finding.path)
+        {
+            return CodeToolSnafu {
+                message: format!(
+                    "path `{}` is not in this review snapshot; call review_diff without path \
+                     to list the changed files",
+                    finding.path
+                ),
+            }
+            .fail();
+        }
+        let Some(file) = session.hunks.get(&finding.path) else {
+            return CodeToolSnafu {
+                message: format!(
+                    "no diff hunks for `{}` in this snapshot; findings must point at changed \
+                     lines",
+                    finding.path
+                ),
+            }
+            .fail();
+        };
+        let covered = file
+            .new_ranges
+            .iter()
+            .any(|&(start, end)| finding.line_start >= start && finding.line_end <= end);
+        if !covered {
+            let ranges = if file.new_ranges.is_empty() {
+                "none — the file has only removed lines".to_string()
+            } else {
+                file.new_ranges
+                    .iter()
+                    .map(|&(start, end)| format!("{start}-{end}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return CodeToolSnafu {
+                message: format!(
+                    "line range {}-{} of `{}` lies outside the snapshot's changed hunks \
+                     (new-file line ranges: {ranges}); point the finding at lines the diff \
+                     actually covers",
+                    finding.line_start, finding.line_end, finding.path
+                ),
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
+    /// Every `rule_uris` entry must parse as a styleguide-rule URI and,
+    /// when grounding is available, resolve to a rule in this project's
+    /// argosys — so findings cannot cite invented rules.
+    fn validate_rule_uris(&self, root: &Path, uris: &[String]) -> Result<()> {
+        if uris.is_empty() {
+            return Ok(());
+        }
+        // Grounding is optional: without it (or when the project has no
+        // argosy) existence cannot be checked, but syntax and namespace
+        // still can.
+        let set = self
+            .grounding
+            .as_ref()
+            .and_then(|grounding| grounding(root).ok());
+        for uri in uris {
+            let qid = QualifiedConceptId::from_uri(uri).map_err(|err| Error::CodeTool {
+                message: format!(
+                    "invalid rule_uris entry `{uri}`: {err:#}; use a uri returned by \
+                     search_rules",
+                ),
+            })?;
+            if qid.namespace != Namespace::Styleguide {
+                return CodeToolSnafu {
+                    message: format!(
+                        "rule_uris entry `{uri}` is not a styleguide rule; ground findings \
+                         in rules returned by search_rules, or report the finding ungrounded \
+                         with an empty rule_uris",
+                    ),
+                }
+                .fail();
+            }
+            if let Some(set) = &set
+                && !set.rule_uris.contains(uri)
+            {
+                return CodeToolSnafu {
+                    message: format!(
+                        "rule_uris entry `{uri}` does not resolve to a styleguide rule in \
+                         this project's argosys; use a uri returned by search_rules (call \
+                         start_review again if the book changed since this review started)",
+                    ),
+                }
+                .fail();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -592,48 +917,59 @@ fn validate_finding(params: ReportFindingParams) -> Result<(String, ReviewFindin
         .fail();
     }
 
+    let mut finding = ReviewFinding {
+        finding_id: String::new(),
+        title: title.to_string(),
+        body: body.to_string(),
+        priority: params.priority,
+        confidence: params.confidence,
+        path: path.to_string(),
+        line_start: params.line_start,
+        line_end: params.line_end,
+        rule_uris: params.rule_uris,
+        suggestion,
+        assessment: None,
+        origin: FindingOrigin::Agent,
+    };
+    let review_id = params.review_id;
+    finding.finding_id = finding_id(&review_id, &finding);
+    Ok((review_id, finding))
+}
+
+/// The deduplication key of one finding within its review: every field,
+/// plus the origin, so an agent re-report of a pattern finding stays
+/// distinct (and vice versa).
+fn finding_id(review_id: &str, finding: &ReviewFinding) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(match finding.origin {
+        FindingOrigin::Agent => &b"agent"[..],
+        FindingOrigin::Pattern => &b"pattern"[..],
+    });
+    hasher.update([0]);
     for value in [
-        params.review_id.as_str(),
-        title,
-        body,
-        params.priority.as_str(),
-        path,
-        &params.line_start.to_string(),
-        &params.line_end.to_string(),
-        &params.confidence.to_bits().to_string(),
+        review_id,
+        &finding.title,
+        &finding.body,
+        finding.priority.as_str(),
+        &finding.path,
+        &finding.line_start.to_string(),
+        &finding.line_end.to_string(),
+        &finding.confidence.to_bits().to_string(),
     ] {
         hasher.update(value.as_bytes());
         hasher.update([0]);
     }
-    for uri in &params.rule_uris {
+    for uri in &finding.rule_uris {
         hasher.update(uri.as_bytes());
         hasher.update([0]);
     }
-    if let Some(value) = &suggestion {
+    if let Some(value) = &finding.suggestion {
         hasher.update(value.as_bytes());
     }
-    let finding_id: String = hasher.finalize()[..12]
+    hasher.finalize()[..12]
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect();
-
-    Ok((
-        params.review_id,
-        ReviewFinding {
-            finding_id,
-            title: title.to_string(),
-            body: body.to_string(),
-            priority: params.priority,
-            confidence: params.confidence,
-            path: path.to_string(),
-            line_start: params.line_start,
-            line_end: params.line_end,
-            rule_uris: params.rule_uris,
-            suggestion,
-            assessment: None,
-        },
-    ))
+        .collect()
 }
 
 impl ReviewPriority {
@@ -644,6 +980,114 @@ impl ReviewPriority {
             Self::P2 => "P2",
             Self::P3 => "P3",
         }
+    }
+}
+
+/// A rule `priority` word mapped onto a finding priority: `error` → P1,
+/// `warn` (and absent/unknown) → P2, `info` → P3. A line-level regex can
+/// establish a style violation, never the security or data-loss case P0
+/// is reserved for.
+fn pattern_priority(priority: Option<&str>) -> ReviewPriority {
+    match priority {
+        Some("error") => ReviewPriority::P1,
+        Some("info") => ReviewPriority::P3,
+        _ => ReviewPriority::P2,
+    }
+}
+
+/// Runs the compiled rule patterns over each file's added lines, grouping
+/// consecutive matched lines into one finding per run. Returns the findings
+/// and whether flood caps truncated the set.
+fn run_prepass(
+    set: &ReviewRuleSet,
+    hunks: &[FileHunks],
+    review_id: &str,
+) -> (Vec<ReviewFinding>, bool) {
+    let mut findings = Vec::new();
+    let mut truncated = false;
+    'rules: for rule in &set.rules {
+        for file in hunks {
+            let matched: Vec<(u32, String)> = file
+                .added
+                .iter()
+                .filter(|(_, text)| rule.regex.is_match(text))
+                .cloned()
+                .collect();
+            // Contiguous line numbers collapse into one run (one finding).
+            let mut runs: Vec<&[(u32, String)]> = Vec::new();
+            let mut start = 0;
+            for index in 1..=matched.len() {
+                if index == matched.len() || matched[index].0 != matched[index - 1].0 + 1 {
+                    runs.push(&matched[start..index]);
+                    start = index;
+                }
+            }
+            for (recorded, run) in runs.into_iter().enumerate() {
+                if findings.len() >= MAX_PATTERN_FINDINGS {
+                    truncated = true;
+                    break 'rules;
+                }
+                if recorded >= MAX_PATTERN_FINDINGS_PER_RULE_FILE {
+                    truncated = true;
+                    break;
+                }
+                findings.push(pattern_finding(rule, &file.path, run, review_id));
+            }
+        }
+    }
+    (findings, truncated)
+}
+
+/// One grouped pattern-match run as a recorded finding: deterministic, so
+/// confidence is 1.0 and the rule URI is always attached.
+fn pattern_finding(
+    rule: &PatternRule,
+    path: &str,
+    run: &[(u32, String)],
+    review_id: &str,
+) -> ReviewFinding {
+    let priority = pattern_priority(rule.priority.as_deref());
+    let quoted: String = run
+        .iter()
+        .map(|(no, text)| format!("  {no}: {}\n", cap_line(text, MAX_QUOTED_LINE_CHARS)))
+        .collect();
+    let mut finding = ReviewFinding {
+        finding_id: String::new(),
+        title: format!(
+            "[{}] `{}` pattern match in `{}`",
+            priority.as_str(),
+            rule.label,
+            path
+        ),
+        body: format!(
+            "Deterministic match of styleguide rule {} (argosy `{}`, {}, trust `{}`).\n\n{}\n\n\
+             Matched added lines:\n{}The `pattern` is line-level: read the surrounding code \
+             and the rule's Good/Bad examples before acting; a matching line is not always a \
+             violation.",
+            rule.uri, rule.argosy, rule.kind, rule.trust, rule.description, quoted
+        ),
+        priority,
+        confidence: 1.0,
+        path: path.to_string(),
+        line_start: run.first().map(|(no, _)| *no).unwrap_or(1),
+        line_end: run.last().map(|(no, _)| *no).unwrap_or(1),
+        rule_uris: vec![rule.uri.clone()],
+        suggestion: None,
+        assessment: None,
+        origin: FindingOrigin::Pattern,
+    };
+    finding.finding_id = finding_id(review_id, &finding);
+    finding
+}
+
+/// `text` shortened to `max` characters plus an ellipsis.
+fn cap_line(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut cut: String = text.chars().take(max - 1).collect();
+        cut.push('…');
+        cut
     }
 }
 
@@ -881,7 +1325,9 @@ fn review_id() -> String {
 }
 
 fn changed_files(diff: &str) -> Vec<String> {
-    diff.lines().filter_map(diff_header_path).collect()
+    diff.lines()
+        .filter_map(diffhunks::diff_header_path)
+        .collect()
 }
 
 fn diff_for_file(diff: &str, wanted: &str) -> Option<String> {
@@ -892,7 +1338,7 @@ fn diff_for_file(diff: &str, wanted: &str) -> Option<String> {
             if selected {
                 break;
             }
-            selected = diff_header_path(line).as_deref() == Some(wanted);
+            selected = diffhunks::diff_header_path(line).as_deref() == Some(wanted);
         }
         if selected {
             out.push_str(line);
@@ -900,12 +1346,6 @@ fn diff_for_file(diff: &str, wanted: &str) -> Option<String> {
         }
     }
     (!out.is_empty()).then_some(out)
-}
-
-fn diff_header_path(line: &str) -> Option<String> {
-    line.strip_prefix("diff --git ")?
-        .rsplit_once(" b/")
-        .map(|(_, value)| value.trim_end_matches('"').to_string())
 }
 
 #[cfg(test)]
@@ -1462,11 +1902,407 @@ mod tests {
         assert_eq!(findings.findings.len(), 1);
     }
 
+    /// A one-rule grounding set: `uris` are the resolvable rule URIs.
+    fn rule_set(rules: Vec<PatternRule>, uris: &[&str]) -> ReviewRuleSet {
+        ReviewRuleSet {
+            rules,
+            rule_uris: uris.iter().map(|uri| uri.to_string()).collect(),
+            invalid_patterns: 0,
+        }
+    }
+
+    fn pattern_rule(uri: &str, pattern: &str, priority: Option<&str>) -> PatternRule {
+        PatternRule {
+            uri: uri.to_string(),
+            argosy: "test-book".to_string(),
+            kind: "local",
+            trust: "unverified".to_string(),
+            label: "no-forbidden-token".to_string(),
+            description: "Never write the forbidden token.".to_string(),
+            priority: priority.map(str::to_string),
+            regex: regex::Regex::new(pattern).unwrap(),
+        }
+    }
+
+    fn grounded_tools(set: ReviewRuleSet) -> super::super::CodeTools {
+        super::super::CodeTools::default()
+            .with_review_grounding(Arc::new(move |_root| Ok(set.clone())))
+    }
+
+    #[test]
+    fn prepass_records_grouped_pattern_findings() {
+        // Three consecutive added lines matching one rule → one grouped finding.
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        std::fs::write(repo.path().join("notes.txt"), "clean\n").unwrap();
+        git(repo.path(), &["add", "notes.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        std::fs::write(
+            repo.path().join("notes.txt"),
+            "clean\nTODO a\nTODO b\nTODO c\n",
+        )
+        .unwrap();
+
+        let uri = "argosy://test-book/styleguide/no-todos";
+        let tools = grounded_tools(rule_set(
+            vec![pattern_rule(uri, r"\bTODO\b", Some("error"))],
+            &[uri],
+        ));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            opened.prepass,
+            Some(PrepassOutcome::Ran {
+                rules: 1,
+                invalid_patterns: 0,
+                findings: 1,
+                truncated: false,
+            }),
+            "three consecutive matches group into one finding"
+        );
+        let findings = review_findings(
+            &tools,
+            ReviewFindingsParams {
+                review_id: opened.review_id,
+                priority: None,
+                path_contains: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(findings.findings.len(), 1);
+        let finding = &findings.findings[0];
+        assert_eq!(finding.origin, FindingOrigin::Pattern);
+        assert_eq!(finding.priority, ReviewPriority::P1, "error → P1");
+        assert_eq!(finding.path, "notes.txt");
+        assert_eq!((finding.line_start, finding.line_end), (2, 4));
+        assert_eq!(finding.confidence, 1.0);
+        assert_eq!(finding.rule_uris, vec![uri.to_string()]);
+        assert!(
+            finding.title.starts_with("[P1] "),
+            "pattern findings follow the title convention: {}",
+            finding.title
+        );
+    }
+
+    #[test]
+    fn pattern_priority_words_map_onto_finding_priorities() {
+        assert_eq!(pattern_priority(Some("error")), ReviewPriority::P1);
+        assert_eq!(pattern_priority(Some("warn")), ReviewPriority::P2);
+        assert_eq!(pattern_priority(Some("info")), ReviewPriority::P3);
+        assert_eq!(pattern_priority(None), ReviewPriority::P2);
+        // P0 stays reserved for the security/data-loss case a line regex
+        // cannot establish, and unknown words read as warn.
+        assert_eq!(pattern_priority(Some("banana")), ReviewPriority::P2);
+    }
+
+    #[test]
+    fn prepass_caps_floods_and_reports_truncation() {
+        // 12 separated matching lines exceed the per-rule-per-file cap of 10.
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        std::fs::write(repo.path().join("flood.txt"), "seed\n").unwrap();
+        git(repo.path(), &["add", "flood.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        // Matches on every other line: 12 runs, none consecutive.
+        let after: String = (0..12).map(|n| format!("TODO {n}\nplain {n}\n")).collect();
+        std::fs::write(repo.path().join("flood.txt"), after).unwrap();
+
+        let uri = "argosy://test-book/styleguide/no-todos";
+        let tools = grounded_tools(rule_set(vec![pattern_rule(uri, r"\bTODO\b", None)], &[uri]));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        match opened.prepass {
+            Some(PrepassOutcome::Ran {
+                findings,
+                truncated,
+                ..
+            }) => {
+                assert_eq!(findings, 10, "the per-rule-per-file cap");
+                assert!(truncated);
+            }
+            other => panic!("expected a truncated run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepass_reports_unavailable_grounding_but_still_opens_the_review() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default().with_review_grounding(Arc::new(|_root| {
+            Err(Error::Validation {
+                reason: "no argosy for this project".into(),
+            })
+        }));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        match opened.prepass {
+            Some(PrepassOutcome::Unavailable { reason }) => {
+                assert!(reason.contains("no argosy"), "got: {reason}");
+            }
+            other => panic!("expected unavailable grounding, got {other:?}"),
+        }
+        // The session still works for manual review.
+        review_diff(
+            &tools,
+            ReviewDiffParams {
+                review_id: opened.review_id,
+                path: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn agent_finding(
+        opened: &StartReviewOutcome,
+        path: &str,
+        lines: (u32, u32),
+    ) -> ReportFindingParams {
+        ReportFindingParams {
+            review_id: opened.review_id.clone(),
+            title: "[P1] Keep the original greeting".into(),
+            body: "When callers expect `before`, returning `after` changes the contract.".into(),
+            priority: ReviewPriority::P1,
+            confidence: 0.95,
+            path: path.into(),
+            line_start: lines.0,
+            line_end: lines.1,
+            rule_uris: Vec::new(),
+            suggestion: None,
+        }
+    }
+
+    #[test]
+    fn report_finding_rejects_paths_outside_the_snapshot() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let err =
+            report_finding(&tools, agent_finding(&opened, "invented.txt", (1, 1))).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not in this review snapshot"), "{message}");
+        assert!(
+            message.contains("review_diff without path"),
+            "the error must say how to list valid paths: {message}"
+        );
+    }
+
+    #[test]
+    fn report_finding_rejects_lines_outside_the_changed_hunks() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        // Six lines; only the last changes, so the hunk (with its three
+        // context lines) covers new-file lines 3-6 — line 1 is untouched.
+        std::fs::write(repo.path().join("hello.txt"), "a\nb\nc\nd\ne\nf\n").unwrap();
+        git(repo.path(), &["add", "hello.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        std::fs::write(repo.path().join("hello.txt"), "a\nb\nc\nd\ne\ng\n").unwrap();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        // Line 1 exists in the file but no hunk covers it.
+        let err = report_finding(&tools, agent_finding(&opened, "hello.txt", (1, 1))).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("outside the snapshot's changed hunks"),
+            "{message}"
+        );
+        assert!(message.contains("3-6"), "names the valid range: {message}");
+    }
+
+    #[test]
+    fn report_finding_rejects_invented_rule_uris_when_grounding_resolves() {
+        let repo = review_repo();
+        let uri = "argosy://test-book/styleguide/real-rule";
+        let tools = grounded_tools(rule_set(Vec::new(), &[uri]));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+        params.rule_uris = vec!["argosy://test-book/styleguide/invented-rule".into()];
+        let err = report_finding(&tools, params).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("does not resolve"), "{message}");
+        assert!(
+            message.contains("search_rules"),
+            "the error points at the grounded source: {message}"
+        );
+    }
+
+    #[test]
+    fn report_finding_rejects_non_styleguide_and_malformed_rule_uris_without_grounding() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        for uri in [
+            // A document URI is well-formed but not a rule.
+            "argosy://book/document/architecture",
+            // Non-canonical spelling is rejected by the URI grammar.
+            "argosy://book/styleguide/rule.md",
+        ] {
+            let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+            params.rule_uris = vec![uri.into()];
+            let err = report_finding(&tools, params).unwrap_err();
+            assert!(
+                err.to_string().contains(uri),
+                "the error names the offending uri: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn report_finding_accepts_snapshot_grounded_findings() {
+        let repo = review_repo();
+        let uri = "argosy://test-book/styleguide/greeting-contract";
+        let tools = grounded_tools(rule_set(Vec::new(), &[uri]));
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+        let mut params = agent_finding(&opened, "hello.txt", (1, 1));
+        params.rule_uris = vec![uri.into()];
+        let outcome = report_finding(&tools, params).unwrap();
+        assert!(outcome.created);
+    }
+
+    #[test]
+    fn rule_set_collects_compiles_and_caps_trust() {
+        use crate::bundle::Namespace;
+        use crate::context::ProjectContext;
+        use crate::trust::TrustPolicy;
+
+        let write_rule = |root: &Path, id: &str, frontmatter: &str| {
+            let argosy = crate::local::LocalArgosy::open(root).unwrap();
+            let concept: crate::concept::Concept =
+                format!("---\ntype: Styleguide Rule\ndescription: d\n{frontmatter}---\nbody\n")
+                    .parse()
+                    .unwrap();
+            argosy
+                .write_concept(Namespace::Styleguide, &id.parse().unwrap(), &concept)
+                .unwrap();
+        };
+
+        // Local book: a valid pattern with a priority and a verbatim tier, a
+        // broken pattern, and a plain rule.
+        let local = tempfile::tempdir().unwrap();
+        crate::local::LocalArgosy::init(local.path(), Some("local-book"), None).unwrap();
+        write_rule(
+            local.path(),
+            "styleguide/rust/no-todo",
+            "pattern: \"\\\\bTODO\\\\b\"\npriority: error\nverified: human-reviewed\n",
+        );
+        write_rule(
+            local.path(),
+            "styleguide/rust/broken",
+            "pattern: \"(unclosed\"\n",
+        );
+        write_rule(local.path(), "styleguide/rust/plain", "");
+
+        // Imported book: a pattern rule claiming a tier it is not capped for.
+        let imported = tempfile::tempdir().unwrap();
+        crate::local::LocalArgosy::init(imported.path(), Some("imported-book"), None).unwrap();
+        write_rule(
+            imported.path(),
+            "styleguide/rust/imported-rule",
+            "pattern: \"dbg!\"\nverified: human-reviewed\n",
+        );
+
+        let context =
+            ProjectContext::open(local.path(), vec![imported.path().to_path_buf()]).unwrap();
+        let set = ReviewRuleSet::from_context(&context, &TrustPolicy::new()).unwrap();
+        assert_eq!(set.rules.len(), 2, "valid patterns only");
+        assert_eq!(set.invalid_patterns, 1, "the broken regex is counted");
+        assert_eq!(
+            set.rule_uris.len(),
+            4,
+            "every rule is addressable, pattern or not"
+        );
+
+        let no_todo = set
+            .rules
+            .iter()
+            .find(|rule| rule.label == "no-todo")
+            .expect("rule_id sets the label");
+        assert_eq!(no_todo.kind, "local");
+        assert_eq!(no_todo.trust, "human-reviewed", "local claims relay");
+        assert_eq!(no_todo.priority.as_deref(), Some("error"));
+
+        let imported_rule = set
+            .rules
+            .iter()
+            .find(|rule| rule.label == "imported-rule")
+            .expect("unqualified labels fall back to the id tail");
+        assert_eq!(imported_rule.kind, "imported");
+        assert_eq!(
+            imported_rule.trust, "unverified",
+            "an uncapped import never keeps its self-claimed tier"
+        );
+    }
+
     #[cfg(feature = "decision")]
     struct FakeDecision {
         answers: serde_json::Value,
     }
-
     #[cfg(feature = "decision")]
     impl crate::decision::DecisionProvider for FakeDecision {
         fn is_enabled(&self) -> bool {
@@ -1494,6 +2330,7 @@ mod tests {
             rule_uris: Vec::new(),
             suggestion: None,
             assessment: None,
+            origin: FindingOrigin::Agent,
         }
     }
 

@@ -3,6 +3,7 @@ type: Styleguide Rule
 description: Local variables in Rust use snake_case, never camelCase.
 language: rust
 category: naming
+priority: error
 ---
 # Snake-case Variables
 

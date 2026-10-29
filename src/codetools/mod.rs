@@ -8,6 +8,7 @@
 pub mod astgrep;
 pub mod callgraph;
 pub mod conflicts;
+mod diffhunks;
 mod file_tracker;
 pub mod inspect;
 pub mod outline;
@@ -96,6 +97,16 @@ impl CodeTools {
     /// Bounds the review-session cache.
     pub fn with_review_limits(mut self, ttl: std::time::Duration, max_sessions: usize) -> Self {
         self.reviews = self.reviews.with_limits(ttl, max_sessions);
+        self
+    }
+
+    /// Installs the project-grounding source for review sessions (see
+    /// [`review::ReviewGrounding`]): compiled styleguide `pattern` rules
+    /// for `start_review`'s deterministic pre-pass, and the valid
+    /// `rule_uris` set for `report_finding` grounding checks. Without one,
+    /// reviews run without the pre-pass and skip rule-URI existence checks.
+    pub fn with_review_grounding(mut self, grounding: review::ReviewGrounding) -> Self {
+        self.reviews = self.reviews.with_grounding(grounding);
         self
     }
 
