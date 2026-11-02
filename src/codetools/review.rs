@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,13 +48,21 @@ pub struct StartReviewParams {
     pub cwd: PathBuf,
     /// Git revision or range to compare the working tree against (default `HEAD`).
     ///
-    /// Mutually exclusive with `commit`; values starting with `-` are rejected.
+    /// The literal `"empty"` selects the repository's empty tree, so every
+    /// tracked line appears as added — combine with `paths` to review the
+    /// current state of an area as a whole rather than a diff. Mutually
+    /// exclusive with `commit`; values starting with `-` are rejected.
     pub base: Option<String>,
     /// Committed revision or commit range to review instead of the working tree.
     ///
     /// Values starting with `-` are rejected; merge commits compare with their
     /// first parent.
     pub commit: Option<String>,
+    /// Repository-relative paths (files or directories) bounding the
+    /// snapshot, passed to git as pathspecs after `--`. Values starting
+    /// with `-` or `:` (pathspec magic) are rejected. Omit to snapshot the
+    /// full diff.
+    pub paths: Option<Vec<String>>,
 }
 
 #[cfg_attr(feature = "mcp", derive(rmcp::schemars::JsonSchema))]
@@ -535,16 +543,26 @@ impl ReviewManager {
             }
             .fail();
         }
+        let paths = validated_paths(params.paths.as_deref())?;
         let (diff, comparison, base, commit) = if let Some(commit) = params.commit {
             let resolved = resolve_revision(&root, &commit, "commit")?;
-            let diff = git_commit_diff(&root, &resolved)?;
+            let diff = git_commit_diff(&root, &resolved, &paths)?;
             let comparison = format!("Commit {commit} against its first parent");
             (diff, comparison, None, Some(commit))
         } else {
             let base = params.base.unwrap_or_else(|| "HEAD".to_string());
-            let resolved = resolve_revision(&root, &base, "base")?;
-            let diff = git_diff(&root, &resolved)?;
-            let comparison = format!("Working tree compared with {base}");
+            let whole = base.trim() == "empty";
+            let resolved = if whole {
+                resolve_empty_tree(&root)?
+            } else {
+                resolve_revision(&root, &base, "base")?
+            };
+            let diff = git_diff(&root, &resolved, &paths)?;
+            let comparison = if whole {
+                "Whole working tree compared with the empty tree".to_string()
+            } else {
+                format!("Working tree compared with {base}")
+            };
             (diff, comparison, Some(base), None)
         };
         if diff.trim().is_empty() {
@@ -1366,19 +1384,68 @@ fn is_object_sha(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn git_diff(root: &Path, base: &str) -> Result<String> {
+/// Materializes the repository's empty tree — `git diff` must read the
+/// object, so `--verify` alone is not enough — and returns its id. The
+/// write is one unreferenced, content-addressed object; refs and the
+/// working tree are untouched.
+fn resolve_empty_tree(root: &Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args([
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            "--find-renames",
-            base,
-            "--",
-        ])
+        .args(["hash-object", "-t", "tree", "-w", "--stdin"])
+        .stdin(Stdio::null())
         .output()
+        .context(ReviewIoSnafu {
+            operation: "materializing the empty tree".to_string(),
+        })?;
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || !is_object_sha(&sha) {
+        return CodeToolSnafu {
+            message: format!(
+                "git refused the empty tree object: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+        .fail();
+    }
+    Ok(sha)
+}
+
+/// Screens caller-supplied pathspecs. After `--` no value can reach git's
+/// option parser, but `:` still arms pathspec magic, and `-`/empty values
+/// are only ever mistakes.
+fn validated_paths(paths: Option<&[String]>) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for path in paths.unwrap_or(&[]) {
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if path.starts_with('-') || path.starts_with(':') {
+            return CodeToolSnafu {
+                message: format!(
+                    "invalid path `{path}`: pass a repository-relative file or directory, not pathspec magic or an option"
+                ),
+            }
+            .fail();
+        }
+        out.push(path.to_string());
+    }
+    Ok(out)
+}
+
+fn git_diff(root: &Path, base: &str, paths: &[String]) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args([
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--find-renames",
+        base,
+        "--",
+    ]);
+    command.args(paths);
+    let output = command.output()
         .context(ReviewIoSnafu {
             operation: format!("generating the working-tree diff from `{base}`"),
         })?;
@@ -1396,22 +1463,21 @@ fn git_diff(root: &Path, base: &str) -> Result<String> {
     })
 }
 
-fn git_commit_diff(root: &Path, commit: &str) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "show",
-            "--format=",
-            "--first-parent",
-            "--root",
-            "--no-ext-diff",
-            "--no-color",
-            "--find-renames",
-            commit,
-            "--",
-        ])
-        .output()
+fn git_commit_diff(root: &Path, commit: &str, paths: &[String]) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args([
+        "show",
+        "--format=",
+        "--first-parent",
+        "--root",
+        "--no-ext-diff",
+        "--no-color",
+        "--find-renames",
+        commit,
+        "--",
+    ]);
+    command.args(paths);
+    let output = command.output()
         .context(ReviewIoSnafu {
             operation: format!("generating the diff for commit `{commit}`"),
         })?;
@@ -1506,7 +1572,7 @@ mod tests {
         std::fs::write(repo.path().join("value.txt"), "three\n").unwrap();
         git(repo.path(), &["commit", "--quiet", "-am", "three"]);
 
-        let diff = git_commit_diff(repo.path(), selected).unwrap();
+        let diff = git_commit_diff(repo.path(), selected, &[]).unwrap();
         assert!(diff.contains("+two"));
         assert!(diff.contains("-one"));
         assert!(!diff.contains("three"));
@@ -1536,6 +1602,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some(format!("--output={}", target.display())),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap_err();
@@ -1558,6 +1625,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: Some(format!("-o{}", target.display())),
+                paths: None,
             },
         )
         .unwrap_err();
@@ -1579,6 +1647,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("does-not-exist".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap_err();
@@ -1588,6 +1657,93 @@ mod tests {
             "got: {message}"
         );
         assert!(message.contains("does-not-exist"), "got: {message}");
+    }
+
+    /// Two tracked files, both modified: `paths` bounds the snapshot.
+    fn two_file_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.email", "review@example.com"]);
+        git(repo.path(), &["config", "user.name", "Review Test"]);
+        std::fs::create_dir(repo.path().join("sub")).unwrap();
+        std::fs::write(repo.path().join("one.txt"), "one\n").unwrap();
+        std::fs::write(repo.path().join("sub").join("two.txt"), "two\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "--quiet", "-m", "initial"]);
+        std::fs::write(repo.path().join("one.txt"), "one changed\n").unwrap();
+        std::fs::write(repo.path().join("sub").join("two.txt"), "two changed\n").unwrap();
+        repo
+    }
+
+    #[test]
+    fn paths_bound_the_snapshot() {
+        let repo = two_file_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+                paths: Some(vec!["sub".into()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.changed_files, vec!["sub/two.txt"]);
+    }
+
+    #[test]
+    fn pathspec_magic_is_rejected() {
+        let repo = review_repo();
+        let tools = super::super::CodeTools::default();
+        let err = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: None,
+                commit: None,
+                paths: Some(vec![":(exclude)hello.txt".into()]),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("pathspec magic"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_base_reviews_whole_current_state() {
+        let repo = two_file_repo();
+        let tools = super::super::CodeTools::default();
+        let opened = start_review(
+            &tools,
+            StartReviewParams {
+                cwd: repo.path().to_path_buf(),
+                base: Some("empty".into()),
+                commit: None,
+                paths: Some(vec!["sub".into()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.changed_files, vec!["sub/two.txt"]);
+        assert!(opened.comparison.contains("empty tree"));
+        // Every committed line is an added line: a finding on line 1 validates.
+        let reported = report_finding(
+            &tools,
+            ReportFindingParams {
+                review_id: opened.review_id,
+                title: "[P1] whole-file finding".into(),
+                body: "line one is in scope in a whole-state review".into(),
+                priority: ReviewPriority::P1,
+                confidence: 0.9,
+                path: "sub/two.txt".into(),
+                line_start: 1,
+                line_end: 1,
+                rule_uris: Vec::new(),
+                suggestion: None,
+                edits: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reported.finding_count, 1);
     }
 
     #[test]
@@ -1602,6 +1758,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1635,6 +1792,7 @@ mod tests {
                     cwd: repo.path().to_path_buf(),
                     base: None,
                     commit: None,
+                    paths: None,
                 },
             )
             .unwrap()
@@ -1676,6 +1834,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1718,6 +1877,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("first".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1742,6 +1902,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: Some("second".into()),
+                paths: None,
             },
         )
         .unwrap();
@@ -1773,6 +1934,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("HEAD~1..HEAD".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1815,6 +1977,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("side..HEAD".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1851,6 +2014,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("side...HEAD".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1877,6 +2041,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: Some("HEAD^{tree}".into()),
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -1911,6 +2076,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: Some("HEAD~2..HEAD".into()),
+                paths: None,
             },
         )
         .unwrap();
@@ -1966,6 +2132,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2083,6 +2250,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2154,6 +2322,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2184,6 +2353,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2234,6 +2404,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2266,6 +2437,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2290,6 +2462,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2314,6 +2487,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2345,6 +2519,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2364,6 +2539,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2391,6 +2567,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2423,6 +2600,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2459,6 +2637,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -2689,6 +2868,7 @@ mod tests {
                 cwd: repo.path().to_path_buf(),
                 base: None,
                 commit: None,
+                paths: None,
             },
         )
         .unwrap();
