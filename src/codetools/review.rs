@@ -1445,10 +1445,9 @@ fn git_diff(root: &Path, base: &str, paths: &[String]) -> Result<String> {
         "--",
     ]);
     command.args(paths);
-    let output = command.output()
-        .context(ReviewIoSnafu {
-            operation: format!("generating the working-tree diff from `{base}`"),
-        })?;
+    let output = command.output().context(ReviewIoSnafu {
+        operation: format!("generating the working-tree diff from `{base}`"),
+    })?;
     if !output.status.success() {
         return CodeToolSnafu {
             message: format!(
@@ -1477,10 +1476,9 @@ fn git_commit_diff(root: &Path, commit: &str, paths: &[String]) -> Result<String
         "--",
     ]);
     command.args(paths);
-    let output = command.output()
-        .context(ReviewIoSnafu {
-            operation: format!("generating the diff for commit `{commit}`"),
-        })?;
+    let output = command.output().context(ReviewIoSnafu {
+        operation: format!("generating the diff for commit `{commit}`"),
+    })?;
     if !output.status.success() {
         return CodeToolSnafu {
             message: format!(
