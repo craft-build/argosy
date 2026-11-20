@@ -52,7 +52,7 @@ reqwest = {
   optional = true
 }
 rmcp = {
-  version = "3.8",
+  version = "3.11",
   default-features = false,
   features = [
     "server",
@@ -60,7 +60,7 @@ rmcp = {
   ],
   optional = true
 }
-rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+rusqlite = { version = "0.43", features = ["bundled"], optional = true }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -97,7 +97,7 @@ tract-linalg = { version = "0.23", optional = true, features = [
 tree-sitter = { version = "0.27", optional = true }
 tree-sitter-bash = { version = "0.25", optional = true }
 tree-sitter-c = { version = "0.24", optional = true }
-tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.24", optional = true }
 tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-css = { version = "0.25", optional = true }
 tree-sitter-dart = { version = "0.3", optional = true }
@@ -128,7 +128,7 @@ tree-sitter-toml-ng = { version = "0.7", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-yaml = { version = "0.7", optional = true }
 tree-sitter-zig = { version = "1.1", optional = true }
-tree-sitter-zsh = { version = "0.63", optional = true }
+tree-sitter-zsh = { version = "0.64", optional = true }
 yaml_serde = "0.10"
 
 [dev-dependencies]
