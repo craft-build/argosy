@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3](https://github.com/craft-build/argosy/compare/v0.8.2...v0.8.3) - 2026-11-20
+
+### Other
+
+- *(deps)* update dependencies
+
 ## [0.8.2](https://github.com/craft-build/argosy/compare/v0.8.1...v0.8.2) - 2026-11-09
 
 ### Other
